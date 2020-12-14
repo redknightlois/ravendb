@@ -53,7 +53,7 @@ namespace Raven.Server.Indexing
                 if (options.Encryption.IsEnabled)
                     return new TempCryptoStream(_fileTempPath);
 
-                return SafeFileStream.Create(_fileTempPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.ReadWrite, 4096, FileOptions.DeleteOnClose);
+                return SafeFileStream.Create(_fileTempPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.ReadWrite, Voron.Global.Constants.Size.Megabyte, FileOptions.DeleteOnClose);
             }
             catch (IOException ioe) when (ioe.IsOutOfDiskSpaceException())
             {

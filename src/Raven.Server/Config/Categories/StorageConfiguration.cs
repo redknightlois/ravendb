@@ -40,7 +40,7 @@ namespace Raven.Server.Config.Categories
         public int MaxConcurrentFlushes { get; set; }
 
         [Description("Time to sync after flash in seconds")]
-        [DefaultValue(30)]
+        [DefaultValue(120)]
         [TimeUnit(TimeUnit.Seconds)]
         [ConfigurationEntry("Storage.TimeToSyncAfterFlashInSec", ConfigurationEntryScope.ServerWideOrPerDatabase)]
         [ConfigurationEntry("Storage.TimeToSyncAfterFlushInSec", ConfigurationEntryScope.ServerWideOrPerDatabase)]

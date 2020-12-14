@@ -246,14 +246,12 @@ namespace Voron
                     {
                         if (SizeOfUnflushedTransactionsInJournalFile != 0)
                             GlobalFlushingBehavior.GlobalFlusher.Value.MaybeFlushEnvironment(this);
+                    }
 
-                        else if (Journal.Applicator.TotalWrittenButUnsyncedBytes != 0)
-                            SuggestSyncDataFile();
-                    }
-                    else
-                    {
-                        await TimeoutManager.WaitFor(TimeSpan.FromMilliseconds(1000), cancellationToken).ConfigureAwait(false);
-                    }
+                    if (Journal.Applicator.TotalWrittenButUnsyncedBytes > 512 * Constants.Size.Megabyte)
+                        SuggestSyncDataFile();
+
+                    await TimeoutManager.WaitFor(TimeSpan.FromMilliseconds(Options.IdleFlushTimeout), cancellationToken).ConfigureAwait(false);
                 }
                 catch (ObjectDisposedException)
                 {
@@ -1129,7 +1127,7 @@ namespace Voron
                 _journal.Applicator.ApplyLogsToDataFile(_cancellationTokenSource.Token,
                     // we intentionally don't wait, if the flush lock is held, something else is flushing, so we don't need
                     // to hold the thread
-                    TimeSpan.Zero);
+                    TimeSpan.Zero, suggestSync: false);
             }
             catch (TimeoutException)
             {

@@ -566,7 +566,7 @@ namespace Voron.Impl.Journal
             }
 
 
-            public void ApplyLogsToDataFile(CancellationToken token, TimeSpan timeToWait)
+            public void ApplyLogsToDataFile(CancellationToken token, TimeSpan timeToWait, bool suggestSync = true)
             {
                 if (token.IsCancellationRequested)
                     return;
@@ -693,7 +693,8 @@ namespace Voron.Impl.Journal
 
                     ApplyJournalStateAfterFlush(token, lastProcessedJournal, lastFlushedTransactionId, unusedJournals, byteStringContext);
 
-                    _waj._env.SuggestSyncDataFile();
+                    if (suggestSync)
+                        _waj._env.SuggestSyncDataFile();
                 }
                 finally
                 {

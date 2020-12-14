@@ -75,8 +75,8 @@ namespace Voron
             {
                 _forceUsing32BitsPager = value;
                 MaxLogFileSize = (value ? 32 : 256) * Constants.Size.Megabyte;
-                MaxScratchBufferSize = (value ? 32 : 256) * Constants.Size.Megabyte;
-                MaxNumberOfPagesInJournalBeforeFlush = (value ? 4 : 32) * Constants.Size.Megabyte / Constants.Storage.PageSize;
+                MaxScratchBufferSize = (value ? 32 : 256) * Constants.Size.Megabyte;                
+                MaxNumberOfPagesInJournalBeforeFlush = (value ? 4 : 128) * Constants.Size.Megabyte / Constants.Storage.PageSize;
             }
         }
 
@@ -1179,7 +1179,7 @@ namespace Voron
             get
             {
                 if (_timeToSyncAfterFlushInSec < 1)
-                    _timeToSyncAfterFlushInSec = 30;
+                    _timeToSyncAfterFlushInSec = 120;
                 return _timeToSyncAfterFlushInSec;
             }
             set => _timeToSyncAfterFlushInSec = value;
