@@ -184,150 +184,199 @@ namespace Raven.Server.Utils
             return ToBlittableSupportedType(value, value, flattenArrays, forIndexing, 0, engine, context);
         }
 
+
+        private enum BlittableSupportedReturnType : int
+        {
+            Null = 0,
+            Same = 1,
+            Javascript = 2,
+            Runtime = 3,
+            Ignored = 4,
+            Dictionary = 5,
+            GenericDictionary = 6,
+            Enumerable = 7,
+            String = 8
+        }
+
+        private static readonly TypeCache<BlittableSupportedReturnType> _supportedTypeCache = new (512);
+
+        private static BlittableSupportedReturnType DoBlittableSupportedTypeReturnSameObject(Type type)
+        {
+            if (type == typeof(DynamicNullObject))
+                return BlittableSupportedReturnType.Null;
+
+            if (type == typeof(LazyStringValue) || type == typeof(LazyCompressedStringValue) || type == typeof(LazyNumberValue) ||
+                type == typeof(string) || type == typeof(bool) || type == typeof(int) || type == typeof(long) ||
+                type == typeof(double) || type == typeof(decimal) || type == typeof(float) || type == typeof(short) ||
+                type == typeof(byte) ||
+                type == typeof(DateTime) || type == typeof(DateTimeOffset) || type == typeof(TimeSpan))
+                return BlittableSupportedReturnType.Same;
+
+            if (type.IsAssignableTo(typeof(JsValue)))
+                return BlittableSupportedReturnType.Javascript;
+
+            if (type == typeof(IEnumerable<IFieldable>) || type == typeof(IFieldable))
+                return BlittableSupportedReturnType.Ignored;
+
+            if (type.IsAssignableTo(typeof(IDictionary)))
+                return BlittableSupportedReturnType.Dictionary;
+
+            if (type.IsAssignableTo(typeof(IDictionary<object, object>)))
+                return BlittableSupportedReturnType.GenericDictionary;
+
+            if (type.IsAssignableTo(typeof(Enum)))
+                return BlittableSupportedReturnType.String;
+
+            if (type == typeof(char[]) || type == typeof(byte[]) || type.IsAssignableTo(typeof(IEnumerable<char>)) || type.IsAssignableTo(typeof(IEnumerable)))
+                return BlittableSupportedReturnType.Enumerable;
+
+            return BlittableSupportedReturnType.Runtime;
+        }
+
         private static object ToBlittableSupportedType(object root, object value, bool flattenArrays, bool forIndexing, int recursiveLevel, Engine engine, JsonOperationContext context)
         {
             if (recursiveLevel > MaxAllowedRecursiveLevelForType)
                 NestingLevelTooDeep(root);
 
-            if (value is JsValue js)
-            {
-                if (js.IsNull())
-                {
-                    if (forIndexing && js is DynamicJsNull dynamicJsNull)
-                        return dynamicJsNull.IsExplicitNull ? DynamicNullObject.ExplicitNull : DynamicNullObject.Null;
+            if (value == null)
+                return null;
 
-                    return null;
-                }
-                if (js.IsUndefined())
-                    return null;
-                if (js.IsString())
-                    return js.AsString();
-                if (js.IsBoolean())
-                    return js.AsBoolean();
-                if (js.IsNumber())
-                    return js.AsNumber();
-                if (js.IsDate())
-                    return js.AsDate().ToDateTime();
-                //object wrapper is an object so it must come before the object
-                if (js is ObjectWrapper ow)
+            // We cache the return type.
+            var type = value.GetType();
+            if (!_supportedTypeCache.TryGet(type, out BlittableSupportedReturnType returnType))
+            {
+                returnType = DoBlittableSupportedTypeReturnSameObject(type);
+                _supportedTypeCache.Put(type, returnType);
+            }
+
+            if (returnType == BlittableSupportedReturnType.Same)
+                return value;
+
+            switch (returnType)
+            {
+                case BlittableSupportedReturnType.Null: return null;
+                case BlittableSupportedReturnType.Ignored: return "__ignored";
+                case BlittableSupportedReturnType.String: return value.ToString();
+                case BlittableSupportedReturnType.Javascript:
                 {
-                    var target = ow.Target;
-                    switch (target)
+                    var js = (JsValue)value;
+                    if (js.IsNull())
                     {
-                        case LazyStringValue lsv:
-                            return lsv;
-                        case LazyCompressedStringValue lcsv:
-                            return lcsv;
-                        case LazyNumberValue lnv:
-                            return lnv; //should be already blittable supported type.
+                        if (forIndexing && js is DynamicJsNull dynamicJsNull)
+                            return dynamicJsNull.IsExplicitNull ? DynamicNullObject.ExplicitNull : DynamicNullObject.Null;
+
+                        return null;
                     }
+
+                    if (js.IsUndefined())
+                        return null;
+                    if (js.IsString())
+                        return js.AsString();
+                    if (js.IsBoolean())
+                        return js.AsBoolean();
+                    if (js.IsNumber())
+                        return js.AsNumber();
+                    if (js.IsDate())
+                        return js.AsDate().ToDateTime();
+                    //object wrapper is an object so it must come before the object
+                    if (js is ObjectWrapper ow)
+                    {
+                        var target = ow.Target;
+                        switch (target)
+                        {
+                            case LazyStringValue lsv:
+                                return lsv;
+                            case LazyCompressedStringValue lcsv:
+                                return lcsv;
+                            case LazyNumberValue lnv:
+                                return lnv; //should be already blittable supported type.
+                        }
+
+                        ThrowInvalidObject(js);
+                    }
+                    //Array is an object in Jint
+                    else if (js.IsArray())
+                    {
+                        var arr = js.AsArray();
+                        var convertedArray = EnumerateArray(root, arr, flattenArrays, forIndexing, recursiveLevel + 1, engine, context);
+                        return new DynamicJsonArray(flattenArrays ? Flatten(convertedArray) : convertedArray);
+                    }
+                    else if (js.IsObject())
+                    {
+                        return JsBlittableBridge.Translate(context, engine, js.AsObject());
+                    }
+
                     ThrowInvalidObject(js);
+                    return null;
                 }
-                //Array is an object in Jint
-                else if (js.IsArray())
+                case BlittableSupportedReturnType.Enumerable:
                 {
-                    var arr = js.AsArray();
-                    var convertedArray = EnumerateArray(root, arr, flattenArrays, forIndexing, recursiveLevel + 1, engine, context);
-                    return new DynamicJsonArray(flattenArrays ? Flatten(convertedArray) : convertedArray);
+                    if (type == typeof(char[]))
+                        return new string((char[])value);
+                    if (type == typeof(byte[]))
+                        return System.Convert.ToBase64String((byte[])value);
+
+                    if (value is IEnumerable<char> charEnumerable)
+                        return new string(charEnumerable.ToArray());
+
+                    var enumerable = (IEnumerable)value;
+                    if (ShouldTreatAsEnumerable(enumerable))
+                        return EnumerableToJsonArray(flattenArrays ? Flatten(enumerable) : enumerable, root, flattenArrays, forIndexing, recursiveLevel, engine, context);
+
+                    goto case default;
                 }
-                else if (js.IsObject())
+                case BlittableSupportedReturnType.Dictionary:
                 {
-                    return JsBlittableBridge.Translate(context, engine, js.AsObject());
+                    var @object = new DynamicJsonValue();
+
+                    var dictionary = (IDictionary)value;
+                    foreach (var key in dictionary.Keys)
+                    {
+                        var keyAsString = KeyAsString(key: ToBlittableSupportedType(root, key, flattenArrays, forIndexing, recursiveLevel: recursiveLevel + 1, engine: engine, context: context));
+                        @object[keyAsString] = ToBlittableSupportedType(root, dictionary[key], flattenArrays, forIndexing, recursiveLevel: recursiveLevel + 1, engine: engine, context: context);
+                    }
+
+                    return @object;
                 }
-                ThrowInvalidObject(js);
-                return null;
-            }
-
-            if (value == null || value is DynamicNullObject)
-                return null;
-
-            if (value is DynamicBlittableJson dynamicDocument)
-                return dynamicDocument.BlittableJson;
-
-            if (value is string)
-                return value;
-
-            if (value is LazyStringValue || value is LazyCompressedStringValue)
-                return value;
-
-            if (value is bool)
-                return value;
-
-            if (value is int || value is long || value is double || value is decimal || value is float || value is short || value is byte)
-                return value;
-
-            if (value is LazyNumberValue)
-                return value;
-
-            if (value is DateTime || value is DateTimeOffset || value is TimeSpan)
-                return value;
-
-            if (value is Guid guid)
-                return guid.ToString("D");
-
-            if (value is Enum)
-                return value.ToString();
-
-            if (value is IEnumerable<IFieldable> || value is IFieldable)
-                return "__ignored";
-
-            if (value is IDictionary dictionary)
-            {
-                var @object = new DynamicJsonValue();
-
-                foreach (var key in dictionary.Keys)
+                case BlittableSupportedReturnType.GenericDictionary:
                 {
-                    var keyAsString = KeyAsString(key: ToBlittableSupportedType(root, key, flattenArrays, forIndexing, recursiveLevel: recursiveLevel + 1, engine: engine, context: context));
-                    @object[keyAsString] = ToBlittableSupportedType(root, dictionary[key], flattenArrays, forIndexing, recursiveLevel: recursiveLevel + 1, engine: engine, context: context);
+                    var @object = new DynamicJsonValue();
+
+                    var dDictionary = (IDictionary<object, object>)value;
+                    foreach (var key in dDictionary.Keys)
+                    {
+                        var keyAsString = KeyAsString(key: ToBlittableSupportedType(root, key, flattenArrays, forIndexing, recursiveLevel: recursiveLevel + 1, engine: engine, context: context));
+                        @object[keyAsString] = ToBlittableSupportedType(root, dDictionary[key], flattenArrays, forIndexing, recursiveLevel: recursiveLevel + 1, engine: engine, context: context);
+                    }
+
+                    return @object;
                 }
-
-                return @object;
-            }
-
-            if (value is IDictionary<object, object> dDictionary)
-            {
-                var @object = new DynamicJsonValue();
-
-                foreach (var key in dDictionary.Keys)
+                default:
                 {
-                    var keyAsString = KeyAsString(key: ToBlittableSupportedType(root, key, flattenArrays, forIndexing, recursiveLevel: recursiveLevel + 1, engine: engine, context: context));
-                    @object[keyAsString] = ToBlittableSupportedType(root, dDictionary[key], flattenArrays, forIndexing, recursiveLevel: recursiveLevel + 1, engine: engine, context: context);
+                    if (value is DynamicBlittableJson dynamicDocument)
+                        return dynamicDocument.BlittableJson;
+
+                    if (value is Guid guid)
+                        return guid.ToString("D");
+
+                    var inner = new DynamicJsonValue();
+                    var accessor = GetPropertyAccessor(value);
+
+                    foreach (var property in accessor.GetPropertiesInOrder(value))
+                    {
+                        var propertyValue = property.Value;
+                        if (propertyValue is IEnumerable<object> propertyValueAsEnumerable && ShouldTreatAsEnumerable(propertyValue))
+                        {
+                            inner[property.Key] = EnumerableToJsonArray(propertyValueAsEnumerable, root, flattenArrays, forIndexing, recursiveLevel, engine, context);
+                            continue;
+                        }
+
+                        inner[property.Key] = ToBlittableSupportedType(root, propertyValue, flattenArrays, forIndexing, recursiveLevel + 1, engine, context);
+                    }
+
+                    return inner;
                 }
-
-                return @object;
             }
-
-            if (value is char[] chars)
-                return new string(chars);
-
-            if (value is IEnumerable<char> charEnumerable)
-                return new string(charEnumerable.ToArray());
-
-            if (value is byte[] bytes)
-                return System.Convert.ToBase64String(bytes);
-
-            if (value is IEnumerable enumerable)
-            {
-                if (ShouldTreatAsEnumerable(enumerable))
-                    return EnumerableToJsonArray(flattenArrays ? Flatten(enumerable) : enumerable, root, flattenArrays, forIndexing, recursiveLevel, engine, context);
-            }
-
-            var inner = new DynamicJsonValue();
-            var accessor = GetPropertyAccessor(value);
-
-            foreach (var property in accessor.GetPropertiesInOrder(value))
-            {
-                var propertyValue = property.Value;
-                if (propertyValue is IEnumerable<object> propertyValueAsEnumerable && ShouldTreatAsEnumerable(propertyValue))
-                {
-                    inner[property.Key] = EnumerableToJsonArray(propertyValueAsEnumerable, root, flattenArrays, forIndexing, recursiveLevel, engine, context);
-                    continue;
-                }
-
-                inner[property.Key] = ToBlittableSupportedType(root, propertyValue, flattenArrays, forIndexing, recursiveLevel + 1, engine, context);
-            }
-
-            return inner;
         }
 
         public static string KeyAsString(object key)
@@ -677,6 +726,5 @@ namespace Raven.Server.Utils
 
             return result;
         }
-
     }
 }
