@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 
 namespace Corax
 {
-    public interface ITextSource
+    public interface ITextSource : IDisposable
     {
         Span<byte> Peek(int size);
         void Consume(int size = -1);

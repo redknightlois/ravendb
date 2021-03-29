@@ -6,7 +6,10 @@ using System.Threading.Tasks;
 
 namespace Corax
 {
-    public interface ITokenFilter : IEnumerable<TokenSpan>
+    public interface ITokenFilter<in TSource, out TOutput> : IDisposable
+        where TSource : IEnumerator<TokenSpan>
+        where TOutput : struct, IEnumerator<TokenSpan>
     {
+        TOutput Filter(TSource source);
     }
 }

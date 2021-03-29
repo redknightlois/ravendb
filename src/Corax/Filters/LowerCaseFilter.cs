@@ -5,33 +5,28 @@ using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-using Sparrow.Server;
 
 namespace Corax.Filters
 {
-    public sealed class LowerCaseFilter<TSource> : ITokenFilter
-        where TSource : ITokenizer
+    public sealed class LowerCaseFilter<TSource> : ITokenFilter<TSource, LowerCaseFilter<TSource>.Enumerator>
+        where TSource : IEnumerator<TokenSpan>
     {
-        private TSource _source = default;
         private readonly TokenSpanStorageContext _storage;
 
-        public LowerCaseFilter([NotNull] TokenSpanStorageContext storage, [NotNull] TSource tokenizer)
+        public LowerCaseFilter([NotNull] TokenSpanStorageContext storage)
         {
             _storage = storage;
-            _source = tokenizer;
         }
 
-        public struct Enumerator : IEnumerator<TokenSpan>
+        public struct Enumerator: IEnumerator<TokenSpan>
         {
-            private readonly TSource _source;
-            private readonly IEnumerator _sourceEnumerable;
             private readonly TokenSpanStorageContext _storage;
+            private TSource _source;
             private TokenSpan _current;
 
             public Enumerator([NotNull] TSource source, [NotNull] TokenSpanStorageContext storage)
             {
                 _source = source;
-                _sourceEnumerable = source.GetEnumerator();
                 _storage = storage;
                 _current = TokenSpan.Null;
 
@@ -40,11 +35,10 @@ namespace Corax.Filters
 
             public bool MoveNext()
             {
-                bool moveNext = _sourceEnumerable.MoveNext();
+                bool moveNext = _source.MoveNext();
                 if (moveNext)
                 {
-                    // TODO: Check if the cast is gonna be evicted.
-                    _current = (TokenSpan)_sourceEnumerable.Current;
+                    _current = _source.Current;
 
                     var buffer = _storage.RequestWriteAccess(_current);
                     DoLowercase(buffer);
@@ -68,7 +62,7 @@ namespace Corax.Filters
             public void Reset()
             {
                 _current = TokenSpan.Null;
-                _sourceEnumerable.Reset();
+                _source.Reset();
             }
 
             public TokenSpan Current => _current;
@@ -78,19 +72,13 @@ namespace Corax.Filters
             public void Dispose() { }
         }
 
-        public Enumerator GetEnumerator()
+        public Enumerator Filter(TSource source)
         {
-            return new(_source, _storage);
+            return new(source, _storage);
         }
 
-        IEnumerator<TokenSpan> IEnumerable<TokenSpan>.GetEnumerator()
+        public void Dispose()
         {
-            return new Enumerator(_source, _storage);
-        }
-
-        IEnumerator IEnumerable.GetEnumerator()
-        {
-            return new Enumerator(_source, _storage);
         }
     }
 }

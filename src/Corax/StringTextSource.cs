@@ -40,11 +40,10 @@ namespace Corax
         public TokenSpan Retrieve(int length, int type)
         {
             // We allocate the TokenSpan on the context
-            var token = _context.Allocate(length, type);
-            
+            var destination = _context.Allocate(out TokenSpan token,length, type);
+
             // We copy the source data into the context allocated memory
             var source = new Span<byte>(_value, _index, length);
-            var destination = _context.RequestWriteAccess(token);
             source.CopyTo(destination);
 
             // We consume the bytes
@@ -62,6 +61,10 @@ namespace Corax
         {
             // We reset the source to be reused.
             _index = 0;
+        }
+
+        public void Dispose()
+        {
         }
     }
 }

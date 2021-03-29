@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
+using Sparrow;
 using Sparrow.Collections;
 
 namespace Corax
@@ -40,12 +41,15 @@ namespace Corax
     {
         public const int None = 0;
         public const int Word = 1;
+        public const int Keyword = 2;
     }
 
     // A TokenSpan is a representation of data that is contiguous in memory and therefore can be accessed directly from the
     // TokenSpanStorageContext.
     public struct TokenSpan
     {
+        public static readonly ObjectPool<FastList<TokenSpan>> SequencesPool = new(() => new FastList<TokenSpan>(16), 32);
+
         public static readonly TokenSpan Null = new TokenSpan(new TokenPosition(TokenPosition.Invalid, 0), 0);
 
         public TokenPosition Position;
@@ -64,7 +68,7 @@ namespace Corax
     // in order to ensure that work can be done as memory efficiently as possible. 
     public sealed class TokenSpanStorageContext : IDisposable
     {
-        private FastList<byte[]> _buffers = new FastList<byte[]>(64);
+        private readonly FastList<byte[]> _buffers = new(64);
 
         /// <summary>
         /// It allocates a new TokenSpan which 
@@ -72,14 +76,15 @@ namespace Corax
         /// <param name="size"></param>
         /// <param name="type"></param>
         /// <returns></returns>
-        public TokenSpan Allocate(int size, int type = TokenType.None)
+        public Span<byte> Allocate(out TokenSpan token, int size, int type = TokenType.None)
         {
             var array = ArrayPool<byte>.Shared.Rent(size);
 
             int index = _buffers.Count;
             _buffers.Add(array);
 
-            return new TokenSpan(new TokenPosition(index, 0), size, type);
+            token = new TokenSpan(new TokenPosition(index, 0), size, type);
+            return new(array, 0, size);
         }
 
         public void Return(ref TokenSpan token)
@@ -134,36 +139,6 @@ namespace Corax
         public void Dispose()
         {
             Reset();
-        }
-    }
-
-    public struct TokenSpanEnumerator : IEnumerator<TokenSpan>
-    {
-        private readonly TokenSpanStorageContext _context;
-
-        public TokenSpanEnumerator([NotNull] TokenSpanStorageContext context)
-        {
-            _context = context;
-
-            Current = TokenSpan.Null;
-        }
-
-        public bool MoveNext()
-        {
-            throw new NotImplementedException();
-        }
-
-        public void Reset()
-        {
-            throw new NotImplementedException();
-        }
-
-        public TokenSpan Current { get; }
-
-        object IEnumerator.Current => Current;
-
-        public void Dispose()
-        {
         }
     }
 }

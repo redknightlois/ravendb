@@ -1,23 +1,18 @@
 ﻿using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
 
 namespace Corax.Tokenizers
 {
-    public class WhitespaceTokenizer<TSource> : ITokenizer
+    public class WhitespaceTokenizer<TSource> : ITokenizer<TSource, WhitespaceTokenizer<TSource>.Enumerator>
         where TSource : ITextSource
     {
-        private TSource _source = default;
         private readonly TokenSpanStorageContext _storage;
 
         public WhitespaceTokenizer(TokenSpanStorageContext storage)
         {
             _storage = storage;
-        }
-
-        public void SetSource(TSource source)
-        {
-            _source = source;
         }
 
         public struct Enumerator : IEnumerator<TokenSpan>
@@ -61,7 +56,7 @@ namespace Corax.Tokenizers
                         if (index == chunk.Length)
                             chunk = _source.Peek(chunk.Length * 2);
                     }
-                } 
+                }
                 while (index < chunk.Length);
 
                 if (index - startIndex > 0)
@@ -71,7 +66,7 @@ namespace Corax.Tokenizers
                 _source.Consume();
                 return false;
 
-                Found:
+            Found:
 
                 // Consume all whitespaces.
                 _source.Consume(startIndex);
@@ -98,22 +93,16 @@ namespace Corax.Tokenizers
 
             object IEnumerator.Current => _current;
 
-            public void Dispose() {}
+            public void Dispose() { }
         }
 
-        public Enumerator GetEnumerator()
+        public Enumerator Tokenize(TSource source)
         {
-            return new(_source, _storage);
+            return new(source, _storage);
         }
 
-        IEnumerator<TokenSpan> IEnumerable<TokenSpan>.GetEnumerator()
+        public void Dispose()
         {
-            return new Enumerator(_source, _storage);
-        }
-
-        IEnumerator IEnumerable.GetEnumerator()
-        {
-            return new Enumerator(_source, _storage);
         }
     }
 }

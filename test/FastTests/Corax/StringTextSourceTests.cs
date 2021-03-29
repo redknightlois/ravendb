@@ -25,12 +25,11 @@ namespace FastTests.Corax
             var source = new StringTextSource(context, "This is a good string.");
 
             var tokenizer = new WhitespaceTokenizer<StringTextSource>(context);
-            tokenizer.SetSource(source);
 
             int[] tokenSizes = { 4, 2, 1, 4, 7 };
 
             int tokenCount = 0;
-            foreach (var token in tokenizer)
+            foreach (var token in tokenizer.Tokenize(source))
             {
                 Assert.Equal(tokenSizes[tokenCount], token.Length);
                 tokenCount++;
@@ -47,17 +46,14 @@ namespace FastTests.Corax
             var source2 = new StringTextSource(context, "This is a another string.");
 
             var tokenizer = new WhitespaceTokenizer<StringTextSource>(context);
-            tokenizer.SetSource(source1);
 
             // Iterate the first source.
-            foreach (var token in tokenizer) { }
-
-            tokenizer.SetSource(source2);
+            foreach (var token in tokenizer.Tokenize(source1)) { }
 
             int[] tokenSizes = { 4, 2, 1, 7, 7 };
 
             int tokenCount = 0;
-            foreach (var token in tokenizer)
+            foreach (var token in tokenizer.Tokenize(source2))
             {
                 Assert.Equal(tokenSizes[tokenCount], token.Length);
                 tokenCount++;
