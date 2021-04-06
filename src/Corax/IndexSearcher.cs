@@ -26,7 +26,7 @@ namespace Corax
             _transaction = environment.ReadTransaction();
         }
 
-        public IEnumerable Query(JsonOperationContext context, QueryOp q, int take, string sort)
+        public IEnumerable<string> Query(JsonOperationContext context, QueryOp q, int take, string sort)
         {
             Table entries = _transaction.OpenTable(IndexWriter.IndexEntriesSchema, IndexWriter.IndexEntriesSlice);
 
@@ -38,7 +38,7 @@ namespace Corax
             return SearchThenSort(context, take, sort,q, entries);
         }
 
-        private IEnumerable FilterByOrder(JsonOperationContext context, QueryOp q, int take, string sort, Table entries)
+        private IEnumerable<string> FilterByOrder(JsonOperationContext context, QueryOp q, int take, string sort, Table entries)
         {
             Tree sortTree = _transaction.ReadTree(sort);
             if (sortTree == null)
@@ -69,7 +69,7 @@ namespace Corax
             return list;
         }
 
-        private  IEnumerable SearchThenSort(JsonOperationContext context, int take, string sort, QueryOp q,
+        private  IEnumerable<string> SearchThenSort(JsonOperationContext context, int take, string sort, QueryOp q,
             Table entries)
         {
             var results = new Bitmap();
