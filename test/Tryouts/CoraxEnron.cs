@@ -12,7 +12,7 @@ namespace Tryouts
 {
     class CoraxEnron
     {
-        public static string DirectoryEnron = "corax-enron";
+        public static string DirectoryEnron = "enron-corax";
 
         public static void IndexEnronInCorax(bool recreateDatabase = true)
         {
@@ -25,13 +25,16 @@ namespace Tryouts
             using var env = new StorageEnvironment(options);
 
             var sp = Stopwatch.StartNew();
+            var indexOnlySp = new Stopwatch();
 
             using var tar = SharpCompress.Readers.Tar.TarReader.Open(File.OpenRead(path));
 
             using var ctx = JsonOperationContext.ShortTermSingleUse();
-            using var indexWriter = new IndexWriter(env);
+            var indexWriter = new IndexWriter(env);
 
             int i = 0;
+            long ms = 0;
+            long justIndex = 0;
             while (tar.MoveToNextEntry())
             {
                 if (tar.Entry.IsDirectory)
@@ -73,18 +76,31 @@ namespace Tryouts
                     value["InReplyTo"] = msg.InReplyTo;
 
                 var entry = ctx.ReadObject(value, $"entry/{i}");
-                indexWriter.Index($"entry/{i}", entry);
 
-                if (i % 4096 * 8 == 0)
+                indexOnlySp.Restart();
+                indexWriter.Index($"entry/{i}", entry);
+                justIndex += indexOnlySp.ElapsedMilliseconds;
+
+                if (i % 1024 * 16 == 0)
                 {
+                    ms += sp.ElapsedMilliseconds;
+                    Console.WriteLine(sp.ElapsedMilliseconds);
+
+                    sp.Restart();
+
                     indexWriter.Commit();
+                    indexWriter.Dispose();
+                    indexWriter = new IndexWriter(env);
                 }
 
                 i++;
             }
 
             indexWriter.Commit();
-            Console.WriteLine(sp.ElapsedMilliseconds);
+            indexWriter.Dispose();
+
+            Console.WriteLine($"Indexing time: {justIndex}");
+            Console.WriteLine($"Total execution time: {ms}");
         }
     }
 }

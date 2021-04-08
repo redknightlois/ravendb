@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Diagnostics.CodeAnalysis;
-using System.Reflection.Metadata.Ecma335;
 using Sparrow.Json;
 using Sparrow.Server;
 using Voron;
@@ -16,8 +15,7 @@ namespace Corax
         private readonly StorageEnvironment _environment;
         private readonly TransactionPersistentContext _transactionPersistentContext;
 
-        private Transaction _transaction;
-        private Transaction _lastCommittedTransaction;
+        private readonly Transaction _transaction;
 
         public static readonly Slice IndexEntriesSlice;
         private static readonly Slice IndexEntriesByNameSlice;
@@ -61,10 +59,11 @@ namespace Corax
             _environment = environment;
             _transactionPersistentContext = new TransactionPersistentContext(true);
 
-            _transaction = _environment.WriteTransaction();
+            _transaction = _environment.WriteTransaction(_transactionPersistentContext);
             _entries = _transaction.OpenTable(IndexEntriesSchema, IndexEntriesSlice);
             if (_entries != null) return;
             IndexEntriesSchema.Create(_transaction, IndexEntriesSlice, 8);
+
             _entries = _transaction.OpenTable(IndexEntriesSchema, IndexEntriesSlice);
             _entries.CORAX_DEBUG_MOVE_DATA += () =>
                 throw new NotSupportedException("Data move are not supported for index entries");
@@ -137,15 +136,11 @@ namespace Corax
 
         public void Commit()
         {
-            //_transaction.Commit();
-            _lastCommittedTransaction = _transaction;
-            _transaction = _transaction.BeginAsyncCommitAndStartNewTransaction(_transactionPersistentContext);
+            _transaction.Commit();
         }
 
         public void Dispose()
         {
-            _lastCommittedTransaction?.EndAsyncCommit();
-            _lastCommittedTransaction?.Dispose();
             _transaction?.Dispose();
         }
     }
