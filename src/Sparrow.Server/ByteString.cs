@@ -1259,16 +1259,19 @@ namespace Sparrow.Server
             return result;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(string value, out ByteString str)
         {
             return From(value.AsSpan(), ByteStringType.Mutable, out str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(ReadOnlySpan<char> value, out ByteString str)
         {
             return From(value, ByteStringType.Mutable, out str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(char* value, int charCount, ByteStringType type, out ByteString str)
         {
             Debug.Assert(value != null, $"{nameof(value)} cant be null.");
@@ -1284,10 +1287,13 @@ namespace Sparrow.Server
             return new InternalScope(this, str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(string value, ByteStringType type, out ByteString str)
         {
             return From(value.AsSpan(), type, out str);
         }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(ReadOnlySpan<char> value, ByteStringType type, out ByteString str)
         {
             Debug.Assert(value != null, $"{nameof(value)} cant be null.");
@@ -1300,6 +1306,7 @@ namespace Sparrow.Server
             return new InternalScope(this, str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(ReadOnlySpan<char> value, byte endSeparator, ByteStringType type, out ByteString str)
         {
             Debug.Assert(value != null, $"{nameof(value)} cant be null.");
@@ -1319,21 +1326,25 @@ namespace Sparrow.Server
             return new InternalScope(this, str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(string value, Encoding encoding, out ByteString str)
         {
             return From(value.AsSpan(), encoding, ByteStringType.Immutable, out str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(ReadOnlySpan<char> value, Encoding encoding, out ByteString str)
         {
             return From(value, encoding, ByteStringType.Immutable, out str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(string value, Encoding encoding, ByteStringType type, out ByteString str)
         {
             return From(value.AsSpan(), encoding, type, out str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(ReadOnlySpan<char> value, Encoding encoding, ByteStringType type, out ByteString str)
         {
             Debug.Assert(value != null, $"{nameof(value)} cant be null.");
@@ -1353,6 +1364,7 @@ namespace Sparrow.Server
             return new InternalScope(this, str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(ReadOnlySpan<byte> value, int offset, int count, ByteStringType type, out ByteString str)
         {
             Debug.Assert(value != null, $"{nameof(value)} cant be null.");
@@ -1367,11 +1379,13 @@ namespace Sparrow.Server
             return new InternalScope(this, str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(ReadOnlySpan<byte> value, int offset, int count, out ByteString str)
         {
             return From(value, offset, count, ByteStringType.Immutable, out str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(ReadOnlySpan<byte> value, int size, ByteStringType type, out ByteString str)
         {
             Debug.Assert(value != null, $"{nameof(value)} cant be null.");
@@ -1386,16 +1400,19 @@ namespace Sparrow.Server
             return new InternalScope(this, str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(ReadOnlySpan<byte> value, int size, out ByteString str)
         {
             return From(value, size, ByteStringType.Immutable, out str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(int value, out ByteString str)
         {
             return From(value, ByteStringType.Immutable, out str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(int value, ByteStringType type, out ByteString str)
         {
             str = AllocateInternal(sizeof(int), type);
@@ -1405,11 +1422,13 @@ namespace Sparrow.Server
             return new InternalScope(this, str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(long value, out ByteString str)
         {
             return From(value, ByteStringType.Immutable, out str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(long value, ByteStringType type, out ByteString str)
         {
             str = AllocateInternal(sizeof(long), type);
@@ -1419,11 +1438,13 @@ namespace Sparrow.Server
             return new InternalScope(this, str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(short value, out ByteString str)
         {
             return From(value, ByteStringType.Immutable, out str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(short value, ByteStringType type, out ByteString str)
         {
             str = AllocateInternal(sizeof(short), type);
@@ -1433,6 +1454,7 @@ namespace Sparrow.Server
             return new InternalScope(this, str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(byte value, ByteStringType type, out ByteString str)
         {
             str = AllocateInternal(1, type);
@@ -1442,16 +1464,19 @@ namespace Sparrow.Server
             return new InternalScope(this, str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(byte value, out ByteString str)
         {
             return From(value, ByteStringType.Immutable, out str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(byte* valuePtr, int size, out ByteString str)
         {
             return From(valuePtr, size, ByteStringType.Immutable, out str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(byte* valuePtr, int size, ByteStringType type, out ByteString str)
         {
             Debug.Assert(valuePtr != null, $"{nameof(valuePtr)} cant be null.");
@@ -1464,6 +1489,7 @@ namespace Sparrow.Server
             return new InternalScope(this, str);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public InternalScope From(byte* valuePtr, int size, byte endSeparator, ByteStringType type, out ByteString str)
         {
             Debug.Assert(valuePtr != null, $"{nameof(valuePtr)} cant be null.");
@@ -1524,6 +1550,7 @@ namespace Sparrow.Server
                 _parent = null;
             }
 
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public static implicit operator Scope(InternalScope scope)
             {
                 return new Scope(scope._parent, scope._str);
@@ -1548,6 +1575,7 @@ namespace Sparrow.Server
                 _parent = null;
             }
 
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public static implicit operator Scope(ExternalScope scope)
             {
                 return new Scope(scope._parent, scope._str);
