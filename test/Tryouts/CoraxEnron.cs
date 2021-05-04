@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -13,6 +13,21 @@ namespace Tryouts
     class CoraxEnron
     {
         public const string DirectoryEnron = "enron-corax";
+        private static char[] trimChars = {' ', ',', '\t', '\n'};
+
+        private static IEnumerable<string> NormalizeEmails(IEnumerable<string> emails)
+        {
+            foreach (var email in emails)
+            {
+                if (email.Contains(','))
+                {
+                    foreach (var nEmail in email.Split(','))
+                        yield return nEmail.Trim(trimChars);
+                }
+                else
+                    yield return email.Trim(trimChars);
+            }
+        }
 
         public static void Index(bool recreateDatabase = true, string outputDirectory = ".")
         {
@@ -47,14 +62,14 @@ namespace Tryouts
 
                 var value = new DynamicJsonValue
                 {
-                    ["Bcc"] = (msg.Bcc ?? Enumerable.Empty<InternetAddress>()).Select(x => x.ToString()).ToArray(),
-                    ["Cc"] = (msg.Cc ?? Enumerable.Empty<InternetAddress>()).Select(x => x.ToString()).ToArray(),
-                    ["To"] = (msg.To ?? Enumerable.Empty<InternetAddress>()).Select(x => x.ToString()).ToArray(),
+                    ["Bcc"] = new DynamicJsonArray(NormalizeEmails((msg.Bcc ?? Enumerable.Empty<InternetAddress>()).Select(x => x.ToString()))),
+                    ["Cc"] = new DynamicJsonArray(NormalizeEmails((msg.Cc ?? Enumerable.Empty<InternetAddress>()).Select(x => x.ToString()))),
+                    ["To"] = new DynamicJsonArray(NormalizeEmails((msg.To ?? Enumerable.Empty<InternetAddress>()).Select(x => x.ToString()))),
                     ["From"] = msg.From?.FirstOrDefault()?.ToString(),
                     ["ReplyTo"] = msg.ReplyTo?.FirstOrDefault()?.ToString(),
-                    ["Body"] = msg.GetTextBody(MimeKit.Text.TextFormat.Plain).Split(' '),
-                    ["References"] = (msg.References ?? Enumerable.Empty<string>()).ToArray(),
-                    ["Subject"] = msg.Subject.Split(' '),
+                    ["Body"] = new DynamicJsonArray(msg.GetTextBody(MimeKit.Text.TextFormat.Plain).Split(trimChars)),
+                    ["References"] = new DynamicJsonArray((msg.References ?? Enumerable.Empty<string>()).ToArray()),
+                    ["Subject"] = new DynamicJsonArray(msg.Subject.Split(' ')),
                     ["MessageId"] = msg.MessageId,
                     ["Date"] = msg.Date.ToString("O"),
                     ["Importance"] = msg.Importance.ToString(),

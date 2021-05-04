@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text;
 using Sparrow.Json;
@@ -9,6 +10,8 @@ using Voron.Data.BTrees;
 using Voron.Data.Fixed;
 using Voron.Data.Tables;
 using Voron.Impl;
+using Newtonsoft.Json;
+using Voron.Debugging;
 
 namespace Corax
 {
@@ -24,6 +27,27 @@ namespace Corax
         {
             _environment = environment;
             _transaction = environment.ReadTransaction();
+
+            //var tree = _transaction.CreateTree("Name");
+            //using (var iterator = tree.Iterate(true))
+            //{
+            //    Slice.From(_transaction.Allocator, "Captain".AsSpan(), out var prefix);
+            //    if ( !iterator.Seek(prefix) )
+            //        Console.WriteLine("Not found");
+
+            //    using var file = File.CreateText("page.txt");
+            //    var values = new string[360];
+            //    for (int i = 0; i < values.Length; i++)
+            //    {
+            //        iterator.MoveNext();
+            //        file.WriteLine(iterator.CurrentKey.ToString());
+            //    }
+            //}
+
+
+            //DebugStuff.RenderAndShow(tree);
+            //var report = environment.GenerateDetailedReport(_transaction, true);
+            //Console.WriteLine(JsonConvert.SerializeObject(report));
         }
 
         public IEnumerable<string> Query(JsonOperationContext context, QueryOp q, int take, string sort)
