@@ -44,15 +44,32 @@ namespace FastTests.Sparrow
         public void SimpleTraining()
         {
             var encoder = new HopeEncoder<Encoder3Gram>();
-            State state = new (8096);
-            StringKeys keys = new(new[] { "Captain-", "Captain----Obvious", "Captain---Caveman", "Captain---Crazy", "Captain---Redundant", "Captain--0bvious", "Captain--Awesome", "Captain--Canada", "Captain--Captain", "Captain--Cocaine", "Captain--Fabulous", "Captain--Fawcett", "Captain--Hindsight", "Captain--Insano", "Captain--Morgan", "Captain--Oblivious" });
+            State state = new (32000);
+            //StringKeys keys = new(new[] { "Captain-", "Captain----Obvious", "Captain---Caveman", "Captain---Crazy", "Captain---Redundant", "Captain--0bvious", "Captain--Awesome", "Captain--Canada", "Captain--Captain", "Captain--Cocaine", "Captain--Fabulous", "Captain--Fawcett", "Captain--Hindsight", "Captain--Insano", "Captain--Morgan", "Captain--Oblivious" });
+            //StringKeys keys = new(new[] { "abc", "def", "companies/1" });
 
-            encoder.Train(state, keys, 128);
+            //string[] keysAsStrings = new string[5000];
+            //for (int i = 0; i < keysAsStrings.Length; i++)
+            //    keysAsStrings[i] = Guid.NewGuid().ToString();
+            //StringKeys keys = new(keysAsStrings);
+
+            string[] keysAsStrings = new string[600];
+            for (int i = 0; i < keysAsStrings.Length; i++)
+            {
+                keysAsStrings[i] = $"companies/{i:000000000}";
+            }
+
+            StringKeys keys = new(keysAsStrings);
+
+            encoder.Train(state, keys, 256);
 
             Span<byte> value = new byte[64];
 
-            StringKeys data = new(new[] { "Captain---Crazy" });
+            StringKeys data = new(new[] { "compan1ies/000001234" });
             var len = encoder.Encode(state, data[0], value);
+
+            Console.WriteLine($"Memory Usage: {Encoder3Gram.GetDictionarySize(state)}.");
+            Console.WriteLine($"Key Size: {data[0].Length} (raw) vs {len / 8:f2} (encoded).");
         }
     }
 }

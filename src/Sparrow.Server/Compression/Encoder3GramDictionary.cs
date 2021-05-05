@@ -8,23 +8,26 @@ namespace Sparrow.Server.Compression
         where TEncoderState : struct, IEncoderState
     {
         public readonly TEncoderState State;
-        public readonly int NumberOfEntries;
-        public int MemoryUse => NumberOfEntries * sizeof(Interval3Gram);
+        public int NumberOfEntries => _numberOfEntries[0];
+        public int MemoryUse => _numberOfEntries[0] * sizeof(Interval3Gram);
 
         public Encoder3GramDictionary(in TEncoderState state)
         {
             State = state;
-            NumberOfEntries = state.Table.Length / sizeof(Interval3Gram);
         }
 
-        private Span<Interval3Gram> Table => MemoryMarshal.Cast<byte, Interval3Gram>(State.Table);
+
+        private Span<int> _numberOfEntries => MemoryMarshal.Cast<byte, int>(State.Table.Slice(0, 4));
+        private Span<Interval3Gram> _table => MemoryMarshal.Cast<byte, Interval3Gram>(State.Table.Slice(4));
 
         public void Build(in FastList<SymbolCode> symbol_code_list)
         {
-            var table = Table;
+            var table = _table;
 
             int dict_size = symbol_code_list.Count;
-            if (NumberOfEntries < dict_size)
+            int numberOfEntries = (State.Table.Length - 4) / sizeof(Interval3Gram);
+
+            if (numberOfEntries < dict_size)
                 throw new ArgumentException("Not enough memory to store the dictionary");
 
             for (int i = 0; i < dict_size; i++)
@@ -62,14 +65,16 @@ namespace Sparrow.Server.Compression
 
                 table[i].Code = symbol_code_list[i].Code;
             }
-        }
+
+            _numberOfEntries[0] = dict_size;
+         }
 
         public int Lookup(in ReadOnlySpan<byte> symbol, out Code code)
         {
-            var table = Table;
+            var table = _table;
 
             int l = 0;
-            int r = NumberOfEntries;
+            int r = _numberOfEntries[0];
             while (r - l > 1)
             {
                 int m = (l + r) >> 1;

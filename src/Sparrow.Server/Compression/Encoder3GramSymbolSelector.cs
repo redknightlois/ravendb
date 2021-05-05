@@ -73,7 +73,7 @@ namespace Sparrow.Server.Compression
         }
 
         private const int GramSize = 3;
-        private readonly Dictionary<int, int> freq_map_ = new Dictionary<int, int>(16);
+        private readonly Dictionary<int, int> freq_map_ = new (16);
 
         private void CountIntervalFreq(TSampleEnumerator keys)
         {

@@ -25,6 +25,12 @@ namespace Sparrow.Server.Compression
 
     public struct Encoder3Gram : IEncoderAlgorithm
     {
+        public static int GetDictionarySize<TEncoderState>(in TEncoderState state) where TEncoderState : struct, IEncoderState
+        {
+            var dict_ = new Encoder3GramDictionary<TEncoderState>(state);
+            return dict_.MemoryUse;
+        }
+
         public void Train<TEncoderState, TSampleEnumerator>(in TEncoderState state, in TSampleEnumerator enumerator, int dictionarySize)
             where TEncoderState : struct, IEncoderState
             where TSampleEnumerator : struct, IReadOnlySpanEnumerator

@@ -2,6 +2,7 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace Sparrow.Server.Compression
 {
@@ -62,6 +63,8 @@ namespace Sparrow.Server.Compression
         }
 
         public Span<byte> StartKey => new(Unsafe.AsPointer(ref _startKey), Length);
+
+        public override string ToString() => $"(Code={Code.Length},{Code.Value}|{Length},{Encoding.ASCII.GetString(StartKey)})";
     }
 
     [StructLayout(LayoutKind.Sequential)]
