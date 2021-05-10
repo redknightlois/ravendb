@@ -1,4 +1,5 @@
-using System;
+﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -62,29 +63,29 @@ namespace Tryouts
 
                 var value = new DynamicJsonValue
                 {
-                    ["Bcc"] = new DynamicJsonArray(NormalizeEmails((msg.Bcc ?? Enumerable.Empty<InternetAddress>()).Select(x => x.ToString()))),
-                    ["Cc"] = new DynamicJsonArray(NormalizeEmails((msg.Cc ?? Enumerable.Empty<InternetAddress>()).Select(x => x.ToString()))),
-                    ["To"] = new DynamicJsonArray(NormalizeEmails((msg.To ?? Enumerable.Empty<InternetAddress>()).Select(x => x.ToString()))),
+                    ["Bcc"] = NormalizeEmails((msg.Bcc ?? Enumerable.Empty<InternetAddress>()).Select(x => x.ToString())),
+                    ["Cc"] = NormalizeEmails((msg.Cc ?? Enumerable.Empty<InternetAddress>()).Select(x => x.ToString())),
+                    ["To"] = NormalizeEmails((msg.To ?? Enumerable.Empty<InternetAddress>()).Select(x => x.ToString())),
                     ["From"] = msg.From?.FirstOrDefault()?.ToString(),
                     ["ReplyTo"] = msg.ReplyTo?.FirstOrDefault()?.ToString(),
-                    ["Body"] = new DynamicJsonArray(msg.GetTextBody(MimeKit.Text.TextFormat.Plain).Split(trimChars)),
-                    ["References"] = new DynamicJsonArray((msg.References ?? Enumerable.Empty<string>()).ToArray()),
-                    ["Subject"] = new DynamicJsonArray(msg.Subject.Split(' ')),
+                    ["Body"] = msg.GetTextBody(MimeKit.Text.TextFormat.Plain).Split(trimChars),
+                    ["References"] = (msg.References ?? Enumerable.Empty<string>()).ToArray(),
+                    ["Subject"] = msg.Subject.Split(' '),
                     ["MessageId"] = msg.MessageId,
                     ["Date"] = msg.Date.ToString("O"),
                     ["Importance"] = msg.Importance.ToString(),
                     ["Priority"] = msg.Priority.ToString(),
                 };
 
-                foreach (var item in msg.Headers ?? new HeaderList())
-                {
-                    if (item.Value.Length > 512)
-                        continue;
+                //foreach (var item in msg.Headers ?? new HeaderList())
+                //{
+                //    if (item.Value.Length > 512)
+                //        continue;
 
-                    string headerName = item.Id.ToHeaderName();
-                    if (headerName.Length < 128)
-                        value[headerName] = item.Value;
-                }
+                //    string headerName = item.Id.ToHeaderName();
+                //    if (headerName.Length < 128)
+                //        value[$"Header[{headerName}]"] = item.Value;
+                //}
 
                 if (msg.Sender != null)
                     value["Sender"] = msg.Sender.ToString();
