@@ -71,5 +71,10 @@ namespace Sparrow.Server.Compression
         {
             return _encoder.Decode(in state, in data, in outputBuffer);
         }
+
+        public int Decode<TEncoderState>(in TEncoderState state, int bits, in ReadOnlySpan<byte> data, in Span<byte> outputBuffer) where TEncoderState : struct, IEncoderState
+        {
+            return _encoder.Decode(in state, bits, in data, in outputBuffer);
+        }
     }
 }

@@ -48,18 +48,18 @@ namespace Sparrow.Server.Compression
             if (keys.Length == 0)
                 return symbol_freq_list;
 
-            CountSymbolFrequence(keys);
+            CountSymbolFrequency(keys);
 
             int adjust_num_limit = num_limit;
             if (num_limit > freq_map_.Count() * 2)
             {
                 // 3 Gram: Input dictionary Size is too big, changing the size
-                adjust_num_limit = freq_map_.Count() * 2 - 1;
+                adjust_num_limit = (freq_map_.Count() * 2 - 1) / 2;
             }
 
             PickMostFreqSymbols();
 
-            FillInGap(adjust_num_limit / 2);
+            FillInGap(adjust_num_limit);
             Debug.Assert(interval_prefixes_.Count == interval_boundaries_.Count);
             
             CountIntervalFreq(keys);
@@ -234,7 +234,7 @@ namespace Sparrow.Server.Compression
             }
         }
 
-        private void CountSymbolFrequence(TSampleEnumerator keys)
+        private void CountSymbolFrequency(TSampleEnumerator keys)
         {
             Debug.Assert(GramSize <= 3);
 

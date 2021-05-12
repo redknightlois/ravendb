@@ -1,6 +1,10 @@
 ﻿using System;
+using System.Buffers.Binary;
 using System.Runtime.InteropServices;
+using System.Text;
 using Sparrow.Collections;
+using Sparrow.Server.Binary;
+using Sparrow.Server.Collections.Persistent;
 
 namespace Sparrow.Server.Compression
 {
@@ -16,71 +20,85 @@ namespace Sparrow.Server.Compression
             State = state;
         }
 
+        private readonly Span<int> _numberOfEntries => MemoryMarshal.Cast<byte, int>(State.EncodingTable.Slice(0, 4));
+        private readonly Span<Interval3Gram> EncodingTable => MemoryMarshal.Cast<byte, Interval3Gram>(State.EncodingTable.Slice(4));
+        private readonly BinaryTree<short> DecodingTable => BinaryTree<short>.Open(State.DecodingTable);
 
-        private Span<int> _numberOfEntries => MemoryMarshal.Cast<byte, int>(State.Table.Slice(0, 4));
-        private Span<Interval3Gram> _table => MemoryMarshal.Cast<byte, Interval3Gram>(State.Table.Slice(4));
-
-        public void Build(in FastList<SymbolCode> symbol_code_list)
+        public void Build(in FastList<SymbolCode> symbolCodeList)
         {
-            var table = _table;
+            var table = EncodingTable;
 
-            int dict_size = symbol_code_list.Count;
-            int numberOfEntries = (State.Table.Length - 4) / sizeof(Interval3Gram);
+            int dictSize = symbolCodeList.Count;
+            if (dictSize >= short.MaxValue)
+                throw new NotSupportedException($"We do not support dictionaries with more items than {short.MaxValue - 1}");
 
-            if (numberOfEntries < dict_size)
+            // We haven't stored it yet. So we are calculating it. 
+            int numberOfEntries = (State.EncodingTable.Length - 4) / sizeof(Interval3Gram);
+            if (numberOfEntries < dictSize)
                 throw new ArgumentException("Not enough memory to store the dictionary");
 
-            for (int i = 0; i < dict_size; i++)
-            {
-                var symbol = symbol_code_list[i].StartKey;
-                int symbol_len = symbol_code_list[i].Length;
+            var tree = BinaryTree<short>.Create(State.DecodingTable);
 
-                var startKey = table[i].StartKey;
+            for (int i = 0; i < dictSize; i++)
+            {
+                var symbol = symbolCodeList[i].StartKey;
+                int symbolLength = symbolCodeList[i].Length;
+
+                ref var entry = ref table[i];
+
+                var startKey = entry.StartKey;
                 for (int j = 0; j < 3; j++)
                 {
-                    if (j < symbol_len)
+                    if (j < symbolLength)
                         startKey[j] = symbol[j];
                     else
                         startKey[j] = 0;
                 }
 
-                if (i < dict_size - 1)
+                if (i < dictSize - 1)
                 {
-                    table[i].PrefixLength = 0;
-                    var next_symbol = symbol_code_list[i + 1].StartKey;
-                    int next_symbol_len = symbol_code_list[i + 1].Length;
+                    entry.PrefixLength = 0;
+                    var nextSymbol = symbolCodeList[i + 1].StartKey;
+                    int nextSymbolLength = symbolCodeList[i + 1].Length;
 
-                    next_symbol[next_symbol_len - 1] -= 1;
+                    nextSymbol[nextSymbolLength - 1] -= 1;
                     int j = 0;
-                    while (j < symbol_len && j < next_symbol_len && symbol[j] == next_symbol[j])
+                    while (j < symbolLength && j < nextSymbolLength && symbol[j] == nextSymbol[j])
                     {
-                        table[i].PrefixLength++;
+                        entry.PrefixLength++;
                         j++;
                     }
                 }
                 else
                 {
-                    table[i].PrefixLength = (byte)symbol_len;
+                    entry.PrefixLength = (byte)symbolLength;
                 }
 
-                table[i].Code = symbol_code_list[i].Code;
+                entry.Code = symbolCodeList[i].Code;
+
+                int codeValue = BinaryPrimitives.ReverseEndianness(entry.Code.Value << (sizeof(int) * 8 - entry.Code.Length));
+                var codeValueSpan = MemoryMarshal.Cast<int, byte>(MemoryMarshal.CreateSpan(ref codeValue, 1));
+                var reader = new BitReader(codeValueSpan, entry.Code.Length);
+                tree.Add(ref reader, (short)i);
             }
 
-            _numberOfEntries[0] = dict_size;
+            _numberOfEntries[0] = dictSize;
          }
 
         public int Lookup(in ReadOnlySpan<byte> symbol, out Code code)
         {
-            var table = _table;
+            var table = EncodingTable;
 
             int l = 0;
             int r = _numberOfEntries[0];
             while (r - l > 1)
             {
                 int m = (l + r) >> 1;
-                
+
                 // TODO: Check this is doing the right thing. If we need to improve this we can do it very easily (see SpanHelpers.Byte.cs file)
-                int cmp = symbol.SequenceCompareTo(table[m].StartKey);
+                ref var entry = ref table[m];
+                int cmp = symbol.SequenceCompareTo(entry.StartKey.Slice(0, entry.PrefixLength));
+
                 if (cmp < 0)
                     r = m;
                 else 
@@ -92,6 +110,21 @@ namespace Sparrow.Server.Compression
 
             code = table[l].Code;
             return table[l].PrefixLength;
+        }
+
+        public int Lookup(in BitReader reader, out ReadOnlySpan<byte> symbol)
+        {
+            BitReader localReader = reader;
+            if (DecodingTable.FindCommonPrefix(ref localReader, out var idx))
+            {
+                ref var entry = ref EncodingTable[idx];
+                symbol = entry.StartKey.Slice(0, entry.PrefixLength);
+
+                return reader.Length - localReader.Length;
+            }
+
+            symbol = ReadOnlySpan<byte>.Empty;
+            return -1;
         }
     }
 }

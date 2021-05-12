@@ -2,11 +2,13 @@
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 using Sparrow.Collections;
+using Sparrow.Server.Binary;
 
 namespace Sparrow.Server.Compression
 {
@@ -27,23 +29,23 @@ namespace Sparrow.Server.Compression
     {
         public static int GetDictionarySize<TEncoderState>(in TEncoderState state) where TEncoderState : struct, IEncoderState
         {
-            var dict_ = new Encoder3GramDictionary<TEncoderState>(state);
-            return dict_.MemoryUse;
+            var dictionary = new Encoder3GramDictionary<TEncoderState>(state);
+            return dictionary.MemoryUse;
         }
 
         public void Train<TEncoderState, TSampleEnumerator>(in TEncoderState state, in TSampleEnumerator enumerator, int dictionarySize)
             where TEncoderState : struct, IEncoderState
             where TSampleEnumerator : struct, IReadOnlySpanEnumerator
         {
-            var dict_ = new Encoder3GramDictionary<TEncoderState>(state);
+            var dictionary = new Encoder3GramDictionary<TEncoderState>(state);
 
             var symbolSelector = new Encoder3GramSymbolSelector<TSampleEnumerator>();
-            var frequency_list = symbolSelector.SelectSymbols(enumerator, dictionarySize);
+            var frequencyList = symbolSelector.SelectSymbols(enumerator, dictionarySize);
 
             var codeAssigner = new HuTuckerCodeAssigner();
-            var symbolCodes = codeAssigner.AssignCodes(frequency_list);
+            var symbolCodes = codeAssigner.AssignCodes(frequencyList);
 
-            dict_.Build(symbolCodes);
+            dictionary.Build(symbolCodes);
         }
 
         public int Encode<TEncoderState>(in TEncoderState state, in ReadOnlySpan<byte> key, in Span<byte> outputBuffer)
@@ -51,50 +53,101 @@ namespace Sparrow.Server.Compression
         {
             Debug.Assert(outputBuffer.Length % sizeof(long) == 0); // Ensure we can safely cast to int 64
 
-            var dict_ = new Encoder3GramDictionary<TEncoderState>(state);
+            var dictionary = new Encoder3GramDictionary<TEncoderState>(state);
 
-            var int_buf = MemoryMarshal.Cast<byte, long>(outputBuffer);
+            var intBuf = MemoryMarshal.Cast<byte, long>(outputBuffer);
 
             int idx = 0;
-            int_buf[0] = 0;
-            int int_buf_len = 0;
+            intBuf[0] = 0;
+            int intBufLen = 0;
 
-            var key_str = key;
+            var keyStr = key;
             int pos = 0;
             while (pos < key.Length)
             {
-                int prefix_len = dict_.Lookup(key_str.Slice(pos), out Code code);
-                long s_buf = code.Value;
-                int s_len = code.Length;
-                if (int_buf_len + s_len > 63)
+                int prefixLen = dictionary.Lookup(keyStr.Slice(pos), out Code code);
+                long sBuf = code.Value;
+                int sLen = code.Length;
+                // Console.WriteLine($"[{sBuf}|{sLen}|{Encoding.ASCII.GetString(keyStr.Slice(pos))}],");
+                if (intBufLen + sLen > 63)
                 {
-                    int num_bits_left = 64 - int_buf_len;
-                    int_buf_len = s_len - num_bits_left;
-                    int_buf[idx] <<= num_bits_left;
-                    int_buf[idx] |= (s_buf >> int_buf_len);
-                    int_buf[idx] = BinaryPrimitives.ReverseEndianness(int_buf[idx]);
-                    int_buf[idx + 1] = s_buf;
+                    int numBitsLeft = 64 - intBufLen;
+                    intBufLen = sLen - numBitsLeft;
+                    intBuf[idx] <<= numBitsLeft;
+                    intBuf[idx] |= (sBuf >> intBufLen);
+                    intBuf[idx] = BinaryPrimitives.ReverseEndianness(intBuf[idx]);
+                    intBuf[idx + 1] = sBuf;
                     idx++;
                 }
                 else
                 {
-                    int_buf[idx] <<= s_len;
-                    int_buf[idx] |= s_buf;
-                    int_buf_len += s_len;
+                    intBuf[idx] <<= sLen;
+                    intBuf[idx] |= sBuf;
+                    intBufLen += sLen;
                 }
 
-                pos += prefix_len;
+                pos += prefixLen;
             }
 
-            int_buf[idx] <<= (64 - int_buf_len);
-            int_buf[idx] = BinaryPrimitives.ReverseEndianness(int_buf[idx]);
-            return ((idx << 6) + int_buf_len);
+            //Console.WriteLine();
+            intBuf[idx] <<= (64 - intBufLen);
+            intBuf[idx] = BinaryPrimitives.ReverseEndianness(intBuf[idx]);
+            return ((idx << 6) + intBufLen);
         }
 
-        public int Decode<TEncoderState>(in TEncoderState state, in ReadOnlySpan<byte> data, in Span<byte> outputBuffer) 
+        public int Decode<TEncoderState>(in TEncoderState state, in ReadOnlySpan<byte> data, in Span<byte> outputBuffer)
             where TEncoderState : struct, IEncoderState
         {
-            throw new NotImplementedException();
+            Debug.Assert(outputBuffer.Length % sizeof(long) == 0); // Ensure we can safely cast to int 64
+
+            var dictionary = new Encoder3GramDictionary<TEncoderState>(state);
+
+            var buffer = outputBuffer;
+            var reader = new BitReader(data);
+            while (reader.Length > 0)
+            {
+                int length = dictionary.Lookup(reader, out var symbol);
+                if (length < 0)
+                    throw new IOException("Invalid data stream.");
+
+                // Advance the reader.
+                reader.Skip(length);
+
+                symbol.CopyTo(buffer);
+                buffer = buffer.Slice(symbol.Length);
+
+                if (symbol[0] == 0)
+                    break;
+            }
+
+            return outputBuffer.Length - buffer.Length;
+        }
+
+        public int Decode<TEncoderState>(in TEncoderState state, int bits, in ReadOnlySpan<byte> data, in Span<byte> outputBuffer)
+            where TEncoderState : struct, IEncoderState
+        {
+            Debug.Assert(outputBuffer.Length % sizeof(long) == 0); // Ensure we can safely cast to int 64
+
+            var dictionary = new Encoder3GramDictionary<TEncoderState>(state);
+
+            var buffer = outputBuffer;
+            var reader = new BitReader(data);
+            while (bits > 0)
+            {
+                int length = dictionary.Lookup(reader, out var symbol);
+                if (length < 0)
+                    throw new IOException("Invalid data stream.");
+
+                // Advance the reader.
+                reader.Skip(length);
+
+                symbol.CopyTo(buffer);
+                buffer = buffer.Slice(symbol.Length);
+
+                bits -= length;
+            }
+
+            return outputBuffer.Length - buffer.Length;
         }
     }
 }

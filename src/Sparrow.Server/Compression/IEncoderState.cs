@@ -4,6 +4,7 @@ namespace Sparrow.Server.Compression
 { 
     public interface IEncoderState
     {
-        Span<byte> Table { get; }
+        Span<byte> EncodingTable { get; }
+        Span<byte> DecodingTable { get; }
     }
 }

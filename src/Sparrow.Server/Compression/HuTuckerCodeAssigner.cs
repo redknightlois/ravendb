@@ -98,37 +98,37 @@ namespace Sparrow.Server.Compression
             for (int i = 0; i < _codeLenList.Count; i++)
                 node_list_.Add(new Node(i));
 
-            int[] tmp_code_lens = ArrayPool<int>.Shared.Rent(_codeLenList.Count);
+            int[] tmpCodeLens = ArrayPool<int>.Shared.Rent(_codeLenList.Count);
             for (int i = 0; i < _codeLenList.Count; i++)
             {
-                tmp_code_lens[i] = _codeLenList[i];
+                tmpCodeLens[i] = _codeLenList[i];
             }
 
-            int max_code_len = GetMaxCodeLen();
+            int maxCodeLen = GetMaxCodeLen();
 
-            FastList<int> node_idx_list = _cached_node_idx_list;
-            for (int len = max_code_len; len > 0; len--)
+            FastList<int> nodeIdxList = _cached_node_idx_list;
+            for (int len = maxCodeLen; len > 0; len--)
             {
-                node_idx_list.Clear();
-                for (int i = 0; i < tmp_code_lens.Length; i++)
+                nodeIdxList.Clear();
+                for (int i = 0; i < tmpCodeLens.Length; i++)
                 {
-                    if (tmp_code_lens[i] == len)
-                        node_idx_list.Add(i);
+                    if (tmpCodeLens[i] == len)
+                        nodeIdxList.Add(i);
                 }
-                for (int i = 0; i < node_idx_list.Count; i += 2)
+                for (int i = 0; i < nodeIdxList.Count; i += 2)
                 {
-                    int idx1 = node_idx_list[i];
-                    int idx2 = node_idx_list[i + 1];
+                    int idx1 = nodeIdxList[i];
+                    int idx2 = nodeIdxList[i + 1];
 
                     // Merge Nodes.
-                    Node left_node = node_list_[idx1];
-                    Node right_node = node_list_[idx2];
-                    Node new_node = new Node(left_node.LeftIdx, right_node.RightIdx, left_node, right_node);
-                    node_list_[idx1] = new_node;
+                    Node leftNode = node_list_[idx1];
+                    Node rightNode = node_list_[idx2];
+                    Node newNode = new Node(leftNode.LeftIdx, rightNode.RightIdx, leftNode, rightNode);
+                    node_list_[idx1] = newNode;
                     node_list_[idx2] = null;
 
-                    tmp_code_lens[idx1] = len - 1;
-                    tmp_code_lens[idx2] = 0;
+                    tmpCodeLens[idx1] = len - 1;
+                    tmpCodeLens[idx2] = 0;
                 }
             }
             root_ = node_list_[0];
@@ -136,13 +136,13 @@ namespace Sparrow.Server.Compression
 
         private int GetMaxCodeLen()
         {
-            int max_len = 0;
+            int maxLen = 0;
             for (int i = 0; i < _codeLenList.Count; i++)
             {
-                if (_codeLenList[i] > max_len)
-                    max_len = _codeLenList[i];
+                if (_codeLenList[i] > maxLen)
+                    maxLen = _codeLenList[i];
             }
-            return max_len;
+            return maxLen;
         }
 
         private void GenerateOptimalCode()

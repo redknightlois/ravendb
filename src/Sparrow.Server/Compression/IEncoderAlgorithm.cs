@@ -13,5 +13,8 @@ namespace Sparrow.Server.Compression
 
         int Decode<TEncoderState>(in TEncoderState state, in ReadOnlySpan<byte> data, in Span<byte> outputBuffer)
             where TEncoderState : struct, IEncoderState;
+
+        int Decode<TEncoderState>(in TEncoderState state, int bits, in ReadOnlySpan<byte> data, in Span<byte> outputBuffer)
+            where TEncoderState : struct, IEncoderState;
     }
 }
