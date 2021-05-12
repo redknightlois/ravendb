@@ -22,7 +22,7 @@ namespace Tryouts
         public static async Task Main(string[] args)
         {
             var tests = new Encoder3GramTests();
-            tests.SingleKeyEncoding();
+            tests.VerifyOrderPreservation();
 
             //CoraxEnron.Index(true, "Z:\\corax");
             //LuceneEnron.IndexInLucene(true);

@@ -10,76 +10,72 @@ namespace Sparrow.Server.Compression
         where TSampleEnumerator : struct, IReadOnlySpanEnumerator
     {
 
-        /// <summary>
-        /// Comparer for comparing two keys, handling equality as being greater
-        /// Use this Comparer e.g. with SortedLists or SortedDictionaries, that don't allow duplicate keys
-        /// </summary>
-        /// <typeparam name="TKey"></typeparam>
-        private class DuplicateKeyComparer : IComparer<SymbolFrequency> 
+        private struct ByFrequencyComparer : IComparer<SymbolFrequency>
         {
-            #region IComparer<TKey> Members
-
             public int Compare(SymbolFrequency x, SymbolFrequency y)
             {
-                if (x.Frequency != y.Frequency)
-                    return x.Frequency - y.Frequency;
+                if (y.Frequency != x.Frequency)
+                    return y.Frequency - x.Frequency;
 
-                int result = x.StartKey.SequenceCompareTo(y.StartKey);
-                if (result == 0)
-                    return 1;
-                return result;
+                return y.StartKey.SequenceCompareTo(x.StartKey);
             }
-
-            #endregion
         }
 
-        private readonly FastList<int> interval_freqs_ = new(32);
-        private readonly FastList<Symbol> interval_prefixes_ = new(32);
-        private readonly FastList<Symbol> interval_boundaries_ = new(32);
-        private readonly SortedList<SymbolFrequency, int> most_freq_symbols = new (32, new DuplicateKeyComparer());
-
-        public FastList<SymbolFrequency> SelectSymbols(TSampleEnumerator keys, int num_limit, FastList<SymbolFrequency> symbol_freq_list = null)
+        private struct LexicographicComparer : IComparer<SymbolFrequency>
         {
-            if ( symbol_freq_list == null )
-                symbol_freq_list = new FastList<SymbolFrequency>();
+            public int Compare(SymbolFrequency x, SymbolFrequency y)
+            {
+                return x.StartKey.SequenceCompareTo(y.StartKey);
+            }
+        }
+
+        private readonly FastList<int> _intervalFrequencies = new(32);
+        private readonly FastList<Symbol> _intervalPrefixes = new(32);
+        private readonly FastList<Symbol> _intervalBoundaries = new(32);
+        private readonly FastList<SymbolFrequency> _mostFrequentSymbols = new (32);
+
+        public FastList<SymbolFrequency> SelectSymbols(TSampleEnumerator keys, int dictionarySize, FastList<SymbolFrequency> symbolFrequenciesList = null)
+        {
+            if ( symbolFrequenciesList == null )
+                symbolFrequenciesList = new FastList<SymbolFrequency>();
             else
-                symbol_freq_list.Clear();
+                symbolFrequenciesList.Clear();
 
             if (keys.Length == 0)
-                return symbol_freq_list;
+                return symbolFrequenciesList;
 
             CountSymbolFrequency(keys);
 
-            int adjust_num_limit = num_limit;
-            if (num_limit > freq_map_.Count() * 2)
+            int adjustedDictionarySize = dictionarySize;
+            if (dictionarySize > _frequencyMap.Count() * 2)
             {
                 // 3 Gram: Input dictionary Size is too big, changing the size
-                adjust_num_limit = (freq_map_.Count() * 2 - 1) / 2;
+                adjustedDictionarySize = (_frequencyMap.Count() * 2 - 1) / 2;
             }
 
-            PickMostFreqSymbols();
+            PickMostFreqSymbols(adjustedDictionarySize);
 
-            FillInGap(adjust_num_limit);
-            Debug.Assert(interval_prefixes_.Count == interval_boundaries_.Count);
+            FillInGap();
+            Debug.Assert(_intervalPrefixes.Count == _intervalBoundaries.Count);
             
             CountIntervalFreq(keys);
-            Debug.Assert(interval_prefixes_.Count == interval_freqs_.Count);
-            for (int i = 0; i < (int)interval_boundaries_.Count; i++)
+            Debug.Assert(_intervalPrefixes.Count == _intervalFrequencies.Count);
+            for (int i = 0; i < (int)_intervalBoundaries.Count; i++)
             {
-                symbol_freq_list.Add( new SymbolFrequency(interval_boundaries_[i].StartKey, interval_freqs_[i]));
+                symbolFrequenciesList.Add( new SymbolFrequency(_intervalBoundaries[i].StartKey, _intervalFrequencies[i]));
             }
 
-            return symbol_freq_list;
+            return symbolFrequenciesList;
         }
 
         private const int GramSize = 3;
-        private readonly Dictionary<int, int> freq_map_ = new (16);
+        private readonly Dictionary<int, int> _frequencyMap = new (16);
 
         private void CountIntervalFreq(TSampleEnumerator keys)
         {
-            interval_freqs_.Clear();
-            for (int i = 0; i < interval_prefixes_.Count(); i++)
-                interval_freqs_.Add(1);
+            _intervalFrequencies.Clear();
+            for (int i = 0; i < _intervalPrefixes.Count(); i++)
+                _intervalFrequencies.Add(1);
 
             for (int i = 0; i < keys.Length; i++)
             {
@@ -87,10 +83,9 @@ namespace Sparrow.Server.Compression
                 var key = keys[i];
                 while (pos < key.Length)
                 {
-                    var cur_str = key.Slice(pos, Math.Min(3, key.Length - pos));
-                    int idx = BinarySearch(cur_str);
-                    interval_freqs_[idx]++;
-                    pos += interval_prefixes_[idx].Length;
+                    int idx = BinarySearch(key.Slice(pos, Math.Min(4, key.Length - pos)));
+                    _intervalFrequencies[idx]++;
+                    pos += _intervalPrefixes[idx].Length;
                 }
             }
         }
@@ -98,12 +93,11 @@ namespace Sparrow.Server.Compression
         private int BinarySearch(ReadOnlySpan<byte> key)
         {
             int l = 0;
-            int r = interval_boundaries_.Count;
+            int r = _intervalBoundaries.Count;
             while (r - l > 1)
             {
                 int m = (l + r) >> 1;
-                var cur_key = interval_boundaries_[m].StartKey;
-                int cmp = key.SequenceCompareTo(cur_key);
+                int cmp = key.SequenceCompareTo(_intervalBoundaries[m].StartKey);
                 if (cmp < 0)
                 {
                     r = m;
@@ -120,53 +114,86 @@ namespace Sparrow.Server.Compression
             return l;
         }
 
-        private void FillInGap(int num_symbols)
+        private void FillInGap()
         {
-            interval_prefixes_.Clear();
-            interval_boundaries_.Clear();
+            var localMostFrequentSymbols = _mostFrequentSymbols;
+            var intervalPrefixes = _intervalPrefixes;
+            var intervalBoundaries = _intervalBoundaries;
 
-            var most_freq_symbols_value =  most_freq_symbols.Keys;
+            intervalPrefixes.Clear();
+            intervalBoundaries.Clear();
 
             // Include prefixes and boundaries for every case until we hit the most frequent start key first character. 
-            FillInSingleChar(0, most_freq_symbols_value[0].StartKey[0]);
+            FillInSingleChar(0, localMostFrequentSymbols[0].StartKey[0]);
 
-            Span<byte> common_str = stackalloc byte[GramSize];
+            Span<byte> localAuxiliaryKey = stackalloc byte[GramSize];
 
-            Debug.Assert(num_symbols <= most_freq_symbols_value.Count);
-            for (int i = 0; i < num_symbols - 1; i++)
+            for (int i = 0; i < localMostFrequentSymbols.Count - 1; i++)
             {
-                var str1 = new Symbol(most_freq_symbols_value[i].StartKey);
-                var str2 = new Symbol(most_freq_symbols_value[i + 1].StartKey);
+                var key1 = new Symbol(localMostFrequentSymbols[i].StartKey);
+                var key2 = new Symbol(localMostFrequentSymbols[i + 1].StartKey);
 
-                interval_prefixes_.Add(str1);
-                interval_boundaries_.Add(str1);
+                intervalPrefixes.Add(key1);
+                intervalBoundaries.Add(key1);
 
-                if (str1.StartKey.SequenceCompareTo(str2.StartKey) != 0)
+                var key1RightBound = key1;
+                for (int j = 3 - 1; j >= 0; j--)
                 {
-                    interval_boundaries_.Add(new Symbol(str1.StartKey));
-                    if (str1.StartKey[0] != str2.StartKey[0])
+                    if (key1RightBound.StartKey[j] < 255)
                     {
-                        interval_prefixes_.Add(new Symbol(str1.StartKey.Slice(0, 1)));
-                        FillInSingleChar(str1.StartKey[0] + 1, str2.StartKey[0]);
+                        key1RightBound.StartKey[j] += 1;
+                        key1RightBound = new Symbol(key1RightBound.StartKey.Slice(0, j + 1));
+                        break;
+                    }
+                }
+
+                if (key1RightBound.StartKey.SequenceCompareTo(key2.StartKey) != 0)
+                {
+                    intervalBoundaries.Add(new Symbol(key1RightBound.StartKey));
+                    if (key1RightBound.StartKey[0] != key2.StartKey[0])
+                    {
+                        intervalPrefixes.Add(new Symbol(key1.StartKey.Slice(0, 1)));
+                        FillInSingleChar(key1.StartKey[0] + 1, key2.StartKey[0]);
                     }
                     else
                     {
-                        int length = CommonPrefix(common_str, str1, str2);
+                        int length;
+                        if (key1.StartKey[0] != key1RightBound.StartKey[0])
+                        {
+                            localAuxiliaryKey = key1RightBound.StartKey;
+                            length = localAuxiliaryKey.Length;
+                        }
+                        else
+                        {
+                            length = CommonPrefix(localAuxiliaryKey, key1, key2);
+                        }
 
                         Debug.Assert(length > 0);
-                        interval_prefixes_.Add(new Symbol(common_str.Slice(0, length)));
+                        intervalPrefixes.Add(new Symbol(localAuxiliaryKey.Slice(0, length)));
                     }
                 }
             }
 
-            var last_str = new Symbol(most_freq_symbols_value[num_symbols - 1].StartKey);
-            interval_prefixes_.Add(last_str);
-            interval_boundaries_.Add(last_str);
+            var lastKey = new Symbol(localMostFrequentSymbols[^1].StartKey);
+            intervalPrefixes.Add(lastKey);
+            intervalBoundaries.Add(lastKey);
 
-            //interval_boundaries_.Add(new Symbol(last_str.StartKey));
-            //interval_prefixes_.Add(new Symbol(last_str.StartKey.Slice(0, 1)));
+            var lastKeyRightBound = lastKey;
+            for (int j = 3 - 1; j >= 0; j--)
+            {
+                if (lastKeyRightBound.StartKey[j] < 255)
+                {
+                    lastKeyRightBound.StartKey[j] += 1;
+                    lastKeyRightBound = new Symbol(lastKeyRightBound.StartKey.Slice(0, j + 1));
+                    break;
+                }
+            }
 
-            FillInSingleChar(last_str.StartKey[0] + 1, 255);
+            intervalBoundaries.Add(new Symbol(lastKeyRightBound.StartKey));
+            intervalPrefixes.Add(new Symbol(lastKeyRightBound.StartKey.Slice(0, 1)));
+
+            if (lastKey.StartKey[0] < 255)
+                FillInSingleChar(lastKey.StartKey[0] + 1, 255);
         }
 
         private int CommonPrefix(Span<byte> commonStr, Symbol s1, Symbol s2)
@@ -211,34 +238,49 @@ namespace Sparrow.Server.Compression
 
                 // Create a symbol out of the single character and push it into the prefixes and boundaries list.
                 var singleCharacterSymbol = new Symbol(key);
-                interval_prefixes_.Add(singleCharacterSymbol);
-                interval_boundaries_.Add(singleCharacterSymbol);
+                _intervalPrefixes.Add(singleCharacterSymbol);
+                _intervalBoundaries.Add(singleCharacterSymbol);
             }
         }
 
-        private void PickMostFreqSymbols()
+        private void PickMostFreqSymbols(int dictionarySize)
         {
             Debug.Assert(GramSize == 3);
 
-            most_freq_symbols.Clear();
+            // PERF: Local reference to avoid having to access the field every time.
+            var mostFrequentSymbols = _mostFrequentSymbols;
+
+            mostFrequentSymbols.Clear();
 
             Span<byte> key = stackalloc byte[4];
             Span<byte> keySlice = key.Slice(0, 3);
-            foreach (var tuple in freq_map_)
+            foreach (var tuple in _frequencyMap)
             {
                 key[0] = (byte)(tuple.Key >> 16);
                 key[1] = (byte)(tuple.Key >> 8);
                 key[2] = (byte)(tuple.Key);
 
-                most_freq_symbols.Add(new SymbolFrequency(keySlice, tuple.Value), 0);
+                mostFrequentSymbols.Add(new SymbolFrequency(keySlice, tuple.Value));
             }
+
+            Sorter<SymbolFrequency, ByFrequencyComparer> sortByFrequency;
+            mostFrequentSymbols.Sort(ref sortByFrequency);
+
+            if (mostFrequentSymbols.Count > dictionarySize)
+                mostFrequentSymbols.Trim(dictionarySize);
+
+            Sorter<SymbolFrequency, LexicographicComparer> sortLexicographical;
+            mostFrequentSymbols.Sort(ref sortLexicographical);
         }
 
         private void CountSymbolFrequency(TSampleEnumerator keys)
         {
             Debug.Assert(GramSize <= 3);
 
-            freq_map_.Clear();
+            // PERF: Local reference to avoid having to access the field every time.
+            var frequencyMap = _frequencyMap;
+
+            frequencyMap.Clear();
 
             for (int i = 0; i < keys.Length; i++)
             {
@@ -248,10 +290,10 @@ namespace Sparrow.Server.Compression
                     var slice = key.Slice(j, GramSize);
 
                     int sliceDescriptor = slice[0] << 16 | slice[1] << 8 | slice[2];
-                    if (!freq_map_.TryGetValue(sliceDescriptor, out var frequency))
+                    if (!frequencyMap.TryGetValue(sliceDescriptor, out var frequency))
                         frequency = 0;
 
-                    freq_map_[sliceDescriptor] = frequency + 1;
+                    frequencyMap[sliceDescriptor] = frequency + 1;
                 }
             }
         }

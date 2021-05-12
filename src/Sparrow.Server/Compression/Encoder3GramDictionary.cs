@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using Sparrow.Collections;
@@ -8,6 +9,65 @@ using Sparrow.Server.Collections.Persistent;
 
 namespace Sparrow.Server.Compression
 {
+    public static class StringEscaper
+    {
+        public static string EscapeForCSharp(this string str)
+        {
+            StringBuilder sb = new StringBuilder();
+            foreach (char c in str)
+                switch (c)
+                {
+                    case '\'':
+                    case '"':
+                    case '\\':
+                        sb.Append(c.EscapeForCSharp());
+                        break;
+                    default:
+                        if (char.IsControl(c))
+                            sb.Append(c.EscapeForCSharp());
+                        else
+                            sb.Append(c);
+                        break;
+                }
+            return sb.ToString();
+        }
+        public static string EscapeForCSharp(this char chr)
+        {
+            switch (chr)
+            {//first catch the special cases with C# shortcut escapes.
+                case '\'':
+                    return @"\'";
+                case '"':
+                    return "\\\"";
+                case '\\':
+                    return @"\\";
+                case '\0':
+                    return @"\0";
+                case '\a':
+                    return @"\a";
+                case '\b':
+                    return @"\b";
+                case '\f':
+                    return @"\f";
+                case '\n':
+                    return @"\n";
+                case '\r':
+                    return @"\r";
+                case '\t':
+                    return @"\t";
+                case '\v':
+                    return @"\v";
+                default:
+                    //we need to escape surrogates with they're single chars,
+                    //but in strings we can just use the character they produce.
+                    if (char.IsControl(chr) || char.IsHighSurrogate(chr) || char.IsLowSurrogate(chr))
+                        return @"\u" + ((int)chr).ToString("X4");
+                    else
+                        return new string(chr, 1);
+            }
+        }
+    }
+
     internal unsafe struct Encoder3GramDictionary<TEncoderState>
         where TEncoderState : struct, IEncoderState
     {
@@ -27,6 +87,10 @@ namespace Sparrow.Server.Compression
         public void Build(in FastList<SymbolCode> symbolCodeList)
         {
             var table = EncodingTable;
+            table.Clear(); // Zero out the memory we are going to be using. 
+
+            // Creating the Binary Tree. 
+            var tree = BinaryTree<short>.Create(State.DecodingTable);
 
             int dictSize = symbolCodeList.Count;
             if (dictSize >= short.MaxValue)
@@ -37,20 +101,21 @@ namespace Sparrow.Server.Compression
             if (numberOfEntries < dictSize)
                 throw new ArgumentException("Not enough memory to store the dictionary");
 
-            var tree = BinaryTree<short>.Create(State.DecodingTable);
-
             for (int i = 0; i < dictSize; i++)
             {
-                var symbol = symbolCodeList[i].StartKey;
-                int symbolLength = symbolCodeList[i].Length;
+                var symbol = symbolCodeList[i];
+                int symbolLength = symbol.Length;
 
                 ref var entry = ref table[i];
 
+                // We update the size first to avoid getting a zero size start key.
+                entry.KeyLength = (byte)symbolLength;
                 var startKey = entry.StartKey;
+                
                 for (int j = 0; j < 3; j++)
                 {
                     if (j < symbolLength)
-                        startKey[j] = symbol[j];
+                        startKey[j] = symbol.StartKey[j];
                     else
                         startKey[j] = 0;
                 }
@@ -58,12 +123,14 @@ namespace Sparrow.Server.Compression
                 if (i < dictSize - 1)
                 {
                     entry.PrefixLength = 0;
-                    var nextSymbol = symbolCodeList[i + 1].StartKey;
-                    int nextSymbolLength = symbolCodeList[i + 1].Length;
 
-                    nextSymbol[nextSymbolLength - 1] -= 1;
+                    // We want a local copy of it. 
+                    var nextSymbol = symbolCodeList[i + 1];
+                    int nextSymbolLength = nextSymbol.Length;
+
+                    nextSymbol.StartKey[nextSymbolLength - 1] -= 1;
                     int j = 0;
-                    while (j < symbolLength && j < nextSymbolLength && symbol[j] == nextSymbol[j])
+                    while (j < symbolLength && j < nextSymbolLength && symbol.StartKey[j] == nextSymbol.StartKey[j])
                     {
                         entry.PrefixLength++;
                         j++;
@@ -74,16 +141,44 @@ namespace Sparrow.Server.Compression
                     entry.PrefixLength = (byte)symbolLength;
                 }
 
+                Debug.Assert(entry.PrefixLength > 0);
+
                 entry.Code = symbolCodeList[i].Code;
 
                 int codeValue = BinaryPrimitives.ReverseEndianness(entry.Code.Value << (sizeof(int) * 8 - entry.Code.Length));
                 var codeValueSpan = MemoryMarshal.Cast<int, byte>(MemoryMarshal.CreateSpan(ref codeValue, 1));
                 var reader = new BitReader(codeValueSpan, entry.Code.Length);
+
+                string aux = Encoding.ASCII.GetString(entry.StartKey.Slice(0, entry.PrefixLength));
+                Console.Write($"[{entry.PrefixLength},{Encoding.ASCII.GetString(entry.StartKey.Slice(0, entry.KeyLength)).EscapeForCSharp()}] ");
+
                 tree.Add(ref reader, (short)i);
             }
 
             _numberOfEntries[0] = dictSize;
          }
+
+        private int CompareDictionaryEntry(in ReadOnlySpan<byte> s1, ref Interval3Gram entry)
+        {
+            var dict_str = entry.StartKey;
+            for (int i = 0; i < 3; i++)
+            {
+                if (i >= s1.Length)
+                {
+                    if (dict_str[i] == 0)
+                        return 0;
+                    else
+                        return -1;
+                }
+
+                if (s1[i] < dict_str[i]) return -1;
+                if (s1[i] > dict_str[i]) return 1;
+            }
+
+            if (s1.Length > 3)
+                return 1;
+            return 0;
+        }
 
         public int Lookup(in ReadOnlySpan<byte> symbol, out Code code)
         {
@@ -95,18 +190,28 @@ namespace Sparrow.Server.Compression
             {
                 int m = (l + r) >> 1;
 
-                // TODO: Check this is doing the right thing. If we need to improve this we can do it very easily (see SpanHelpers.Byte.cs file)
                 ref var entry = ref table[m];
-                int cmp = symbol.SequenceCompareTo(entry.StartKey.Slice(0, entry.PrefixLength));
+                int cmp = CompareDictionaryEntry(symbol, ref entry);
+
+                var comparisonString = cmp < 0 ? "<" : (cmp > 0 ? ">" : "=");
+                Console.WriteLine($"{Encoding.ASCII.GetString(symbol).EscapeForCSharp()} {comparisonString} {Encoding.ASCII.GetString(entry.StartKey).EscapeForCSharp()} [{m}]");
 
                 if (cmp < 0)
+                {
                     r = m;
-                else 
+                }
+                else if (cmp == 0)
+                {
                     l = m;
-
-                if (cmp == 0)
                     break;
+                }
+                else
+                {
+                    l = m;
+                }
             }
+
+            Console.WriteLine($"{Encoding.ASCII.GetString(symbol).EscapeForCSharp()} -> {Encoding.ASCII.GetString(table[l].StartKey.Slice(0, table[l].KeyLength)).EscapeForCSharp()} [{l}]");
 
             code = table[l].Code;
             return table[l].PrefixLength;
@@ -119,6 +224,8 @@ namespace Sparrow.Server.Compression
             {
                 ref var entry = ref EncodingTable[idx];
                 symbol = entry.StartKey.Slice(0, entry.PrefixLength);
+
+                Console.Write($",bits={reader.Length - localReader.Length}");
 
                 return reader.Length - localReader.Length;
             }

@@ -109,6 +109,7 @@ namespace Sparrow.Server.Collections.Persistent
                         u.RightChild = FreeNodes;
                         FreeNodes++;
                     }
+                    Console.Write("R");
                     u = ref Nodes[u.RightChild];
                 }
                 else
@@ -123,12 +124,15 @@ namespace Sparrow.Server.Collections.Persistent
                         FreeNodes++;
                     }
 
+                    Console.Write("L");
                     u = ref Nodes[u.LeftChild];
                 }
             }
 
             u.Value = value;
             u.HasValue = true;
+
+            Console.WriteLine($",{u.Value}");
         }
 
         public bool Find(ref BitReader key, out T value)
@@ -176,14 +180,17 @@ namespace Sparrow.Server.Collections.Persistent
                 var current = key.Read();
                 if (current.IsSet)
                 {
+                    Console.Write("R");
                     u = ref Nodes[u.RightChild];
                 }
                 else
                 {
+                    Console.Write("L");
                     u = ref Nodes[u.LeftChild];
                 }
             }
 
+            Console.Write($",{u.Value}");
             value = u.Value;
             return u.HasValue;
         }

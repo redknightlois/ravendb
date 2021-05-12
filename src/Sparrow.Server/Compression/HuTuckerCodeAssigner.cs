@@ -98,7 +98,8 @@ namespace Sparrow.Server.Compression
             for (int i = 0; i < _codeLenList.Count; i++)
                 node_list_.Add(new Node(i));
 
-            int[] tmpCodeLens = ArrayPool<int>.Shared.Rent(_codeLenList.Count);
+            //int[] tmpCodeLens = ArrayPool<int>.Shared.Rent(_codeLenList.Count);
+            int[] tmpCodeLens = new int[_codeLenList.Count];
             for (int i = 0; i < _codeLenList.Count; i++)
             {
                 tmpCodeLens[i] = _codeLenList[i];
@@ -149,10 +150,15 @@ namespace Sparrow.Server.Compression
         {
             int n = _symbolsList.Count;
 
-            int[] L = ArrayPool<int>.Shared.Rent(n);
-            long[] P = ArrayPool<long>.Shared.Rent(n);
-            int[] s = ArrayPool<int>.Shared.Rent(n);
-            int[] d = ArrayPool<int>.Shared.Rent(n);
+            //int[] L = ArrayPool<int>.Shared.Rent(n);
+            //long[] P = ArrayPool<long>.Shared.Rent(n);
+            //int[] s = ArrayPool<int>.Shared.Rent(n);
+            //int[] d = ArrayPool<int>.Shared.Rent(n);
+
+            int[] L = new int[n];
+            long[] P = new long[n];
+            int[] s = new int[n];
+            int[] d = new int[n];
 
             long maxp = 1;
             for (int k = 0; k < n; k++)
@@ -243,10 +249,10 @@ namespace Sparrow.Server.Compression
                 _codeLenList.Add(L[k]);
             }
 
-            ArrayPool<int>.Shared.Return(L);
-            ArrayPool<long>.Shared.Return(P);
-            ArrayPool<int>.Shared.Return(s);
-            ArrayPool<int>.Shared.Return(d);
+            //ArrayPool<int>.Shared.Return(L);
+            //ArrayPool<long>.Shared.Return(P);
+            //ArrayPool<int>.Shared.Return(s);
+            //ArrayPool<int>.Shared.Return(d);
         }
 
         private void Clear()

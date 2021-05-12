@@ -1,13 +1,10 @@
 ﻿using System;
 using System.Buffers.Binary;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Threading.Tasks;
-using Sparrow.Collections;
 using Sparrow.Server.Binary;
 
 namespace Sparrow.Server.Compression
@@ -18,9 +15,21 @@ namespace Sparrow.Server.Compression
         [FieldOffset(0)]
         private byte _startKey;
         [FieldOffset(3)]
-        public byte PrefixLength;
+        public byte _prefixAndKeyLength;
         [FieldOffset(4)]
         public Code Code;
+
+        public byte PrefixLength
+        {
+            get { return (byte)(_prefixAndKeyLength & 0x0F); }
+            set { _prefixAndKeyLength = (byte)(_prefixAndKeyLength & 0xF0 | value & 0x0F); }
+        }
+
+        public byte KeyLength
+        {
+            get { return (byte)(_prefixAndKeyLength >> 4); }
+            set { _prefixAndKeyLength = (byte)(_prefixAndKeyLength & 0x0F | (value << 4)); }
+        }
 
         public Span<byte> StartKey => new(Unsafe.AsPointer(ref _startKey), 3);
     }
@@ -51,6 +60,23 @@ namespace Sparrow.Server.Compression
         public int Encode<TEncoderState>(in TEncoderState state, in ReadOnlySpan<byte> key, in Span<byte> outputBuffer)
             where TEncoderState : struct, IEncoderState
         {
+            string ToBinaryString(short sBuf, int sLen)
+            {
+                Span<short> value = stackalloc short[1];
+                value[0] = BinaryPrimitives.ReverseEndianness((short)(sBuf << (sizeof(short) * 8 - sLen)));
+                BitReader reader = new (MemoryMarshal.Cast<short, byte>(value), sLen);
+
+                string result = string.Empty;
+                while (reader.Length != 0)
+                {
+                    if ( reader.Read().IsSet )
+                        result += "R";
+                    else
+                        result += "L";
+                }
+                return result;
+            }
+
             Debug.Assert(outputBuffer.Length % sizeof(long) == 0); // Ensure we can safely cast to int 64
 
             var dictionary = new Encoder3GramDictionary<TEncoderState>(state);
@@ -68,7 +94,7 @@ namespace Sparrow.Server.Compression
                 int prefixLen = dictionary.Lookup(keyStr.Slice(pos), out Code code);
                 long sBuf = code.Value;
                 int sLen = code.Length;
-                // Console.WriteLine($"[{sBuf}|{sLen}|{Encoding.ASCII.GetString(keyStr.Slice(pos))}],");
+                Console.WriteLine($"[val={ToBinaryString((short)sBuf, sLen)}|bits={sLen}|consumed={prefixLen}|{Encoding.ASCII.GetString(keyStr.Slice(pos, prefixLen)).EscapeForCSharp()}]");
                 if (intBufLen + sLen > 63)
                 {
                     int numBitsLeft = 64 - intBufLen;
@@ -89,7 +115,6 @@ namespace Sparrow.Server.Compression
                 pos += prefixLen;
             }
 
-            //Console.WriteLine();
             intBuf[idx] <<= (64 - intBufLen);
             intBuf[idx] = BinaryPrimitives.ReverseEndianness(intBuf[idx]);
             return ((idx << 6) + intBufLen);
@@ -116,7 +141,9 @@ namespace Sparrow.Server.Compression
                 symbol.CopyTo(buffer);
                 buffer = buffer.Slice(symbol.Length);
 
-                if (symbol[0] == 0)
+                Console.WriteLine($",consumed={symbol.Length}");
+
+                if (symbol[^1] == 0)
                     break;
             }
 

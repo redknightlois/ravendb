@@ -34,9 +34,11 @@ namespace Sparrow.Server.Compression
             _length = (byte)startKey.Length;
         }
 
-        public ReadOnlySpan<byte> StartKey => new(Unsafe.AsPointer(ref _startKey), _length);
+        public Span<byte> StartKey => new(Unsafe.AsPointer(ref _startKey), _length);
 
         public int Length => _length;
+
+        public override string ToString() => $"({Length},{Encoding.ASCII.GetString(StartKey)})";
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -88,5 +90,7 @@ namespace Sparrow.Server.Compression
         }
 
         public ReadOnlySpan<byte> StartKey => new(Unsafe.AsPointer(ref _startKey), Length);
+
+        public override string ToString() => $"(Freq={Frequency}|{Length},{Encoding.ASCII.GetString(StartKey)})";
     }
 }
