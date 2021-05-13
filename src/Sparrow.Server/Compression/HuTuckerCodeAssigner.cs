@@ -35,22 +35,17 @@ namespace Sparrow.Server.Compression
             public bool IsLeaf => LeftChild == null;
         }
 
-        private readonly FastList<int> _cached_node_idx_list = new();
+        private readonly FastList<int> _cachedNodeIndexList = new();
 
         // For now we allocate, we don't need to do so. 
-        private FastList<SymbolFrequency> _symbolsList = new();
-        private FastList<int> _codeLenList = new();
-        private FastList<Node> node_list_ = new();
-        private Node root_;
+        private readonly FastList<SymbolFrequency> _symbolsList = new();
+        private readonly FastList<int> _codeLengthList = new();
+        private readonly FastList<Node> _nodesList = new();
+        private Node _root;
 
-        public FastList<SymbolCode> AssignCodes(in FastList<SymbolFrequency> frequency, FastList<SymbolCode> symbol_code_list = null)
+        public FastList<SymbolCode> AssignCodes(FastList<SymbolFrequency> frequency, FastList<SymbolCode> symbolCodeList = null)
         {
             Clear();
-
-            if (symbol_code_list == null)
-                symbol_code_list = new FastList<SymbolCode>();
-            else
-                symbol_code_list.Clear();
 
             // Initialize the table of symbols.
             for (int i = 0; i < frequency.Count; i++)
@@ -61,20 +56,24 @@ namespace Sparrow.Server.Compression
             GenerateOptimalCode();
             BuildBinaryTree();
 
+            if (symbolCodeList == null)
+                symbolCodeList = new FastList<SymbolCode>();
+            else
+                symbolCodeList.Clear();
+
             for (int i = 0; i < _symbolsList.Count; i++)
             {
-                Code code = Lookup(i);
-                symbol_code_list.Add(new SymbolCode(_symbolsList[i].StartKey, code));
+                symbolCodeList.AddByRef(new SymbolCode(_symbolsList[i].StartKey, Lookup(i)));
             }
 
-            return symbol_code_list;
+            return symbolCodeList;
         }
 
         private Code Lookup(int idx)
         {
             Code code = default;
 
-            Node n = root_;
+            Node n = _root;
             while (!n.IsLeaf)
             {
                 code.Value <<= 1;
@@ -95,53 +94,54 @@ namespace Sparrow.Server.Compression
         private void BuildBinaryTree()
         {
             // Initialize all leaf nodes.
-            for (int i = 0; i < _codeLenList.Count; i++)
-                node_list_.Add(new Node(i));
+            for (int i = 0; i < _codeLengthList.Count; i++)
+                _nodesList.Add(new Node(i));
 
-            //int[] tmpCodeLens = ArrayPool<int>.Shared.Rent(_codeLenList.Count);
-            int[] tmpCodeLens = new int[_codeLenList.Count];
-            for (int i = 0; i < _codeLenList.Count; i++)
+            int[] tmpCodeLens = ArrayPool<int>.Shared.Rent(_codeLengthList.Count);
+            for (int i = 0; i < _codeLengthList.Count; i++)
             {
-                tmpCodeLens[i] = _codeLenList[i];
+                tmpCodeLens[i] = _codeLengthList[i];
             }
 
             int maxCodeLen = GetMaxCodeLen();
 
-            FastList<int> nodeIdxList = _cached_node_idx_list;
+            FastList<int> nodeIndexList = _cachedNodeIndexList;
             for (int len = maxCodeLen; len > 0; len--)
             {
-                nodeIdxList.Clear();
-                for (int i = 0; i < tmpCodeLens.Length; i++)
+                nodeIndexList.WeakClear();
+                for (int i = 0; i < _codeLengthList.Count; i++)
                 {
                     if (tmpCodeLens[i] == len)
-                        nodeIdxList.Add(i);
+                        nodeIndexList.Add(i);
                 }
-                for (int i = 0; i < nodeIdxList.Count; i += 2)
+                for (int i = 0; i < nodeIndexList.Count; i += 2)
                 {
-                    int idx1 = nodeIdxList[i];
-                    int idx2 = nodeIdxList[i + 1];
+                    int idx1 = nodeIndexList[i];
+                    int idx2 = nodeIndexList[i + 1];
 
                     // Merge Nodes.
-                    Node leftNode = node_list_[idx1];
-                    Node rightNode = node_list_[idx2];
+                    Node leftNode = _nodesList[idx1];
+                    Node rightNode = _nodesList[idx2];
                     Node newNode = new Node(leftNode.LeftIdx, rightNode.RightIdx, leftNode, rightNode);
-                    node_list_[idx1] = newNode;
-                    node_list_[idx2] = null;
+                    _nodesList[idx1] = newNode;
+                    _nodesList[idx2] = null;
 
                     tmpCodeLens[idx1] = len - 1;
                     tmpCodeLens[idx2] = 0;
                 }
             }
-            root_ = node_list_[0];
+            _root = _nodesList[0];
+
+            ArrayPool<int>.Shared.Return(tmpCodeLens);
         }
 
         private int GetMaxCodeLen()
         {
             int maxLen = 0;
-            for (int i = 0; i < _codeLenList.Count; i++)
+            foreach (var codeLength in _codeLengthList)
             {
-                if (_codeLenList[i] > maxLen)
-                    maxLen = _codeLenList[i];
+                if (codeLength > maxLen)
+                    maxLen = codeLength;
             }
             return maxLen;
         }
@@ -150,15 +150,15 @@ namespace Sparrow.Server.Compression
         {
             int n = _symbolsList.Count;
 
-            //int[] L = ArrayPool<int>.Shared.Rent(n);
-            //long[] P = ArrayPool<long>.Shared.Rent(n);
-            //int[] s = ArrayPool<int>.Shared.Rent(n);
-            //int[] d = ArrayPool<int>.Shared.Rent(n);
+            int[] L = ArrayPool<int>.Shared.Rent(n);
+            long[] P = ArrayPool<long>.Shared.Rent(n);
+            int[] s = ArrayPool<int>.Shared.Rent(n);
+            int[] d = ArrayPool<int>.Shared.Rent(n);
 
-            int[] L = new int[n];
-            long[] P = new long[n];
-            int[] s = new int[n];
-            int[] d = new int[n];
+            //int[] L = new int[n];
+            //long[] P = new long[n];
+            //int[] s = new int[n];
+            //int[] d = new int[n];
 
             long maxp = 1;
             for (int k = 0; k < n; k++)
@@ -246,21 +246,20 @@ namespace Sparrow.Server.Compression
 
             for (int k = 0; k < n; k++)
             {
-                _codeLenList.Add(L[k]);
+                _codeLengthList.Add(L[k]);
             }
 
-            //ArrayPool<int>.Shared.Return(L);
-            //ArrayPool<long>.Shared.Return(P);
-            //ArrayPool<int>.Shared.Return(s);
-            //ArrayPool<int>.Shared.Return(d);
+            ArrayPool<int>.Shared.Return(L);
+            ArrayPool<long>.Shared.Return(P);
+            ArrayPool<int>.Shared.Return(s);
+            ArrayPool<int>.Shared.Return(d);
         }
 
         private void Clear()
         {
             _symbolsList.Clear();
-            _codeLenList.Clear();
-            node_list_.Clear();
-            _cached_node_idx_list.Clear();
+            _codeLengthList.Clear();
+            _nodesList.Clear();
         }
     }
 }

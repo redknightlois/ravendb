@@ -149,8 +149,8 @@ namespace Sparrow.Server.Compression
                 var codeValueSpan = MemoryMarshal.Cast<int, byte>(MemoryMarshal.CreateSpan(ref codeValue, 1));
                 var reader = new BitReader(codeValueSpan, entry.Code.Length);
 
-                string aux = Encoding.ASCII.GetString(entry.StartKey.Slice(0, entry.PrefixLength));
-                Console.Write($"[{entry.PrefixLength},{Encoding.ASCII.GetString(entry.StartKey.Slice(0, entry.KeyLength)).EscapeForCSharp()}] ");
+                //string aux = Encoding.ASCII.GetString(entry.StartKey.Slice(0, entry.PrefixLength));
+                //Console.Write($"[{entry.PrefixLength},{Encoding.ASCII.GetString(entry.StartKey.Slice(0, entry.KeyLength)).EscapeForCSharp()}] ");
 
                 tree.Add(ref reader, (short)i);
             }
@@ -158,21 +158,19 @@ namespace Sparrow.Server.Compression
             _numberOfEntries[0] = dictSize;
          }
 
-        private int CompareDictionaryEntry(in ReadOnlySpan<byte> s1, ref Interval3Gram entry)
+        private static int CompareDictionaryEntry(in ReadOnlySpan<byte> s1, ReadOnlySpan<byte> s2)
         {
-            var dict_str = entry.StartKey;
             for (int i = 0; i < 3; i++)
             {
                 if (i >= s1.Length)
                 {
-                    if (dict_str[i] == 0)
+                    if (s2[i] == 0)
                         return 0;
-                    else
-                        return -1;
+                    return -1;
                 }
 
-                if (s1[i] < dict_str[i]) return -1;
-                if (s1[i] > dict_str[i]) return 1;
+                if (s1[i] < s2[i]) return -1;
+                if (s1[i] > s2[i]) return 1;
             }
 
             if (s1.Length > 3)
@@ -191,10 +189,10 @@ namespace Sparrow.Server.Compression
                 int m = (l + r) >> 1;
 
                 ref var entry = ref table[m];
-                int cmp = CompareDictionaryEntry(symbol, ref entry);
+                int cmp = CompareDictionaryEntry(symbol, entry.StartKey);
 
-                var comparisonString = cmp < 0 ? "<" : (cmp > 0 ? ">" : "=");
-                Console.WriteLine($"{Encoding.ASCII.GetString(symbol).EscapeForCSharp()} {comparisonString} {Encoding.ASCII.GetString(entry.StartKey).EscapeForCSharp()} [{m}]");
+                //var comparisonString = cmp < 0 ? "<" : (cmp > 0 ? ">" : "=");
+                //Console.WriteLine($"{Encoding.ASCII.GetString(symbol).EscapeForCSharp()} {comparisonString} {Encoding.ASCII.GetString(entry.StartKey).EscapeForCSharp()} [{m}]");
 
                 if (cmp < 0)
                 {
@@ -211,7 +209,7 @@ namespace Sparrow.Server.Compression
                 }
             }
 
-            Console.WriteLine($"{Encoding.ASCII.GetString(symbol).EscapeForCSharp()} -> {Encoding.ASCII.GetString(table[l].StartKey.Slice(0, table[l].KeyLength)).EscapeForCSharp()} [{l}]");
+            //Console.WriteLine($"{Encoding.ASCII.GetString(symbol).EscapeForCSharp()} -> {Encoding.ASCII.GetString(table[l].StartKey.Slice(0, table[l].KeyLength)).EscapeForCSharp()} [{l}]");
 
             code = table[l].Code;
             return table[l].PrefixLength;
@@ -225,7 +223,7 @@ namespace Sparrow.Server.Compression
                 ref var entry = ref EncodingTable[idx];
                 symbol = entry.StartKey.Slice(0, entry.PrefixLength);
 
-                Console.Write($",bits={reader.Length - localReader.Length}");
+                //Console.Write($",bits={reader.Length - localReader.Length}");
 
                 return reader.Length - localReader.Length;
             }

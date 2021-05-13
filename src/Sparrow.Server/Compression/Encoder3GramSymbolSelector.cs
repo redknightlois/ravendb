@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using Sparrow.Collections;
 
 namespace Sparrow.Server.Compression
@@ -9,9 +10,9 @@ namespace Sparrow.Server.Compression
     internal unsafe class Encoder3GramSymbolSelector<TSampleEnumerator>
         where TSampleEnumerator : struct, IReadOnlySpanEnumerator
     {
-
         private struct ByFrequencyComparer : IComparer<SymbolFrequency>
         {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public int Compare(SymbolFrequency x, SymbolFrequency y)
             {
                 if (y.Frequency != x.Frequency)
@@ -23,6 +24,7 @@ namespace Sparrow.Server.Compression
 
         private struct LexicographicComparer : IComparer<SymbolFrequency>
         {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public int Compare(SymbolFrequency x, SymbolFrequency y)
             {
                 return x.StartKey.SequenceCompareTo(y.StartKey);
@@ -34,13 +36,8 @@ namespace Sparrow.Server.Compression
         private readonly FastList<Symbol> _intervalBoundaries = new(32);
         private readonly FastList<SymbolFrequency> _mostFrequentSymbols = new (32);
 
-        public FastList<SymbolFrequency> SelectSymbols(TSampleEnumerator keys, int dictionarySize, FastList<SymbolFrequency> symbolFrequenciesList = null)
+        public FastList<SymbolFrequency> SelectSymbols(in TSampleEnumerator keys, int dictionarySize, FastList<SymbolFrequency> symbolFrequenciesList = null)
         {
-            if ( symbolFrequenciesList == null )
-                symbolFrequenciesList = new FastList<SymbolFrequency>();
-            else
-                symbolFrequenciesList.Clear();
-
             if (keys.Length == 0)
                 return symbolFrequenciesList;
 
@@ -53,16 +50,22 @@ namespace Sparrow.Server.Compression
                 adjustedDictionarySize = (_frequencyMap.Count() * 2 - 1) / 2;
             }
 
-            PickMostFreqSymbols(adjustedDictionarySize);
+            PickMostFreqSymbols(adjustedDictionarySize, _mostFrequentSymbols, _frequencyMap);
 
-            FillInGap();
+            FillInGap(_mostFrequentSymbols, _intervalPrefixes, _intervalBoundaries);
             Debug.Assert(_intervalPrefixes.Count == _intervalBoundaries.Count);
             
-            CountIntervalFreq(keys);
+            CountIntervalFreq(keys, _intervalFrequencies, _intervalPrefixes, _intervalBoundaries);
             Debug.Assert(_intervalPrefixes.Count == _intervalFrequencies.Count);
+
+            if (symbolFrequenciesList == null)
+                symbolFrequenciesList = new FastList<SymbolFrequency>();
+            else
+                symbolFrequenciesList.Clear();
+
             for (int i = 0; i < (int)_intervalBoundaries.Count; i++)
             {
-                symbolFrequenciesList.Add( new SymbolFrequency(_intervalBoundaries[i].StartKey, _intervalFrequencies[i]));
+                symbolFrequenciesList.AddByRef( new SymbolFrequency(_intervalBoundaries[i].StartKey, _intervalFrequencies[i]));
             }
 
             return symbolFrequenciesList;
@@ -71,11 +74,11 @@ namespace Sparrow.Server.Compression
         private const int GramSize = 3;
         private readonly Dictionary<int, int> _frequencyMap = new (16);
 
-        private void CountIntervalFreq(TSampleEnumerator keys)
+        private static void CountIntervalFreq(in TSampleEnumerator keys, FastList<int> intervalFrequencies, FastList<Symbol> intervalPrefixes, FastList<Symbol> intervalBoundaries)
         {
-            _intervalFrequencies.Clear();
-            for (int i = 0; i < _intervalPrefixes.Count(); i++)
-                _intervalFrequencies.Add(1);
+            intervalFrequencies.Clear();
+            for (int i = 0; i < intervalPrefixes.Count; i++)
+                intervalFrequencies.Add(1);
 
             for (int i = 0; i < keys.Length; i++)
             {
@@ -83,21 +86,21 @@ namespace Sparrow.Server.Compression
                 var key = keys[i];
                 while (pos < key.Length)
                 {
-                    int idx = BinarySearch(key.Slice(pos, Math.Min(4, key.Length - pos)));
-                    _intervalFrequencies[idx]++;
-                    pos += _intervalPrefixes[idx].Length;
+                    int idx = BinarySearch(key.Slice(pos, Math.Min(4, key.Length - pos)), intervalBoundaries);
+                    intervalFrequencies[idx]++;
+                    pos += intervalPrefixes[idx].Length;
                 }
             }
         }
 
-        private int BinarySearch(ReadOnlySpan<byte> key)
+        private static int BinarySearch(ReadOnlySpan<byte> key, FastList<Symbol> intervalBoundaries)
         {
             int l = 0;
-            int r = _intervalBoundaries.Count;
+            int r = intervalBoundaries.Count;
             while (r - l > 1)
             {
                 int m = (l + r) >> 1;
-                int cmp = key.SequenceCompareTo(_intervalBoundaries[m].StartKey);
+                int cmp = key.SequenceCompareTo(intervalBoundaries[m].StartKey);
                 if (cmp < 0)
                 {
                     r = m;
@@ -114,27 +117,23 @@ namespace Sparrow.Server.Compression
             return l;
         }
 
-        private void FillInGap()
+        private static void FillInGap(FastList<SymbolFrequency> mostFrequentSymbols, FastList<Symbol> intervalPrefixes, FastList<Symbol> intervalBoundaries)
         {
-            var localMostFrequentSymbols = _mostFrequentSymbols;
-            var intervalPrefixes = _intervalPrefixes;
-            var intervalBoundaries = _intervalBoundaries;
-
             intervalPrefixes.Clear();
             intervalBoundaries.Clear();
 
             // Include prefixes and boundaries for every case until we hit the most frequent start key first character. 
-            FillInSingleChar(0, localMostFrequentSymbols[0].StartKey[0]);
+            FillInSingleChar(0, mostFrequentSymbols[0].StartKey[0], intervalPrefixes, intervalBoundaries);
 
             Span<byte> localAuxiliaryKey = stackalloc byte[GramSize];
 
-            for (int i = 0; i < localMostFrequentSymbols.Count - 1; i++)
+            for (int i = 0; i < mostFrequentSymbols.Count - 1; i++)
             {
-                var key1 = new Symbol(localMostFrequentSymbols[i].StartKey);
-                var key2 = new Symbol(localMostFrequentSymbols[i + 1].StartKey);
+                var key1 = new Symbol(mostFrequentSymbols[i].StartKey);
+                var key2 = new Symbol(mostFrequentSymbols[i + 1].StartKey);
 
-                intervalPrefixes.Add(key1);
-                intervalBoundaries.Add(key1);
+                intervalPrefixes.AddByRef(key1);
+                intervalBoundaries.AddByRef(key1);
 
                 var key1RightBound = key1;
                 for (int j = 3 - 1; j >= 0; j--)
@@ -149,11 +148,11 @@ namespace Sparrow.Server.Compression
 
                 if (key1RightBound.StartKey.SequenceCompareTo(key2.StartKey) != 0)
                 {
-                    intervalBoundaries.Add(new Symbol(key1RightBound.StartKey));
+                    intervalBoundaries.AddByRef(new Symbol(key1RightBound.StartKey));
                     if (key1RightBound.StartKey[0] != key2.StartKey[0])
                     {
-                        intervalPrefixes.Add(new Symbol(key1.StartKey.Slice(0, 1)));
-                        FillInSingleChar(key1.StartKey[0] + 1, key2.StartKey[0]);
+                        intervalPrefixes.AddByRef(new Symbol(key1.StartKey.Slice(0, 1)));
+                        FillInSingleChar(key1.StartKey[0] + 1, key2.StartKey[0], intervalPrefixes, intervalBoundaries);
                     }
                     else
                     {
@@ -165,16 +164,16 @@ namespace Sparrow.Server.Compression
                         }
                         else
                         {
-                            length = CommonPrefix(localAuxiliaryKey, key1, key2);
+                            length = CommonPrefix(localAuxiliaryKey, key1.StartKey, key2.StartKey);
                         }
 
                         Debug.Assert(length > 0);
-                        intervalPrefixes.Add(new Symbol(localAuxiliaryKey.Slice(0, length)));
+                        intervalPrefixes.AddByRef(new Symbol(localAuxiliaryKey.Slice(0, length)));
                     }
                 }
             }
 
-            var lastKey = new Symbol(localMostFrequentSymbols[^1].StartKey);
+            var lastKey = new Symbol(mostFrequentSymbols[^1].StartKey);
             intervalPrefixes.Add(lastKey);
             intervalBoundaries.Add(lastKey);
 
@@ -189,18 +188,15 @@ namespace Sparrow.Server.Compression
                 }
             }
 
-            intervalBoundaries.Add(new Symbol(lastKeyRightBound.StartKey));
-            intervalPrefixes.Add(new Symbol(lastKeyRightBound.StartKey.Slice(0, 1)));
+            intervalBoundaries.AddByRef(new Symbol(lastKeyRightBound.StartKey));
+            intervalPrefixes.AddByRef(new Symbol(lastKeyRightBound.StartKey.Slice(0, 1)));
 
             if (lastKey.StartKey[0] < 255)
-                FillInSingleChar(lastKey.StartKey[0] + 1, 255);
+                FillInSingleChar(lastKey.StartKey[0] + 1, 255, intervalPrefixes, intervalBoundaries);
         }
 
-        private int CommonPrefix(Span<byte> commonStr, Symbol s1, Symbol s2)
+        private static int CommonPrefix(Span<byte> commonStr, ReadOnlySpan<byte> str1, ReadOnlySpan<byte> str2)
         {
-            var str1 = s1.StartKey;
-            var str2 = s2.StartKey;
-
             if (str1[0] != str2[0])
                 return 0; 
 
@@ -228,7 +224,7 @@ namespace Sparrow.Server.Compression
             throw new ArgumentException();
         }
 
-        private void FillInSingleChar(int start, int last)
+        private static void FillInSingleChar(int start, int last, FastList<Symbol> intervalPrefixes, FastList<Symbol> intervalBoundaries)
         {
             Span<byte> key = stackalloc byte[1];
             for (int c = start; c <= last; c++)
@@ -238,29 +234,26 @@ namespace Sparrow.Server.Compression
 
                 // Create a symbol out of the single character and push it into the prefixes and boundaries list.
                 var singleCharacterSymbol = new Symbol(key);
-                _intervalPrefixes.Add(singleCharacterSymbol);
-                _intervalBoundaries.Add(singleCharacterSymbol);
+                intervalPrefixes.AddByRef(singleCharacterSymbol);
+                intervalBoundaries.AddByRef(singleCharacterSymbol);
             }
         }
 
-        private void PickMostFreqSymbols(int dictionarySize)
+        private void PickMostFreqSymbols(int dictionarySize, FastList<SymbolFrequency> mostFrequentSymbols, Dictionary<int, int> frequencyMap)
         {
             Debug.Assert(GramSize == 3);
-
-            // PERF: Local reference to avoid having to access the field every time.
-            var mostFrequentSymbols = _mostFrequentSymbols;
 
             mostFrequentSymbols.Clear();
 
             Span<byte> key = stackalloc byte[4];
             Span<byte> keySlice = key.Slice(0, 3);
-            foreach (var tuple in _frequencyMap)
+            foreach (var tuple in frequencyMap)
             {
                 key[0] = (byte)(tuple.Key >> 16);
                 key[1] = (byte)(tuple.Key >> 8);
                 key[2] = (byte)(tuple.Key);
 
-                mostFrequentSymbols.Add(new SymbolFrequency(keySlice, tuple.Value));
+                mostFrequentSymbols.AddByRef(new SymbolFrequency(keySlice, tuple.Value));
             }
 
             Sorter<SymbolFrequency, ByFrequencyComparer> sortByFrequency;
@@ -273,7 +266,7 @@ namespace Sparrow.Server.Compression
             mostFrequentSymbols.Sort(ref sortLexicographical);
         }
 
-        private void CountSymbolFrequency(TSampleEnumerator keys)
+        private void CountSymbolFrequency(in TSampleEnumerator keys)
         {
             Debug.Assert(GramSize <= 3);
 

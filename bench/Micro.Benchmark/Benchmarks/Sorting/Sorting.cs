@@ -23,7 +23,6 @@ namespace Micro.Benchmark.Benchmarks.Sorting
                 {
                     Environment =
                     {
-                        Runtime = CoreRuntime.Core22,
                         Platform = Platform.X64,
                         Jit = Jit.RyuJit,
                     },

@@ -94,7 +94,7 @@ namespace Sparrow.Server.Compression
                 int prefixLen = dictionary.Lookup(keyStr.Slice(pos), out Code code);
                 long sBuf = code.Value;
                 int sLen = code.Length;
-                Console.WriteLine($"[val={ToBinaryString((short)sBuf, sLen)}|bits={sLen}|consumed={prefixLen}|{Encoding.ASCII.GetString(keyStr.Slice(pos, prefixLen)).EscapeForCSharp()}]");
+                //Console.WriteLine($"[val={ToBinaryString((short)sBuf, sLen)}|bits={sLen}|consumed={prefixLen}|{Encoding.ASCII.GetString(keyStr.Slice(pos, prefixLen)).EscapeForCSharp()}]");
                 if (intBufLen + sLen > 63)
                 {
                     int numBitsLeft = 64 - intBufLen;
@@ -141,7 +141,7 @@ namespace Sparrow.Server.Compression
                 symbol.CopyTo(buffer);
                 buffer = buffer.Slice(symbol.Length);
 
-                Console.WriteLine($",consumed={symbol.Length}");
+                // Console.WriteLine($",consumed={symbol.Length}");
 
                 if (symbol[^1] == 0)
                     break;
