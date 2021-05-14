@@ -74,7 +74,7 @@ namespace Sparrow.Server.Compression
         private const int GramSize = 3;
         private readonly Dictionary<int, int> _frequencyMap = new (16);
 
-        private static void CountIntervalFreq(in TSampleEnumerator keys, FastList<int> intervalFrequencies, FastList<Symbol> intervalPrefixes, FastList<Symbol> intervalBoundaries)
+        private void CountIntervalFreq(in TSampleEnumerator keys, FastList<int> intervalFrequencies, FastList<Symbol> intervalPrefixes, FastList<Symbol> intervalBoundaries)
         {
             intervalFrequencies.Clear();
             for (int i = 0; i < intervalPrefixes.Count; i++)
@@ -93,7 +93,8 @@ namespace Sparrow.Server.Compression
             }
         }
 
-        private static int BinarySearch(ReadOnlySpan<byte> key, FastList<Symbol> intervalBoundaries)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private int BinarySearch(ReadOnlySpan<byte> key, FastList<Symbol> intervalBoundaries)
         {
             int l = 0;
             int r = intervalBoundaries.Count;
@@ -117,7 +118,7 @@ namespace Sparrow.Server.Compression
             return l;
         }
 
-        private static void FillInGap(FastList<SymbolFrequency> mostFrequentSymbols, FastList<Symbol> intervalPrefixes, FastList<Symbol> intervalBoundaries)
+        private void FillInGap(FastList<SymbolFrequency> mostFrequentSymbols, FastList<Symbol> intervalPrefixes, FastList<Symbol> intervalBoundaries)
         {
             intervalPrefixes.Clear();
             intervalBoundaries.Clear();
@@ -195,7 +196,7 @@ namespace Sparrow.Server.Compression
                 FillInSingleChar(lastKey.StartKey[0] + 1, 255, intervalPrefixes, intervalBoundaries);
         }
 
-        private static int CommonPrefix(Span<byte> commonStr, ReadOnlySpan<byte> str1, ReadOnlySpan<byte> str2)
+        private int CommonPrefix(Span<byte> commonStr, ReadOnlySpan<byte> str1, ReadOnlySpan<byte> str2)
         {
             if (str1[0] != str2[0])
                 return 0; 
@@ -224,7 +225,7 @@ namespace Sparrow.Server.Compression
             throw new ArgumentException();
         }
 
-        private static void FillInSingleChar(int start, int last, FastList<Symbol> intervalPrefixes, FastList<Symbol> intervalBoundaries)
+        private void FillInSingleChar(int start, int last, FastList<Symbol> intervalPrefixes, FastList<Symbol> intervalBoundaries)
         {
             Span<byte> key = stackalloc byte[1];
             for (int c = start; c <= last; c++)

@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using Sparrow.Collections;
@@ -68,26 +69,30 @@ namespace Sparrow.Server.Compression
         }
     }
 
-    internal unsafe struct Encoder3GramDictionary<TEncoderState>
+    internal unsafe readonly ref struct Encoder3GramDictionary<TEncoderState>
         where TEncoderState : struct, IEncoderState
     {
         public readonly TEncoderState State;
+
         public int NumberOfEntries => _numberOfEntries[0];
         public int MemoryUse => _numberOfEntries[0] * sizeof(Interval3Gram);
 
         public Encoder3GramDictionary(in TEncoderState state)
         {
             State = state;
+
+            _encodingTable = MemoryMarshal.Cast<byte, Interval3Gram>(state.EncodingTable.Slice(4));
+            _decodingTable = BinaryTree<short>.Open(state.DecodingTable);
+            _numberOfEntries = MemoryMarshal.Cast<byte, int>(state.EncodingTable.Slice(0, 4));
         }
 
-        private readonly Span<int> _numberOfEntries => MemoryMarshal.Cast<byte, int>(State.EncodingTable.Slice(0, 4));
-        private readonly Span<Interval3Gram> EncodingTable => MemoryMarshal.Cast<byte, Interval3Gram>(State.EncodingTable.Slice(4));
-        private readonly BinaryTree<short> DecodingTable => BinaryTree<short>.Open(State.DecodingTable);
+        private readonly Span<int> _numberOfEntries;
+        private readonly Span<Interval3Gram> _encodingTable;
+        private readonly BinaryTree<short> _decodingTable;
 
         public void Build(in FastList<SymbolCode> symbolCodeList)
         {
-            var table = EncodingTable;
-            table.Clear(); // Zero out the memory we are going to be using. 
+            _encodingTable.Clear(); // Zero out the memory we are going to be using. 
 
             // Creating the Binary Tree. 
             var tree = BinaryTree<short>.Create(State.DecodingTable);
@@ -106,7 +111,7 @@ namespace Sparrow.Server.Compression
                 var symbol = symbolCodeList[i];
                 int symbolLength = symbol.Length;
 
-                ref var entry = ref table[i];
+                ref var entry = ref _encodingTable[i];
 
                 // We update the size first to avoid getting a zero size start key.
                 entry.KeyLength = (byte)symbolLength;
@@ -158,6 +163,7 @@ namespace Sparrow.Server.Compression
             _numberOfEntries[0] = dictSize;
          }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static int CompareDictionaryEntry(in ReadOnlySpan<byte> s1, ReadOnlySpan<byte> s2)
         {
             for (int i = 0; i < 3; i++)
@@ -180,7 +186,7 @@ namespace Sparrow.Server.Compression
 
         public int Lookup(in ReadOnlySpan<byte> symbol, out Code code)
         {
-            var table = EncodingTable;
+            var table = _encodingTable;
 
             int l = 0;
             int r = _numberOfEntries[0];
@@ -218,9 +224,9 @@ namespace Sparrow.Server.Compression
         public int Lookup(in BitReader reader, out ReadOnlySpan<byte> symbol)
         {
             BitReader localReader = reader;
-            if (DecodingTable.FindCommonPrefix(ref localReader, out var idx))
+            if (_decodingTable.FindCommonPrefix(ref localReader, out var idx))
             {
-                ref var entry = ref EncodingTable[idx];
+                ref var entry = ref _encodingTable[idx];
                 symbol = entry.StartKey.Slice(0, entry.PrefixLength);
 
                 //Console.Write($",bits={reader.Length - localReader.Length}");
