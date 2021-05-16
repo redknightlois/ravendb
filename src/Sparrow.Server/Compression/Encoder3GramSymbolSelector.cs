@@ -38,9 +38,6 @@ namespace Sparrow.Server.Compression
 
         public FastList<SymbolFrequency> SelectSymbols(in TSampleEnumerator keys, int dictionarySize, FastList<SymbolFrequency> symbolFrequenciesList = null)
         {
-            if (keys.Length == 0)
-                return symbolFrequenciesList;
-
             CountSymbolFrequency(keys);
 
             int adjustedDictionarySize = dictionarySize;
@@ -57,6 +54,7 @@ namespace Sparrow.Server.Compression
             
             CountIntervalFreq(keys, _intervalFrequencies, _intervalPrefixes, _intervalBoundaries);
             Debug.Assert(_intervalPrefixes.Count == _intervalFrequencies.Count);
+
 
             if (symbolFrequenciesList == null)
                 symbolFrequenciesList = new FastList<SymbolFrequency>();
@@ -122,6 +120,12 @@ namespace Sparrow.Server.Compression
         {
             intervalPrefixes.Clear();
             intervalBoundaries.Clear();
+
+            if (mostFrequentSymbols.Count == 0)
+            {
+                FillInSingleChar(0, 255, intervalPrefixes, intervalBoundaries);
+                return;
+            }
 
             // Include prefixes and boundaries for every case until we hit the most frequent start key first character. 
             FillInSingleChar(0, mostFrequentSymbols[0].StartKey[0], intervalPrefixes, intervalBoundaries);

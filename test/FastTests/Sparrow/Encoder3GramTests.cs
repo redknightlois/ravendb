@@ -56,6 +56,35 @@ namespace FastTests.Sparrow
             }
         }
 
+
+        public struct EmptyKeys : IReadOnlySpanEnumerator
+        {
+            public int Length => 0;
+
+            public ReadOnlySpan<byte> this[int i] => throw new NotImplementedException();
+        }
+
+        [Fact]
+        public void EmptyDictionaryTrain()
+        {
+            var encoder = new HopeEncoder<Encoder3Gram>();
+            State state = new(64000);
+
+            int dictSize = 128;
+            EmptyKeys keys = new();
+            encoder.Train(state, keys, dictSize);
+
+            StringKeys encodingValue = new(new[] { Encoding.ASCII.GetBytes("companies/000000182\0") });
+
+            Span<byte> value = new byte[128];
+            Span<byte> decoded = new byte[128];
+
+            var encodedBitLength = encoder.Encode(state, encodingValue[0], value);
+            var decodedBytes = encoder.Decode(state, value, decoded);
+
+            Assert.Equal(0, encodingValue[0].SequenceCompareTo(decoded.Slice(0, decodedBytes)));
+        }
+
         [Fact]
         public void SingleKeyEncoding()
         {
@@ -72,6 +101,38 @@ namespace FastTests.Sparrow
 
             int dictSize = 128;
             StringKeys keys = new(keysAsStrings);
+            encoder.Train(state, keys, dictSize);
+
+            StringKeys encodingValue = new(new[] { Encoding.ASCII.GetBytes("companies/000000182\0") });
+
+            Span<byte> value = new byte[128];
+            Span<byte> decoded = new byte[128];
+
+            var encodedBitLength = encoder.Encode(state, encodingValue[0], value);
+            var decodedBytes = encoder.Decode(state, value, decoded);
+
+            Assert.Equal(0, encodingValue[0].SequenceCompareTo(decoded.Slice(0, decodedBytes)));
+        }
+
+        [Fact]
+        public void SmallValueTrain()
+        {
+            var encoder = new HopeEncoder<Encoder3Gram>();
+            State state = new(64000);
+
+            int rawLength = 0;
+            string[] keysAsStrings = new string[10000];
+            for (int i = 0; i < keysAsStrings.Length; i++)
+            {
+                keysAsStrings[i] = $"com";
+                rawLength += keysAsStrings[i].Length;
+            }
+
+            byte[][] key = new byte[1][];
+            key[0] = new byte[] {60, 61, 62};
+
+            int dictSize = 128;
+            StringKeys keys = new(key);
             encoder.Train(state, keys, dictSize);
 
             StringKeys encodingValue = new(new[] { Encoding.ASCII.GetBytes("companies/000000182\0") });
