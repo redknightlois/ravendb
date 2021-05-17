@@ -4,6 +4,8 @@ namespace Sparrow.Server.Compression
 {
     public interface IEncoderAlgorithm
     {
+        public int MaxBitSequenceLength { get; }
+
         void Train<TSampleEnumerator>(in TSampleEnumerator enumerator, int dictionarySize)
             where TSampleEnumerator : struct, IReadOnlySpanEnumerator;
 

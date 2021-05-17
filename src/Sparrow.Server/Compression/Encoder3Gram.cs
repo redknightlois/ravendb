@@ -52,7 +52,8 @@ namespace Sparrow.Server.Compression
 
         public static int GetDictionarySize(in TEncoderState state)
         {
-            throw new NotImplementedException();
+            int entries = MemoryMarshal.Cast<byte, int>(state.EncodingTable.Slice(0, 4))[0];
+            return entries * Unsafe.SizeOf<Interval3Gram>() + 8;
         }
 
         public void Train<TSampleEnumerator>(in TSampleEnumerator enumerator, int dictionarySize)
@@ -310,7 +311,14 @@ namespace Sparrow.Server.Compression
 
 
         private Span<int> _numberOfEntries => MemoryMarshal.Cast<byte, int>(_state.EncodingTable.Slice(0, 4));
-        private Span<Interval3Gram> EncodingTable => MemoryMarshal.Cast<byte, Interval3Gram>(_state.EncodingTable.Slice(4));
+
+        public int MaxBitSequenceLength
+        {
+            get { return MemoryMarshal.Read<int>(_state.EncodingTable.Slice(4, 4)); }
+            set { MemoryMarshal.Write(_state.EncodingTable.Slice(4, 4), ref value); }
+        }
+
+        private Span<Interval3Gram> EncodingTable => MemoryMarshal.Cast<byte, Interval3Gram>(_state.EncodingTable.Slice(8));
 
         private void BuildDictionary(in FastList<SymbolCode> symbolCodeList)
         {
@@ -327,6 +335,8 @@ namespace Sparrow.Server.Compression
             int numberOfEntries = (_state.EncodingTable.Length - 4) / Unsafe.SizeOf<Interval3Gram>();
             if (numberOfEntries < dictSize)
                 throw new ArgumentException("Not enough memory to store the dictionary");
+
+            int maxBitSequenceLength = 1;
 
             for (int i = 0; i < dictSize; i++)
             {
@@ -375,6 +385,7 @@ namespace Sparrow.Server.Compression
                 int codeValue = BinaryPrimitives.ReverseEndianness(entry.Code.Value << (sizeof(int) * 8 - entry.Code.Length));
                 var codeValueSpan = MemoryMarshal.Cast<int, byte>(MemoryMarshal.CreateSpan(ref codeValue, 1));
                 var reader = new BitReader(codeValueSpan, entry.Code.Length);
+                maxBitSequenceLength = Math.Max(maxBitSequenceLength, entry.Code.Length);
 
                 //string aux = Encoding.ASCII.GetString(entry.StartKey.Slice(0, entry.PrefixLength));
                 //Console.Write($"[{entry.PrefixLength},{Encoding.ASCII.GetString(entry.StartKey.Slice(0, entry.KeyLength)).EscapeForCSharp()}] ");
@@ -384,6 +395,7 @@ namespace Sparrow.Server.Compression
 
             _numberOfEntries[0] = dictSize;
             _entries = dictSize;
+            MaxBitSequenceLength = maxBitSequenceLength;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

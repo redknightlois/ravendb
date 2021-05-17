@@ -11,10 +11,12 @@ namespace Sparrow.Server.Compression
         where TAlgorithm : struct, IEncoderAlgorithm
     {
         private TAlgorithm _encoder;
+        private int _maxSequenceLength;
 
         public HopeEncoder(TAlgorithm encoder = default)
         {
             _encoder = encoder;
+            _maxSequenceLength = _encoder.MaxBitSequenceLength;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -22,6 +24,7 @@ namespace Sparrow.Server.Compression
             where TSampleEnumerator : struct, IReadOnlySpanEnumerator
         {
             _encoder.Train(enumerator, dictionarySize);
+            _maxSequenceLength = _encoder.MaxBitSequenceLength;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -68,6 +71,14 @@ namespace Sparrow.Server.Compression
         public int Decode(int bits, in ReadOnlySpan<byte> data, in Span<byte> outputBuffer)
         {
             return _encoder.Decode(bits, data, outputBuffer);
+        }
+
+        public int GetMaxEncodingBytes(int keySize)
+        {
+            if (_maxSequenceLength < 1)
+                throw new InvalidOperationException("Cannot calculate without a trained dictionary");
+
+            return (_maxSequenceLength * keySize) / 8 + 1;
         }
     }
 }

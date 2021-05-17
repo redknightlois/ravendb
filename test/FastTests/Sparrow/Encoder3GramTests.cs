@@ -83,6 +83,7 @@ namespace FastTests.Sparrow
             var decodedBytes = encoder.Decode(value, decoded);
 
             Assert.Equal(0, encodingValue[0].SequenceCompareTo(decoded.Slice(0, decodedBytes)));
+            Assert.True(encoder.GetMaxEncodingBytes(encodingValue[0].Length) >= encodedBitLength / 8);
         }
 
         [Fact]
