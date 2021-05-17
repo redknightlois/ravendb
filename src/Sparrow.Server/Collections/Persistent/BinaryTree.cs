@@ -93,7 +93,9 @@ namespace Sparrow.Server.Collections.Persistent
 
         public void Add(ref BitReader key, T value)
         {
-            ref Node u = ref Nodes[0];
+            Span<Node> nodes = Nodes;
+
+            ref Node u = ref nodes[0];
 
             while (key.Length != 0)
             {
@@ -102,7 +104,7 @@ namespace Sparrow.Server.Collections.Persistent
                 {
                     if (u.RightChild == Invalid)
                     {
-                        ref Node newNode = ref Nodes[FreeNodes];
+                        ref Node newNode = ref nodes[FreeNodes];
                         newNode._leftChild = Invalid;
                         newNode._rightChild = Invalid;
 
@@ -110,13 +112,13 @@ namespace Sparrow.Server.Collections.Persistent
                         FreeNodes++;
                     }
                     //Console.Write("R");
-                    u = ref Nodes[u.RightChild];
+                    u = ref nodes[u.RightChild];
                 }
                 else
                 {
                     if (u.LeftChild == Invalid)
                     {
-                        ref Node newNode = ref Nodes[FreeNodes];
+                        ref Node newNode = ref nodes[FreeNodes];
                         newNode._leftChild = Invalid;
                         newNode._rightChild = Invalid;
 
@@ -125,7 +127,7 @@ namespace Sparrow.Server.Collections.Persistent
                     }
 
                     //Console.Write("L");
-                    u = ref Nodes[u.LeftChild];
+                    u = ref nodes[u.LeftChild];
                 }
             }
 
@@ -137,7 +139,9 @@ namespace Sparrow.Server.Collections.Persistent
 
         public bool Find(ref BitReader key, out T value)
         {
-            ref Node u = ref Nodes[0];
+            Span<Node> nodes = Nodes;
+
+            ref Node u = ref nodes[0];
 
             while (key.Length != 0)
             {
@@ -149,7 +153,7 @@ namespace Sparrow.Server.Collections.Persistent
                         value = default;
                         return false;
                     }
-                    u = ref Nodes[u.RightChild];
+                    u = ref nodes[u.RightChild];
                 }
                 else
                 {
@@ -159,7 +163,7 @@ namespace Sparrow.Server.Collections.Persistent
                         return false;
                     }
 
-                    u = ref Nodes[u.LeftChild];
+                    u = ref nodes[u.LeftChild];
                 }
             }
 
@@ -170,7 +174,9 @@ namespace Sparrow.Server.Collections.Persistent
 
         public bool FindCommonPrefix(ref BitReader key, out T value)
         {
-            ref Node u = ref Nodes[0];
+            Span<Node> nodes = Nodes;
+
+            ref Node u = ref nodes[0];
 
             while (!u.HasValue)
             {
@@ -181,12 +187,12 @@ namespace Sparrow.Server.Collections.Persistent
                 if (current.IsSet)
                 {
                     //Console.Write("R");
-                    u = ref Nodes[u.RightChild];
+                    u = ref nodes[u.RightChild];
                 }
                 else
                 {
                     //Console.Write("L");
-                    u = ref Nodes[u.LeftChild];
+                    u = ref nodes[u.LeftChild];
                 }
             }
 

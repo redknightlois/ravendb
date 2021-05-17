@@ -67,20 +67,20 @@ namespace FastTests.Sparrow
         [Fact]
         public void EmptyDictionaryTrain()
         {
-            var encoder = new HopeEncoder<Encoder3Gram>();
             State state = new(64000);
+            var encoder = new HopeEncoder<Encoder3Gram<State>>(new Encoder3Gram<State>(state));
 
             int dictSize = 128;
             EmptyKeys keys = new();
-            encoder.Train(state, keys, dictSize);
+            encoder.Train(keys, dictSize);
 
             StringKeys encodingValue = new(new[] { Encoding.ASCII.GetBytes("companies/000000182\0") });
 
             Span<byte> value = new byte[128];
             Span<byte> decoded = new byte[128];
 
-            var encodedBitLength = encoder.Encode(state, encodingValue[0], value);
-            var decodedBytes = encoder.Decode(state, value, decoded);
+            var encodedBitLength = encoder.Encode(encodingValue[0], value);
+            var decodedBytes = encoder.Decode(value, decoded);
 
             Assert.Equal(0, encodingValue[0].SequenceCompareTo(decoded.Slice(0, decodedBytes)));
         }
@@ -88,8 +88,8 @@ namespace FastTests.Sparrow
         [Fact]
         public void SingleKeyEncoding()
         {
-            var encoder = new HopeEncoder<Encoder3Gram>();
             State state = new(64000);
+            var encoder = new HopeEncoder<Encoder3Gram<State>>(new Encoder3Gram<State>(state));
 
             int rawLength = 0;
             string[] keysAsStrings = new string[10000];
@@ -101,15 +101,15 @@ namespace FastTests.Sparrow
 
             int dictSize = 128;
             StringKeys keys = new(keysAsStrings);
-            encoder.Train(state, keys, dictSize);
+            encoder.Train(keys, dictSize);
 
             StringKeys encodingValue = new(new[] { Encoding.ASCII.GetBytes("companies/000000182\0") });
 
             Span<byte> value = new byte[128];
             Span<byte> decoded = new byte[128];
 
-            var encodedBitLength = encoder.Encode(state, encodingValue[0], value);
-            var decodedBytes = encoder.Decode(state, value, decoded);
+            var encodedBitLength = encoder.Encode(encodingValue[0], value);
+            var decodedBytes = encoder.Decode(value, decoded);
 
             Assert.Equal(0, encodingValue[0].SequenceCompareTo(decoded.Slice(0, decodedBytes)));
         }
@@ -117,8 +117,8 @@ namespace FastTests.Sparrow
         [Fact]
         public void SmallValueTrain()
         {
-            var encoder = new HopeEncoder<Encoder3Gram>();
             State state = new(64000);
+            var encoder = new HopeEncoder<Encoder3Gram<State>>(new Encoder3Gram<State>(state));
 
             int rawLength = 0;
             string[] keysAsStrings = new string[10000];
@@ -133,15 +133,15 @@ namespace FastTests.Sparrow
 
             int dictSize = 128;
             StringKeys keys = new(key);
-            encoder.Train(state, keys, dictSize);
+            encoder.Train(keys, dictSize);
 
             StringKeys encodingValue = new(new[] { Encoding.ASCII.GetBytes("companies/000000182\0") });
 
             Span<byte> value = new byte[128];
             Span<byte> decoded = new byte[128];
 
-            var encodedBitLength = encoder.Encode(state, encodingValue[0], value);
-            var decodedBytes = encoder.Decode(state, value, decoded);
+            var encodedBitLength = encoder.Encode(encodingValue[0], value);
+            var decodedBytes = encoder.Decode(value, decoded);
 
             Assert.Equal(0, encodingValue[0].SequenceCompareTo(decoded.Slice(0, decodedBytes)));
         }
@@ -155,8 +155,8 @@ namespace FastTests.Sparrow
         [MemberData("RandomSeed")]
         public void VerifyOrderPreservation(int randomSeed = 3117)
         {
-            var encoder = new HopeEncoder<Encoder3Gram>();
             State state = new(64000);
+            var encoder = new HopeEncoder<Encoder3Gram<State>>(new Encoder3Gram<State>(state));
 
             var rgn = new Random(randomSeed);
 
@@ -175,13 +175,13 @@ namespace FastTests.Sparrow
             }
 
             StringKeys keys = new(keysAsStrings);
-            encoder.Train(state, keys, dictSize);
+            encoder.Train(keys, dictSize);
 
             // Encode all keys.
             StringKeys inputValues = new(keysAsStrings);
             StringKeys outputValues = new(outputBuffers);
             Span<int> outputValuesSizeInBits = new int[keysAsStrings.Length];
-            encoder.Encode(state, inputValues, outputValues, outputValuesSizeInBits);
+            encoder.Encode(inputValues, outputValues, outputValuesSizeInBits);
 
             for (int i = 0; i < keysAsStrings.Length * 2; i++)
             {
@@ -212,8 +212,8 @@ namespace FastTests.Sparrow
         [MemberData("RandomSeed")]
         public void VerifyCorrectDecoding(int randomSeed)
         {
-            var encoder = new HopeEncoder<Encoder3Gram>();
             State state = new(64000);
+            var encoder = new HopeEncoder<Encoder3Gram<State>>(new Encoder3Gram<State>(state));
 
             var rgn = new Random(randomSeed);
             const int size = 10000;
@@ -229,7 +229,7 @@ namespace FastTests.Sparrow
 
             StringKeys keys = new(keysAsStrings);
 
-            encoder.Train(state, keys, dictSize);
+            encoder.Train(keys, dictSize);
 
             Span<byte> value = new byte[128];
             Span<byte> decoded = new byte[128];
@@ -237,13 +237,13 @@ namespace FastTests.Sparrow
             //int totalLength = 0;
             for (int i = 0; i < keys.Length; i++)
             {
-                var encodedBitLength = encoder.Encode(state, keys[i], value);
-                var decodedBytes = encoder.Decode(state, value, decoded);
+                var encodedBitLength = encoder.Encode(keys[i], value);
+                var decodedBytes = encoder.Decode(value, decoded);
 
                 if (keys[i].SequenceCompareTo(decoded.Slice(0, decodedBytes)) != 0)
                 {
-                    encodedBitLength = encoder.Encode(state, keys[i], value);
-                    decodedBytes = encoder.Decode(state, value, decoded);
+                    encodedBitLength = encoder.Encode(keys[i], value);
+                    decodedBytes = encoder.Decode(value, decoded);
                 }
 
                 //if (keys[i].SequenceCompareTo(decoded.Slice(0, decodedBytes)) != 0)

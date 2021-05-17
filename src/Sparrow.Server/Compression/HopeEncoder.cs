@@ -1,12 +1,14 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading.Tasks;
 
 namespace Sparrow.Server.Compression
 {
-    public sealed class HopeEncoder<TAlgorithm> where TAlgorithm : struct, IEncoderAlgorithm
+    public sealed class HopeEncoder<TAlgorithm>
+        where TAlgorithm : struct, IEncoderAlgorithm
     {
         private TAlgorithm _encoder;
 
@@ -15,15 +17,15 @@ namespace Sparrow.Server.Compression
             _encoder = encoder;
         }
 
-        public void Train<TEncoderState, TSampleEnumerator>(in TEncoderState state, in TSampleEnumerator enumerator, int dictionarySize)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void Train<TSampleEnumerator>(in TSampleEnumerator enumerator, int dictionarySize)
             where TSampleEnumerator : struct, IReadOnlySpanEnumerator
-            where TEncoderState : struct, IEncoderState
         {
-            _encoder.Train(state, enumerator, dictionarySize);
+            _encoder.Train(enumerator, dictionarySize);
         }
 
-        public void Encode<TEncoderState, TSource, TDestination>(in TEncoderState state, in TSource inputBuffers, in TDestination outputBuffers, in Span<int> outputSizes)
-            where TEncoderState : struct, IEncoderState
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void Encode<TSource, TDestination>(in TSource inputBuffers, in TDestination outputBuffers, Span<int> outputSizes)
             where TSource : struct, IReadOnlySpanEnumerator
             where TDestination : struct, ISpanEnumerator
         {
@@ -33,17 +35,11 @@ namespace Sparrow.Server.Compression
             if (outputBuffers.Length != inputBuffers.Length)
                 throw new ArgumentException($"'{nameof(outputBuffers)}' and '{nameof(inputBuffers)}' must be of the same size.");
 
-            // FIXME: This is stupidly inefficient, but just doing so to showcase how it works.
-            for (int i = 0; i < inputBuffers.Length; i++)
-            {
-                var input = inputBuffers[i];
-                var output = outputBuffers[i];
-                outputSizes[i] = _encoder.Encode(in state, in input, in output);
-            }
+            _encoder.EncodeBatch(in inputBuffers, outputSizes, in outputBuffers);
         }
 
-        public void Decode<TEncoderState, TSource, TDestination>(in TEncoderState state, in TSource inputBuffers, in TDestination outputBuffers, in Span<int> outputSizes)
-            where TEncoderState : struct, IEncoderState
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void Decode<TSource, TDestination>(in TSource inputBuffers, in TDestination outputBuffers, Span<int> outputSizes)
             where TSource : struct, IReadOnlySpanEnumerator
             where TDestination : struct, ISpanEnumerator
         {
@@ -53,28 +49,25 @@ namespace Sparrow.Server.Compression
             if (outputBuffers.Length != inputBuffers.Length)
                 throw new ArgumentException($"'{nameof(outputBuffers)}' and '{nameof(inputBuffers)}' must be of the same size.");
 
-            // FIXME: This is stupidly inefficient, but just doing so to showcase how it works.
-            for (int i = 0; i < inputBuffers.Length; i++)
-            {
-                var input = inputBuffers[i];
-                var output = outputBuffers[i];
-                outputSizes[i] = _encoder.Decode(in state, in input, in output);
-            }
+            _encoder.DecodeBatch(in inputBuffers, outputSizes, in outputBuffers);
         }
 
-        public int Encode<TEncoderState>(in TEncoderState state, in ReadOnlySpan<byte> data, in Span<byte> outputBuffer) where TEncoderState : struct, IEncoderState
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public int Encode(in ReadOnlySpan<byte> data, in Span<byte> outputBuffer)
         {
-            return _encoder.Encode(in state, in data, in outputBuffer);
+            return _encoder.Encode(data, outputBuffer);
         }
 
-        public int Decode<TEncoderState>(in TEncoderState state, in ReadOnlySpan<byte> data, in Span<byte> outputBuffer) where TEncoderState : struct, IEncoderState
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public int Decode(in ReadOnlySpan<byte> data, in Span<byte> outputBuffer)
         {
-            return _encoder.Decode(in state, in data, in outputBuffer);
+            return _encoder.Decode(data, outputBuffer);
         }
 
-        public int Decode<TEncoderState>(in TEncoderState state, int bits, in ReadOnlySpan<byte> data, in Span<byte> outputBuffer) where TEncoderState : struct, IEncoderState
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public int Decode(int bits, in ReadOnlySpan<byte> data, in Span<byte> outputBuffer)
         {
-            return _encoder.Decode(in state, bits, in data, in outputBuffer);
+            return _encoder.Decode(bits, data, outputBuffer);
         }
     }
 }

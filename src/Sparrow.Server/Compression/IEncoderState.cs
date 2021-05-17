@@ -1,10 +1,20 @@
 ﻿using System;
+using System.Runtime.CompilerServices;
 
 namespace Sparrow.Server.Compression
 { 
     public interface IEncoderState
     {
-        Span<byte> EncodingTable { get; }
-        Span<byte> DecodingTable { get; }
+        Span<byte> EncodingTable
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get;
+        }
+
+        Span<byte> DecodingTable
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get;
+        }
     }
 }

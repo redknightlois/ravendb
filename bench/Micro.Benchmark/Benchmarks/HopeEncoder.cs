@@ -48,12 +48,12 @@ namespace Micro.Benchmark.Benchmarks
             }
         }
 
-
-        private HopeEncoder<Encoder3Gram> _encoder;
-
-        private State _trainedState = new(64000);
-
         private State _state = new(64000);
+        private HopeEncoder<Encoder3Gram<State>> _encoder;
+        
+        private State _trainedState = new(64000);
+        private HopeEncoder<Encoder3Gram<State>> _trainedEncoder;
+
         private StringKeys _sequentialKeys;
         private StringKeys _outputBuffers;
         private StringKeys _encodedBuffers;
@@ -66,8 +66,7 @@ namespace Micro.Benchmark.Benchmarks
         [GlobalSetup]
         public void Setup()
         {
-            _encoder = new HopeEncoder<Encoder3Gram>();
-            _state = new(64000);
+            _encoder = new HopeEncoder<Encoder3Gram<State>>(new Encoder3Gram<State>(_state));
 
             string[] keysAsStrings = new string[Keys];
             byte[][] outputBuffers = new byte[Keys][];
@@ -90,8 +89,9 @@ namespace Micro.Benchmark.Benchmarks
             _encodedBuffersSize = new int[keysAsStrings.Length];
             _encodedOutputBuffers = new StringKeys(encodedOutputBuffers);
 
-            _encoder.Train(_trainedState, _sequentialKeys, 128);
-            _encoder.Encode(_trainedState, _sequentialKeys, _encodedBuffers, _encodedBuffersSize);
+            _trainedEncoder = new HopeEncoder<Encoder3Gram<State>>(new Encoder3Gram<State>(_trainedState));
+            _trainedEncoder.Train(_sequentialKeys, 128);
+            _trainedEncoder.Encode(_sequentialKeys, _encodedBuffers, _encodedBuffersSize);
         }
 
         private struct State : IEncoderState
@@ -145,19 +145,19 @@ namespace Micro.Benchmark.Benchmarks
         [Benchmark]
         public void Training()
         {
-            _encoder.Train(_state, _sequentialKeys, DictionarySize);
+            _trainedEncoder.Train(_sequentialKeys, DictionarySize);
         }
 
         [Benchmark(OperationsPerInvoke = Keys)]
         public void Encode()
         {
-            _encoder.Encode(_trainedState, _sequentialKeys, _outputBuffers, _outputBuffersSize);
+            _trainedEncoder.Encode(_sequentialKeys, _outputBuffers, _outputBuffersSize);
         }
 
         [Benchmark(OperationsPerInvoke = Keys)]
         public void Decode()
         {
-            _encoder.Decode(_trainedState, _encodedBuffers, _encodedOutputBuffers, _encodedBuffersSize);
+            _trainedEncoder.Decode(_encodedBuffers, _encodedOutputBuffers, _encodedBuffersSize);
         }
     }
 }
