@@ -667,9 +667,11 @@ namespace Voron.Data.CompactTrees
         public void Add(ReadOnlySpan<byte> key, long value)
         {
             if (value < 0)
-                throw new ArgumentOutOfRangeException(nameof(value), "Only positive values are allowed");
-            if (key.Length > 1024 || key.Length == 0)
-                throw new ArgumentOutOfRangeException(nameof(key), "key must be between 1 and 1024 bytes in size");
+                throw new ArgumentOutOfRangeException(nameof(value), value, "Only positive values are allowed");
+            if (key.Length > 1024)
+                throw new ArgumentOutOfRangeException(nameof(key), Encoding.UTF8.GetString(key),"key must be less than 1024 bytes in size");
+            if(key.Length <= 0)
+                throw new ArgumentOutOfRangeException(nameof(key), Encoding.UTF8.GetString(key), "key must be at least 1 byte");
 
             var encodedKey = FindPageFor(key);
             AddToPage(encodedKey, value);
