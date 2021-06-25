@@ -56,6 +56,7 @@ namespace Corax
             new Dictionary<Slice, Dictionary<Slice, List<long>>>(SliceComparer.Instance);
 
         private readonly long _containerId;
+        private static bool DebugThis;
 
         public long Index(string id, Span<byte> data, Dictionary<Slice, int> knownFields)
         {
@@ -167,6 +168,14 @@ namespace Corax
                 Array.Sort(sortedTerms, SliceComparer.Instance);
                 foreach (var term in sortedTerms)
                 {
+                    if (term.ToString() == "Pipeline")
+                    {
+                        Console.WriteLine();
+                    }
+                    if (DebugThis)
+                    {
+                        ReadOnlySpan<byte> readOnlySpan = Container.Get(llt,16492);
+                    }
                     var entries = terms[term];
                     ReadOnlySpan<byte> termsSpan = term.AsSpan();
 
@@ -249,7 +258,7 @@ namespace Corax
             var llt = Transaction.LowLevelTransaction;
             for (int i = 1; i < entries.Count; i++)
             {
-                if (pos + 10 >= tmpBuf.Length)
+                if (pos + 10 < tmpBuf.Length)
                 {
                     pos += ZigZag.Encode(tmpBuf.Slice(pos), entries[i] - entries[i - 1]);
                     continue;
@@ -268,6 +277,10 @@ namespace Corax
             }
 
             var termId = Container.Allocate(llt, _containerId, pos, out var space);
+            if (termId == 16492)
+            {
+                DebugThis = true;
+            }
             tmpBuf.Slice(0, pos).CopyTo(space);
             fieldTree.Add(termsSpan, termId | (long)TermIdMask.Small);
         }
