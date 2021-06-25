@@ -700,8 +700,8 @@ namespace Voron.Data.CompactTrees
                 }
 
                 // remove the entry, we'll need to add it as new
-                var pos = state.LastSearchPosition == 0 ? 1 : state.LastSearchPosition;
-                entriesOffsets[pos..].CopyTo(entriesOffsets[(pos - 1)..]);
+                entriesOffsets[(state.LastSearchPosition+1)..].CopyTo(entriesOffsets[state.LastSearchPosition..]);
+
                 state.Header->Lower -= sizeof(short);
                 state.Header->FreeSpace += sizeof(short);
                 entriesOffsets = state.EntriesOffsets;
