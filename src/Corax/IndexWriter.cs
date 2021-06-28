@@ -32,7 +32,6 @@ namespace Corax
             }
         }
 
-
         // The reason why we want to have the transaction open for us is so that we avoid having
         // to explicitly provide the index writer with opening semantics and also every new
         // writer becomes essentially a unit of work which makes reusing assets tracking more explicit.
@@ -40,29 +39,10 @@ namespace Corax
         {
             _environment = environment;
             _transactionPersistentContext = new TransactionPersistentContext(true);
-            Transaction = _environment.WriteTransaction(_transactionPersistentContext);            
+            Transaction = _environment.WriteTransaction(_transactionPersistentContext);
 
-            var exists = Transaction.LowLevelTransaction.RootObjects.Read(PostingListsSlice);
-            if (exists == null)
-            {
-                _postingListContainerId = Container.Create(Transaction.LowLevelTransaction);
-                Transaction.LowLevelTransaction.RootObjects.Add(PostingListsSlice, _postingListContainerId);
-            }
-            else
-            {
-                _postingListContainerId = exists.Reader.ReadLittleEndianInt64();
-            }
-            exists = Transaction.LowLevelTransaction.RootObjects.Read(EntriesContainerSlice);
-            if (exists == null)
-            {
-                _entriesContainerId = Container.Create(Transaction.LowLevelTransaction);
-                Transaction.LowLevelTransaction.RootObjects.Add(EntriesContainerSlice, _entriesContainerId);
-            }
-            else
-            {
-                _entriesContainerId = exists.Reader.ReadLittleEndianInt64();
-            }
-
+            _postingListContainerId = Transaction.OpenContainer(PostingListsSlice);
+            _entriesContainerId = Transaction.OpenContainer(EntriesContainerSlice);
         }
 
         private readonly Dictionary<Slice, Dictionary<Slice, List<long>>> _buffer =
