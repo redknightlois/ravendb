@@ -11,13 +11,13 @@ namespace Voron.Data.Sets
 {
     public readonly unsafe struct SetLeafPage
     {
-        private readonly byte* _base;
+        private readonly Page _page;
         private const int MaxNumberOfRawValues = 256;
         private const int MinNumberOfRawValues = 64;
         private const int MaxNumberOfCompressedEntries = 16;
         public ref SetLeafPageHeader Header => ref MemoryMarshal.AsRef<SetLeafPageHeader>(Span);
         
-        public Span<byte> Span => new Span<byte>(_base, Constants.Storage.PageSize);
+        public readonly Span<byte> Span => new Span<byte>(_page.Pointer, Constants.Storage.PageSize);
 
         public struct CompressedHeader
         {
@@ -30,13 +30,13 @@ namespace Voron.Data.Sets
             }
         }
 
-        public Span<CompressedHeader> Positions => new Span<CompressedHeader>(_base + PageHeader.SizeOf, Header.NumberOfCompressedPositions);
+        public Span<CompressedHeader> Positions => new Span<CompressedHeader>(_page.Pointer + PageHeader.SizeOf, Header.NumberOfCompressedPositions);
         private int OffsetOfRawValuesStart => Constants.Storage.PageSize - (Header.NumberOfRawValues * sizeof(int));
-        private Span<int> RawValues => new Span<int>(_base + OffsetOfRawValuesStart, Header.NumberOfRawValues);
-        
-        public SetLeafPage(byte* @base)
+        private Span<int> RawValues => new Span<int>(_page.Pointer + OffsetOfRawValuesStart, Header.NumberOfRawValues);
+
+        public SetLeafPage(Page page)
         {
-            _base = @base;
+            _page = page;
         }
 
         public void Init(long baseline)
@@ -54,8 +54,9 @@ namespace Voron.Data.Sets
             private readonly SetLeafPage _parent;
             private readonly Span<int> _scratch;
             private Span<int> _current;
+            private Span<byte> _compressedEntryBuffer;
             private int _rawValuesIndex, _compressedEntryIndex;
-            private PForDecoder _decoder;
+            private PForDecoder.DecoderState _decoderState;
             private bool _hasDecoder;
 
             public Iterator(SetLeafPage parent, Span<int> scratch)
@@ -63,10 +64,13 @@ namespace Voron.Data.Sets
                 _parent = parent;
                 _scratch = scratch;
                 _rawValuesIndex = _parent.Header.NumberOfRawValues-1;
-                _compressedEntryIndex = 0;
-                _current = default;
+                _compressedEntryIndex = 0;                
                 _hasDecoder = parent.Header.NumberOfCompressedPositions > 0;
-                _decoder = default;
+
+                _current = default;
+                _decoderState = default;
+                _compressedEntryBuffer = default;
+
                 if (_hasDecoder)
                     InitializeDecoder(0);
             }
@@ -74,8 +78,9 @@ namespace Voron.Data.Sets
             private void InitializeDecoder(int index)
             {
                 ref var pos = ref _parent.Positions[index];
-                var compressedEntryBuffer = _parent.Span.Slice(pos.Position, pos.Length);
-                _decoder = new PForDecoder(compressedEntryBuffer, _scratch);
+                _compressedEntryBuffer = _parent.Span.Slice(pos.Position, pos.Length);
+                _decoderState = PForDecoder.Initialize(_compressedEntryBuffer);
+                //_decoder = new PForDecoder(compressedEntryBuffer, _scratch);
             }
 
             public bool MoveNext(out long l)
@@ -126,7 +131,7 @@ namespace Voron.Data.Sets
             {
                 while (_current.IsEmpty && _hasDecoder)
                 {
-                    _current = _decoder.Decode();
+                    _current = PForDecoder.Decode(ref _decoderState, _compressedEntryBuffer, _scratch);
                     if (_current.IsEmpty == false)
                         return;
 
@@ -137,8 +142,9 @@ namespace Voron.Data.Sets
                     }
 
                     ref var pos = ref _parent.Positions[_compressedEntryIndex];
-                    var compressedEntryBuffer = _parent.Span.Slice(pos.Position, pos.Length);
-                    _decoder = new PForDecoder(compressedEntryBuffer, _scratch);
+                    _compressedEntryBuffer = _parent.Span.Slice(pos.Position, pos.Length);
+                    _decoderState = PForDecoder.Initialize(_compressedEntryBuffer);
+                    //_decoder = new PForDecoder(compressedEntryBuffer, _scratch);
                 }
             }
             public void SkipTo(long val)
@@ -170,7 +176,7 @@ namespace Voron.Data.Sets
                 else
                 {
                     _hasDecoder = false;
-                    _decoder = default;
+                    _decoderState = default;
                 }
             }
         }
@@ -261,7 +267,7 @@ namespace Voron.Data.Sets
 
         private int GetCompressRangeEnd(ref CompressedHeader pos)
         {
-            var compressed = new Span<byte>(_base + pos.Position, pos.Length);
+            var compressed = new Span<byte>(_page.Pointer + pos.Position, pos.Length);
             var end = MemoryMarshal.Cast<byte, int>(compressed.Slice(compressed.Length -4))[0];
             return end;
         }
@@ -432,13 +438,13 @@ namespace Voron.Data.Sets
                 pos = ref Positions[0];
                 Span<int> scratch = stackalloc int[PForEncoder.BufferLen];
                 var compressedEntryBuffer = Span.Slice(pos.Position, pos.Length);
-                var decoder = new PForDecoder(compressedEntryBuffer, scratch);
-                Span<int> decode = decoder.Decode();
-                if (decode.IsEmpty)
-                {
-                    Console.WriteLine();
-                }
-                first = decode[0];
+                var decoderState = PForDecoder.Initialize(compressedEntryBuffer);
+                var decoded = PForDecoder.Decode(ref decoderState, compressedEntryBuffer, scratch);
+                //if (decoded.IsEmpty)
+                //{
+                //    Console.WriteLine();
+                //}
+                first = decoded[0];
             }
 
             var values = RawValues;

@@ -373,8 +373,8 @@ namespace Voron.Debugging
         private static unsafe void RenderPageInternal(Set tree, Page page, TextWriter sw, string text, bool open)
         {
             var header = new SetCursorState { Page = page };
-            var leaf = new SetLeafPage(page.Pointer);
-            var branch = new SetBranchPage(page.Pointer);
+            var leaf = new SetLeafPage(page);
+            var branch = new SetBranchPage(page);
 
             List<long> leafEntries = null;
             if (header.IsLeaf)

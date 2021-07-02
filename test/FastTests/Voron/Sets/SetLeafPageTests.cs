@@ -34,7 +34,7 @@ namespace Tryouts
         [InlineData(4096 + 257)] // with compressed x 16 (so will recompress) 
         public void CanAddAndRead(int size)
         {
-            var leaf = new SetLeafPage(_pagePtr);
+            var leaf = new SetLeafPage(new Page(_pagePtr));
             leaf.Init(0);
             var list = new List<long>();
             var buf = new int[] {12, 18};
@@ -56,7 +56,7 @@ namespace Tryouts
         [InlineData(4096 + 257)] // with compressed x 16 (so will recompress) 
         public void CanAddAndRemove(int size)
         {
-            var leaf = new SetLeafPage(_pagePtr);
+            var leaf = new SetLeafPage(new Page(_pagePtr));
             leaf.Init(0);
             var buf = new int[] {12, 18};
             var start = 24;
@@ -84,7 +84,7 @@ namespace Tryouts
         [InlineData(4096 + 257)] // with compressed x 16 (so will recompress) 
         public void CanHandleDuplicateValues(int size)
         {
-            var leaf = new SetLeafPage(_pagePtr);
+            var leaf = new SetLeafPage(new Page(_pagePtr));
             leaf.Init(0);
             var list = new List<long>();
             var buf = new int[] {12, 18};
