@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -59,10 +59,12 @@ namespace Voron.Data.Sets
             private PForDecoder.DecoderState _decoderState;
             private bool _hasDecoder;
 
-            public Iterator(SetLeafPage parent, Span<int> scratch)
+            public Iterator(SetLeafPage parent, ByteStringContext allocator)
             {
+                allocator.Allocate(PForEncoder.BufferLen * sizeof(int), out var scratch);
+
                 _parent = parent;
-                _scratch = scratch;
+                _scratch = MemoryMarshal.Cast<byte, int>(scratch.ToSpan());
                 _rawValuesIndex = _parent.Header.NumberOfRawValues-1;
                 _compressedEntryIndex = 0;                
                 _hasDecoder = parent.Header.NumberOfCompressedPositions > 0;
@@ -181,11 +183,11 @@ namespace Voron.Data.Sets
             }
         }
 
-        public List<long> GetDebugOutput()
+        public List<long> GetDebugOutput(LowLevelTransaction llt)
         {
             var list = new List<long>();
-            Span<int> scratch = stackalloc int[128];
-            var it = GetIterator(scratch);
+            // Span<int> scratch = stackalloc int[128];
+            var it = GetIterator(llt);
             while (it.MoveNext(out long cur))
             {
                 list.Add(cur);
@@ -193,7 +195,7 @@ namespace Voron.Data.Sets
             return list;
         }
 
-        public Iterator GetIterator(Span<int> scratch) => new Iterator(this, scratch);
+        public Iterator GetIterator(LowLevelTransaction llt) => new Iterator(this, llt.Allocator);
 
         public bool Add(LowLevelTransaction tx, long value)
         {
@@ -274,6 +276,7 @@ namespace Voron.Data.Sets
 
         private ref struct Compressor
         {
+            private readonly LowLevelTransaction _llt;
             private readonly SetLeafPage _parent;
             private readonly TemporaryPage _tmpPage;
             private readonly IDisposable _releaseTempPage;
@@ -295,6 +298,7 @@ namespace Voron.Data.Sets
 
             public Compressor(SetLeafPage parent, LowLevelTransaction tx)
             {
+                _llt = tx;
                 _parent = parent;
                 _releaseTempPage = tx.Environment.GetTemporaryPage(tx, out _tmpPage);
                 _tmpPage.AsSpan().Clear();
@@ -315,7 +319,7 @@ namespace Voron.Data.Sets
 
             public bool TryCompressRawValues()
             {
-                var it = _parent.GetIterator(_scratchDecoder);
+                var it = _parent.GetIterator(_llt);
                 int compressedEntryIndex = 0;
                 if (_parent.Header.NumberOfCompressedPositions != MaxNumberOfCompressedEntries &&
                     _parent.Header.NumberOfRawValues != 0)
@@ -440,10 +444,6 @@ namespace Voron.Data.Sets
                 var compressedEntryBuffer = Span.Slice(pos.Position, pos.Length);
                 var decoderState = PForDecoder.Initialize(compressedEntryBuffer);
                 var decoded = PForDecoder.Decode(ref decoderState, compressedEntryBuffer, scratch);
-                //if (decoded.IsEmpty)
-                //{
-                //    Console.WriteLine();
-                //}
                 first = decoded[0];
             }
 

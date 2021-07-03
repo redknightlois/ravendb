@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using Sparrow.Server;
 using Voron;
@@ -45,7 +45,7 @@ namespace Tryouts
                 list.Add(start);
                 Assert.True(leaf.Add(_llt, start));
             }
-            Assert.Equal(list, leaf.GetDebugOutput());
+            Assert.Equal(list, leaf.GetDebugOutput(_llt));
         }
         
         [Theory]
@@ -72,7 +72,7 @@ namespace Tryouts
                 start += buf[i % buf.Length];
                 Assert.True(leaf.Remove(_llt, start));
             }
-            Assert.Empty(leaf.GetDebugOutput());
+            Assert.Empty(leaf.GetDebugOutput(_llt));
         }
 
         
@@ -96,7 +96,7 @@ namespace Tryouts
                 start += buf[i % buf.Length];
             }
             Assert.True(leaf.Add(_llt, 24)); // should be no op
-            Assert.Equal(list, leaf.GetDebugOutput());
+            Assert.Equal(list, leaf.GetDebugOutput(_llt));
         }
 
         public void Dispose()

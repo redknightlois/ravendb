@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -90,8 +90,8 @@ namespace Voron.Data.Sets
             // if the two pages together will be bigger than 75%, can skip merging
             if (sibling.SpaceUsed + leaf.SpaceUsed > Constants.Storage.PageSize / 2 + Constants.Storage.PageSize / 4)
                 return;
-            Span<int> scratch = stackalloc int[PForEncoder.BufferLen];
-            var it = sibling.GetIterator(scratch);
+            //Span<int> scratch = stackalloc int[PForEncoder.BufferLen];
+            var it = sibling.GetIterator(_llt);
             while (it.MoveNext(out long v))
             {
                 if (leaf.Add(_llt, v) == false)
@@ -495,8 +495,8 @@ namespace Voron.Data.Sets
         public ref struct Iterator
         {
             private readonly Set _parent;
-            private readonly Span<int> _scratch;
-            private ByteStringContext<ByteStringMemoryCache>.InternalScope _scope;
+            // private readonly Span<int> _scratch;
+            //private ByteStringContext<ByteStringMemoryCache>.InternalScope _scope;
             private SetLeafPage.Iterator _it;
 
             public long Current;
@@ -504,7 +504,7 @@ namespace Voron.Data.Sets
             public Iterator(Set parent)
             {
                 _parent = parent;
-                _scope = _parent._llt.Allocator.Allocate(PForEncoder.BufferLen, out _scratch);
+                //_scope = _parent._llt.Allocator.Allocate(PForEncoder.BufferLen, out _scratch);
                 Current = default;
                 _it = default;
             }
@@ -514,7 +514,7 @@ namespace Voron.Data.Sets
                 _parent.FindPageFor(from);
                 ref var state = ref _parent._stk[_parent._pos];
                 var leafPage = new SetLeafPage(state.Page);
-                _it = leafPage.GetIterator(_scratch);
+                _it = leafPage.GetIterator(_parent._llt);
                 _it.SkipTo(from);
                 while (_it.MoveNext(out long v))
                 {
@@ -561,7 +561,7 @@ namespace Voron.Data.Sets
                         _parent._stk[_parent._pos].LastSearchPosition = -1;
                         continue;
                     }
-                    _it = new SetLeafPage(page).GetIterator(_scratch);
+                    _it = new SetLeafPage(page).GetIterator(_parent._llt);
                     if (_it.MoveNext(out Current))
                         return true;
                 }
@@ -574,7 +574,7 @@ namespace Voron.Data.Sets
 
             public void Dispose()
             {
-                _scope.Dispose();
+                //_scope.Dispose();
             }
         }
     }
