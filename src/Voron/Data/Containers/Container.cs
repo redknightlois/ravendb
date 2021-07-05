@@ -65,7 +65,8 @@ namespace Voron.Data.Containers
         private int SpaceUsed(in Span<ItemMetadata> offsets)
         {
             var size = Header.NumberOfOffsets * sizeof(ItemMetadata) + PageHeader.SizeOf;
-            foreach (var item in offsets) size += item.Size;
+            foreach (var item in offsets)
+                size += item.Size;
             return size;
         }
 
@@ -198,7 +199,7 @@ namespace Voron.Data.Containers
 
             var activePage = llt.ModifyPage(rootContainer.Header.NextFreePage);
             var container = new Container(activePage);
-            (var reqSize, var pos) = GetRequiredSizeAndPosition(size, container);
+            var (reqSize, pos) = GetRequiredSizeAndPosition(size, container);
 
             if (container.HasEnoughSpaceFor(reqSize) == false)
             {
@@ -331,7 +332,7 @@ namespace Voron.Data.Containers
             return Header.CeilingOfOffsets + reqSize < Header.FloorOfData;
         }
 
-        private static (int Size, int Position) GetRequiredSizeAndPosition(int size, Container container)
+        private static (int Size, int Position) GetRequiredSizeAndPosition(int size, in Container container)
         {
             var pos = 0;
             var offsets = container.Offsets;
@@ -443,24 +444,15 @@ namespace Voron.Data.Containers
             return container.Get(offset);
         }
 
-        public static Item Get(LowLevelTransaction llt, long id)
+        public static ReadOnlySpan<byte> Get(LowLevelTransaction llt, long id)
         {
             var pageNum = id / Constants.Storage.PageSize;
             var offset = (int)(id % Constants.Storage.PageSize);
 
             var page = llt.GetPage(pageNum);
-            if (offset == 0)
-            {
-                Debug.Assert(page.IsOverflow);
-                int numberOfPages = VirtualPagerLegacyExtensions.GetNumberOfOverflowPages(page.OverflowSize);
-                return new Item(page, PageHeader.SizeOf, page.OverflowSize);
-            }
-
             var container = new Container(page);
-            ref var metadata = ref container.Offsets[OffsetToIndex(offset)];
-            Debug.Assert(metadata.Size != 0);
 
-            return new Item(page, metadata.Offset, metadata.Size);
+            return container.Get(offset);
         }
 
         private Span<byte> Get(int offset)
@@ -473,22 +465,6 @@ namespace Voron.Data.Containers
         private static int OffsetToIndex(int offset)
         {
             return (offset - PageHeader.SizeOf) / sizeof(ItemMetadata);
-        }
-
-        public struct Item
-        {
-            private readonly Page Page;
-            private readonly int Offset;
-            private readonly int Lenght;
-
-            public Item(Page page, int offset, int size)
-            {
-                Page = page;
-                Offset = offset;
-                Lenght = size;
-            }
-
-            public Span<byte> ToSpan() => new Span<byte>(Page.Pointer + Offset, Lenght);
         }
     }
 }

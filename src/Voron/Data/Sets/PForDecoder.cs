@@ -96,7 +96,6 @@ namespace Voron.Data.Sets
                 throw new EndOfStreamException();
 
             ulong value = 0;
-            ;
             while (state._bitPos < end)
             {
                 value <<= 1;

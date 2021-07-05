@@ -58,13 +58,14 @@ namespace Voron.Data.Sets
             private int _rawValuesIndex, _compressedEntryIndex;
             private PForDecoder.DecoderState _decoderState;
             private bool _hasDecoder;
+            private ByteString _allocation;
 
             public Iterator(SetLeafPage parent, ByteStringContext allocator)
             {
-                allocator.Allocate(PForEncoder.BufferLen * sizeof(int), out var scratch);
+                allocator.Allocate(PForEncoder.BufferLen * sizeof(int), out _allocation);
 
                 _parent = parent;
-                _scratch = MemoryMarshal.Cast<byte, int>(scratch.ToSpan());
+                _scratch = MemoryMarshal.Cast<byte, int>(_allocation.ToSpan());
                 _rawValuesIndex = _parent.Header.NumberOfRawValues-1;
                 _compressedEntryIndex = 0;                
                 _hasDecoder = parent.Header.NumberOfCompressedPositions > 0;
@@ -77,12 +78,16 @@ namespace Voron.Data.Sets
                     InitializeDecoder(0);
             }
 
+            public void Dispose(LowLevelTransaction llt)
+            {
+                llt.Allocator.Release(ref _allocation);
+            }
+
             private void InitializeDecoder(int index)
             {
                 ref var pos = ref _parent.Positions[index];
                 _compressedEntryBuffer = _parent.Span.Slice(pos.Position, pos.Length);
                 _decoderState = PForDecoder.Initialize(_compressedEntryBuffer);
-                //_decoder = new PForDecoder(compressedEntryBuffer, _scratch);
             }
 
             public bool MoveNext(out long l)
@@ -146,7 +151,6 @@ namespace Voron.Data.Sets
                     ref var pos = ref _parent.Positions[_compressedEntryIndex];
                     _compressedEntryBuffer = _parent.Span.Slice(pos.Position, pos.Length);
                     _decoderState = PForDecoder.Initialize(_compressedEntryBuffer);
-                    //_decoder = new PForDecoder(compressedEntryBuffer, _scratch);
                 }
             }
             public void SkipTo(long val)
@@ -186,11 +190,17 @@ namespace Voron.Data.Sets
         public List<long> GetDebugOutput(LowLevelTransaction llt)
         {
             var list = new List<long>();
-            // Span<int> scratch = stackalloc int[128];
             var it = GetIterator(llt);
-            while (it.MoveNext(out long cur))
+            try
             {
-                list.Add(cur);
+                while (it.MoveNext(out long cur))
+                {
+                    list.Add(cur);
+                }
+            }
+            finally
+            {
+                it.Dispose(llt);
             }
             return list;
         }
@@ -319,24 +329,31 @@ namespace Voron.Data.Sets
 
             public bool TryCompressRawValues()
             {
-                var it = _parent.GetIterator(_llt);
                 int compressedEntryIndex = 0;
-                if (_parent.Header.NumberOfCompressedPositions != MaxNumberOfCompressedEntries &&
-                    _parent.Header.NumberOfRawValues != 0)
+                var it = _parent.GetIterator(_llt);
+                try
                 {
-                    var sizeConstrained = (Constants.Storage.PageSize - _parent.Header.CompressedValuesCeiling) < 1024;
-                    // optimize the compaction by merging just the relevant values
-                    it.SkipToCompressedEntryFor(_rawValues[^1] & int.MaxValue,
-                        // This determine when we should recompress the whole page to save more space
-                        sizeConstrained ? _output.Length / 2 : int.MaxValue);
-                    if(it.CompressedEntryIndex != 0) // we can skip some values, so let's do that
+                    if (_parent.Header.NumberOfCompressedPositions != MaxNumberOfCompressedEntries &&
+                        _parent.Header.NumberOfRawValues != 0)
                     {
-                        compressedEntryIndex = it.CompressedEntryIndex;
-                        if (TryCopyPreviousCompressedEntries(compressedEntryIndex) == false)
-                            return false;
+                        var sizeConstrained = (Constants.Storage.PageSize - _parent.Header.CompressedValuesCeiling) < 1024;
+                        // optimize the compaction by merging just the relevant values
+                        it.SkipToCompressedEntryFor(_rawValues[^1] & int.MaxValue,
+                            // This determine when we should recompress the whole page to save more space
+                            sizeConstrained ? _output.Length / 2 : int.MaxValue);
+                        if(it.CompressedEntryIndex != 0) // we can skip some values, so let's do that
+                        {
+                            compressedEntryIndex = it.CompressedEntryIndex;
+                            if (TryCopyPreviousCompressedEntries(compressedEntryIndex) == false)
+                                return false;
+                        }
                     }
-                }
 
+                }
+                finally
+                {
+                    it.Dispose(_llt);
+                }
                 var maxBits = _output.Length * 8 / 2; // we allocated 2KB, but we stopped at roughly the 1KB marker
                 var encoder = new PForEncoder(_output, _scratchEncoder);
                 while (it.MoveNext(out int v) )
