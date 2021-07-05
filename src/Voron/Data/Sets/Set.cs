@@ -490,7 +490,7 @@ namespace Voron.Data.Sets
             return new Iterator(this);
         }
 
-        public ref struct Iterator
+        public struct Iterator : IDisposable
         {
             private readonly Set _parent;
             private SetLeafPage.Iterator _it;
