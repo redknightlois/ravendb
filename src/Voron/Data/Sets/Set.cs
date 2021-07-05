@@ -90,18 +90,11 @@ namespace Voron.Data.Sets
             // if the two pages together will be bigger than 75%, can skip merging
             if (sibling.SpaceUsed + leaf.SpaceUsed > Constants.Storage.PageSize / 2 + Constants.Storage.PageSize / 4)
                 return;
-            var it = sibling.GetIterator(_llt);
-            try
+            using var it = sibling.GetIterator(_llt);
+            while (it.MoveNext(out long v))
             {
-                while (it.MoveNext(out long v))
-                {
-                    if (leaf.Add(_llt, v) == false)
-                        throw new InvalidOperationException("Even though we have 25% spare capacity, we run out?! Should not hapen ever");
-                }
-            }
-            finally
-            {
-                it.Dispose(_llt);
+                if (leaf.Add(_llt, v) == false)
+                    throw new InvalidOperationException("Even though we have 25% spare capacity, we run out?! Should not hapen ever");
             }
             MergeSiblingsAtParent();
         }
@@ -516,7 +509,8 @@ namespace Voron.Data.Sets
                 _parent.FindPageFor(from);
                 ref var state = ref _parent._stk[_parent._pos];
                 var leafPage = new SetLeafPage(state.Page);
-                _it.Dispose(_parent._llt);
+                _it.Dispose();
+
                 _it = leafPage.GetIterator(_parent._llt);
                 _it.SkipTo(from);
                 while (_it.MoveNext(out long v))
@@ -577,7 +571,7 @@ namespace Voron.Data.Sets
 
             public void Dispose()
             {
-                _it.Dispose(_parent._llt);
+                _it.Dispose();
             }
         }
     }
