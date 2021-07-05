@@ -80,7 +80,8 @@ namespace Voron.Data.Sets
 
             public void Dispose(LowLevelTransaction llt)
             {
-                llt.Allocator.Release(ref _allocation);
+                if (_allocation.HasValue)
+                    llt.Allocator.Release(ref _allocation);
             }
 
             private void InitializeDecoder(int index)
