@@ -49,25 +49,23 @@ namespace Voron.Data.Sets
             Header.NumberOfRawValues = 0;
         }
 
-        public ref struct Iterator
+        public struct Iterator : IDisposable
         {
             private readonly SetLeafPage _parent;
-            private readonly Span<int> _scratch;
 
             private int _compressIndex, _compressLength;
-            private Span<byte> _compressedEntryBuffer;
+            private CompressedHeader _compressedEntry;
+
             private int _rawValuesIndex, _compressedEntryIndex;
             private PForDecoder.DecoderState _decoderState;
             private bool _hasDecoder;
 
             private ByteString _scratchMemory;
-            private ByteStringContext<ByteStringMemoryCache>.InternalScope _scratchScope;
-
+            private ByteStringContext<ByteStringMemoryCache>.InternalScope _scratchScope;            
 
             public Iterator(SetLeafPage parent, ByteStringContext allocator)
             {
-                _scratchScope = allocator.Allocate(PForEncoder.BufferLen * sizeof(int), out _scratchMemory);
-                _scratch = MemoryMarshal.Cast<byte, int>(_scratchMemory.ToSpan());
+                _scratchScope = allocator.Allocate(PForEncoder.BufferLen * sizeof(int), out _scratchMemory);               
 
                 _parent = parent;
                 _rawValuesIndex = _parent.Header.NumberOfRawValues-1;
@@ -76,7 +74,7 @@ namespace Voron.Data.Sets
 
                 _compressIndex = _compressLength = 0;
                 _decoderState = default;
-                _compressedEntryBuffer = default;
+                _compressedEntry = default;
 
                 if (_hasDecoder)
                     InitializeDecoder(0);
@@ -89,9 +87,8 @@ namespace Voron.Data.Sets
 
             private void InitializeDecoder(int index)
             {
-                ref var pos = ref _parent.Positions[index];
-                _compressedEntryBuffer = _parent.Span.Slice(pos.Position, pos.Length);
-                _decoderState = PForDecoder.Initialize(_compressedEntryBuffer);
+                _compressedEntry = _parent.Positions[index];
+                _decoderState = PForDecoder.Initialize(_parent.Span.Slice(_compressedEntry.Position, _compressedEntry.Length));
             }
 
             public bool MoveNext(out long l)
@@ -105,6 +102,7 @@ namespace Voron.Data.Sets
             {
                 TryReadMoreCompressedValues();
 
+                var scratch = MemoryMarshal.Cast<byte, int>(_scratchMemory.ToSpan());
                 while (_rawValuesIndex >= 0)
                 {
                     // note, reading in reverse!
@@ -112,9 +110,9 @@ namespace Voron.Data.Sets
                     int rawValueMasked = rawValue & int.MaxValue;
                     if (_compressIndex < _compressLength)
                     {
-                        if(rawValueMasked > _scratch[_compressIndex])
+                        if(rawValueMasked > scratch[_compressIndex])
                             break; // need to read from the compressed first
-                        if (rawValueMasked == _scratch[_compressIndex])
+                        if (rawValueMasked == scratch[_compressIndex])
                         {
                             _compressIndex++; // skip this one
                             TryReadMoreCompressedValues();
@@ -133,17 +131,17 @@ namespace Voron.Data.Sets
                     return false;
                 }
 
-                i = _scratch[_compressIndex++];
+                i = scratch[_compressIndex++];
                 return true;
             }
 
             private void TryReadMoreCompressedValues()
             {
-                //var scratch = MemoryMarshal.Cast<byte, int>(_scratch.ToSpan());
+                var scratch = MemoryMarshal.Cast<byte, int>(_scratchMemory.ToSpan());
                 while (_compressIndex == _compressLength && _hasDecoder)
                 {
                     _compressIndex = 0;
-                    _compressLength = PForDecoder.Decode(ref _decoderState, _compressedEntryBuffer, _scratch);
+                    _compressLength = PForDecoder.Decode(ref _decoderState, _parent.Span.Slice(_compressedEntry.Position, _compressedEntry.Length), scratch);
                     if (_compressLength != 0)
                         return;
 
@@ -153,9 +151,8 @@ namespace Voron.Data.Sets
                         return;
                     }
 
-                    ref var pos = ref _parent.Positions[_compressedEntryIndex];
-                    _compressedEntryBuffer = _parent.Span.Slice(pos.Position, pos.Length);
-                    _decoderState = PForDecoder.Initialize(_compressedEntryBuffer);
+                    _compressedEntry = _parent.Positions[_compressedEntryIndex];
+                    _decoderState = PForDecoder.Initialize(_parent.Span.Slice(_compressedEntry.Position, _compressedEntry.Length));
                 }
             }
             public void SkipTo(long val)
