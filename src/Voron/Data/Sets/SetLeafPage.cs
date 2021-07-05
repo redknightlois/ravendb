@@ -53,7 +53,7 @@ namespace Voron.Data.Sets
         {
             private readonly SetLeafPage _parent;
             private readonly Span<int> _scratch;
-            private Span<int> _current;
+            private int _compressIndex, _compressLength;
             private Span<byte> _compressedEntryBuffer;
             private int _rawValuesIndex, _compressedEntryIndex;
             private PForDecoder.DecoderState _decoderState;
@@ -70,7 +70,7 @@ namespace Voron.Data.Sets
                 _compressedEntryIndex = 0;                
                 _hasDecoder = parent.Header.NumberOfCompressedPositions > 0;
 
-                _current = default;
+                _compressIndex = _compressLength = 0;
                 _decoderState = default;
                 _compressedEntryBuffer = default;
 
@@ -106,13 +106,13 @@ namespace Voron.Data.Sets
                     // note, reading in reverse!
                     int rawValue = _parent.RawValues[_rawValuesIndex];
                     int rawValueMasked = rawValue & int.MaxValue;
-                    if (_current.IsEmpty == false)
+                    if (_compressIndex < _compressLength)
                     {
-                        if(rawValueMasked > _current[0])
+                        if(rawValueMasked > _scratch[_compressIndex])
                             break; // need to read from the compressed first
-                        if (rawValueMasked == _current[0])
+                        if (rawValueMasked == _scratch[_compressIndex])
                         {
-                            _current = _current.Slice(1); // skip this one
+                            _compressIndex++; // skip this one
                             TryReadMoreCompressedValues();
                         }
                     }
@@ -123,23 +123,23 @@ namespace Voron.Data.Sets
                     return true;
                 }
 
-                if (_current.IsEmpty)
+                if (_compressIndex == _compressLength)
                 {
                     i = default;
                     return false;
                 }
 
-                i = _current[0];
-                _current = _current.Slice(1);
+                i = _scratch[_compressIndex++];
                 return true;
             }
 
             private void TryReadMoreCompressedValues()
             {
-                while (_current.IsEmpty && _hasDecoder)
+                while (_compressIndex == _compressLength && _hasDecoder)
                 {
-                    _current = PForDecoder.Decode(ref _decoderState, _compressedEntryBuffer, _scratch);
-                    if (_current.IsEmpty == false)
+                    _compressIndex = 0;
+                    _compressLength = PForDecoder.Decode(ref _decoderState, _compressedEntryBuffer, _scratch);
+                    if (_compressLength != 0)
                         return;
 
                     if (++_compressedEntryIndex >= _parent.Header.NumberOfCompressedPositions)
@@ -461,7 +461,8 @@ namespace Voron.Data.Sets
                 var compressedEntryBuffer = Span.Slice(pos.Position, pos.Length);
                 var decoderState = PForDecoder.Initialize(compressedEntryBuffer);
                 var decoded = PForDecoder.Decode(ref decoderState, compressedEntryBuffer, scratch);
-                first = decoded[0];
+                Debug.Assert(decoded > 0);
+                first = scratch[0];
             }
 
             var values = RawValues;

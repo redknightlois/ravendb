@@ -32,7 +32,7 @@ namespace Voron.Data.Sets
             return new DecoderState(inputBuffer.Length);
         }
 
-        public static Span<int> Decode(ref DecoderState state, in Span<byte> inputBuffer, in Span<int> outputBuffer)
+        public static int Decode(ref DecoderState state, in Span<byte> inputBuffer, in Span<int> outputBuffer)
         {
             Debug.Assert(inputBuffer.Length == state.BufferSize);
 
@@ -65,18 +65,18 @@ namespace Voron.Data.Sets
                     }
 
                     state.NumberOfReads += numOfRepeatedValues;
-                    return outputBuffer.Slice(0, numOfRepeatedValues);
+                    return numOfRepeatedValues;
                 case 0b11:
-                    return Span<int>.Empty;
+                    return 0;
                 default:
                     throw new ArgumentOutOfRangeException(bits + " isn't a valid header marker");
             }
         }
 
-        private static Span<int> ReadNumbers(ref DecoderState state, in Span<byte> inputBuffer, in Span<int> outputBuffer, int numOfBits, int numOfValues)
+        private static int ReadNumbers(ref DecoderState state, in Span<byte> inputBuffer, in Span<int> outputBuffer, int numOfBits, int numOfValues)
         {
             if (numOfBits == 0)
-                return Span<int>.Empty;
+                return 0;
 
             for (int i = 0; i < numOfValues; i++)
             {
@@ -86,7 +86,7 @@ namespace Voron.Data.Sets
             }
 
             state.NumberOfReads += numOfValues;
-            return outputBuffer.Slice(0, numOfValues);
+            return numOfValues;
         }
 
         private static ulong Read(ref DecoderState state, in Span<byte> inputBuffer, int bitsToRead)
@@ -114,13 +114,13 @@ namespace Voron.Data.Sets
             var state = Initialize(buf);
             while (true)
             {
-                var d = Decode(ref state, buf, scratch);
-                if (d.IsEmpty)
+                var len = Decode(ref state, buf, scratch);
+                if (len == 0)
                     break;
 
-                foreach (var t in d)
+                for (int i = 0; i < len; i++)
                 {
-                    list.Add(t);
+                    list.Add(scratch[i]);
                 }
             }
             return list;
