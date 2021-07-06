@@ -15,7 +15,6 @@ namespace FastTests.Corax
 {
     public class IndexSearcherTest : StorageTest
     {
-
         private class IndexEntry
         {
             public string Id;
@@ -90,12 +89,10 @@ namespace FastTests.Corax
             using var _ = bsc.Allocate(bufferSize, out ByteString buffer);
 
             {
-                var id = $"entry/1";
-                var entryWriter = new IndexEntryWriter(buffer.ToSpan(), knownFields);
-
                 using var indexWriter = new IndexWriter(Env);
                 foreach (var entry in list)
                 {
+                    var entryWriter = new IndexEntryWriter(buffer.ToSpan(), knownFields);
                     var data = CreateIndexEntry(ref entryWriter, entry);                    
                     indexWriter.Index(entry.Id, data, knownFields);
                 }
@@ -116,11 +113,13 @@ namespace FastTests.Corax
             {
                 using var searcher = new IndexSearcher(Env);
                 var match = searcher.TermQuery("Unknown", "1");
-                Assert.Equal(0, match.TotalResults);
+                Assert.Equal(QueryMatch.Start, match.Current);
+                Assert.Equal(0, match.TotalResults);                
                 Assert.False(match.MoveNext(out var _));
                 Assert.Equal(QueryMatch.Invalid, match.Current);
 
                 match = searcher.TermQuery("Id", "1");
+                Assert.Equal(QueryMatch.Start, match.Current);
                 Assert.Equal(0, match.TotalResults);
                 Assert.False(match.MoveNext(out var _));
                 Assert.Equal(QueryMatch.Invalid, match.Current);
@@ -140,9 +139,87 @@ namespace FastTests.Corax
             {
                 using var searcher = new IndexSearcher(Env);
                 var match = searcher.TermQuery("Id", "entry/1");
-                Assert.NotEqual(QueryMatch.Invalid, match.Current);
+                Assert.Equal(QueryMatch.Start, match.Current);
                 Assert.Equal(1, match.TotalResults);
+                Assert.True(match.MoveNext(out var _));
+                Assert.NotEqual(QueryMatch.Invalid, match.Current);
                 Assert.False(match.MoveNext(out var _));
+                Assert.Equal(QueryMatch.Invalid, match.Current);
+            }
+        }
+
+        [Fact]
+        public void SmallSetTerm()
+        {
+            var entries = new IndexEntry[16];
+            for (int i = 0; i < entries.Length; i++)
+            {
+                entries[i] = new IndexEntry
+                {
+                    Id = $"entry/{i}",
+                    Content = new string[] { "road" },
+                };
+            }
+            IndexEntries(entries);
+
+            {
+                using var searcher = new IndexSearcher(Env);
+                var match = searcher.TermQuery("Content", "road");
+
+                Assert.Equal(16, match.TotalResults);
+
+                // TODO: For consistency this should be true. 
+                // Assert.Equal(QueryMatch.Start, match.Current);
+
+                int i = 0;
+                while (match.MoveNext(out var v))
+                {
+                    i++;
+
+                    Assert.Equal(v, match.Current);
+                    Assert.NotEqual(QueryMatch.Invalid, match.Current);
+                    Assert.NotEqual(QueryMatch.Start, match.Current);
+                }
+
+                Assert.Equal(i, match.TotalResults);
+                Assert.Equal(QueryMatch.Invalid, match.Current);
+            }
+        }
+
+        [Fact]
+        public void SetTerm()
+        {
+            var entries = new IndexEntry[100000];
+            var content = new string[] { "road" };
+
+            for (int i = 0; i < entries.Length; i++)
+            {
+                entries[i] = new IndexEntry
+                {
+                    Id = $"entry/{i}",
+                    Content = content,
+                };
+            }
+            IndexEntries(entries);
+
+            {
+                using var searcher = new IndexSearcher(Env);
+                var match = searcher.TermQuery("Content", "road");
+
+                Assert.Equal(100000, match.TotalResults);
+                Assert.Equal(QueryMatch.Start, match.Current);
+
+                int i = 0;
+                while (match.MoveNext(out var v))
+                {
+                    i++;
+
+                    Assert.Equal(v, match.Current);
+                    Assert.NotEqual(QueryMatch.Invalid, match.Current);
+                    Assert.NotEqual(QueryMatch.Start, match.Current);
+                }
+
+                Assert.Equal(i, match.TotalResults);
                 Assert.Equal(QueryMatch.Invalid, match.Current);
             }
         }

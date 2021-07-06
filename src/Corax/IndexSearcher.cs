@@ -26,6 +26,7 @@ namespace Corax
     public static class QueryMatch
     {
         public const long Invalid = -1;
+        public const long Start = 0;
     }
 
     public unsafe struct TermMatch : IIndexMatch
@@ -41,13 +42,13 @@ namespace Corax
         private Set.Iterator _set;
 
         public long TotalResults => _totalResults;
-        public long Current => _currentIdx == QueryMatch.Invalid ? QueryMatch.Invalid : _current;
+        public long Current => _currentIdx <= QueryMatch.Start ? _currentIdx : _current;
 
         private TermMatch(delegate*<ref TermMatch, long, bool> seekFunc, delegate*<ref TermMatch, out long, bool> moveNext, long totalResults)
         {
             _totalResults = totalResults;
-            _current = QueryMatch.Invalid;
-            _currentIdx = QueryMatch.Invalid;
+            _current = QueryMatch.Start;
+            _currentIdx = QueryMatch.Start;
             _seekToFunc = seekFunc;
             _moveNext = moveNext;
 
@@ -59,12 +60,15 @@ namespace Corax
         {
             static bool SeekFunc(ref TermMatch term, long next)
             {
-                term._current = QueryMatch.Invalid;
+                term._current = next == QueryMatch.Start ? QueryMatch.Start : QueryMatch.Invalid;
                 return false;
             }
 
             static bool MoveNextFunc(ref TermMatch term, out long v)
             {
+                term._currentIdx = QueryMatch.Invalid;
+                term._current = QueryMatch.Invalid;
+
                 Unsafe.SkipInit(out v);
                 return false;
             }
@@ -76,22 +80,28 @@ namespace Corax
         {
             static bool SeekFunc(ref TermMatch term, long next)
             {
-                term._currentIdx = next > term._current ? QueryMatch.Invalid : 0;
-                return term._currentIdx == 0;
+                term._currentIdx = next > term._current ? QueryMatch.Invalid : QueryMatch.Start;
+                return term._currentIdx == QueryMatch.Start;
             }
 
             static bool MoveNextFunc(ref TermMatch term, out long v)
             {
-                v = term._current;
-                var result = term._currentIdx != QueryMatch.Invalid;
+                if (term._currentIdx == QueryMatch.Start)
+                {
+                    term._currentIdx = term._current;
+                    v = term._current;
+                    return true;
+                }
+
+                v = QueryMatch.Invalid;
                 term._currentIdx = QueryMatch.Invalid;
-                return result;
+                return false;
             }
 
             return new TermMatch(&SeekFunc, &MoveNextFunc, 1)
             {
                 _current = value,
-                _currentIdx = 0
+                _currentIdx = QueryMatch.Start
             };
         }
 
@@ -115,6 +125,7 @@ namespace Corax
                 }
 
                 term._currentIdx = QueryMatch.Invalid;
+
                 return false;
             }
 
@@ -125,6 +136,7 @@ namespace Corax
                 if (term._currentIdx == QueryMatch.Invalid || term._currentIdx >= stream.Length)
                 {
                     Unsafe.SkipInit(out v);
+                    term._currentIdx = QueryMatch.Invalid;
                     return false;
                 }
 
@@ -140,7 +152,6 @@ namespace Corax
             {
                 _container = containerItem,
                 _currentIdx = len,
-                _current = 0
             };
         }
 
@@ -149,6 +160,11 @@ namespace Corax
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             static bool SeekFunc(ref TermMatch term, long next)
             {
+                if (next == QueryMatch.Start)
+                {
+                    term._current = QueryMatch.Start;
+                    term._currentIdx = QueryMatch.Start;
+                }
                 return term._set.Seek(next);
             }
 
@@ -156,19 +172,21 @@ namespace Corax
             static bool MoveNextFunc(ref TermMatch term, out long v)
             {
                 bool hasMove = term._set.MoveNext();
-                v = hasMove ? term._set.Current : QueryMatch.Invalid;
+                v = term._set.Current;
+                term._currentIdx = hasMove ? v : QueryMatch.Invalid;
                 term._current = v;
+
                 return hasMove;
             }
 
             return new TermMatch(&SeekFunc, &MoveNextFunc, set.State.NumberOfEntries)
             {                
-                _set = set.Iterate()
+                _set = set.Iterate(),
             };
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool SeekTo(long next = 0)
+        public bool SeekTo(long next = QueryMatch.Start)
         {
             return _seekToFunc(ref this, next);
         }
