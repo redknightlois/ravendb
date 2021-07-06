@@ -2,6 +2,9 @@ using System;
 using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using System.Text;
+using Lucene.Net.Index;
+using Raven.Server.Documents.Queries.AST;
+using Raven.Server.Documents.Queries.Parser;
 using Sparrow.Server.Compression;
 using Voron;
 using Voron.Impl;
@@ -16,6 +19,7 @@ namespace Corax
         long Current { get; }
 
         bool SeekTo(long next = 0);
+//        bool IsMatch(long entry);
         bool MoveNext(out long v);
     }
 
@@ -280,6 +284,36 @@ namespace Corax
             var data = Container.Get(_transaction.LowLevelTransaction, id).ToSpan();
             int size = ZigZagEncoding.Decode<int>(data, out var len);
             return Encoding.UTF8.GetString(data.Slice(len, size));
+        }
+
+        public IIndexMatch Search(string q)
+        {
+            var parser = new QueryParser();
+            parser.Init(q);
+            var query = parser.Parse();
+            return Search(query.Where);
+        }
+
+        private IIndexMatch Search(QueryExpression where)
+        {
+            // if (where.Compiled != null)
+            //     return;
+            
+            switch (@where)
+            {
+                case TrueExpression _:
+                case null:
+                    return null; // all docs here
+                case BinaryExpression be:
+                    return (be.Operator, be.Left, be.Right) switch
+                    {
+                        (OperatorType.Equal, FieldExpression f, ValueExpression v) => TermQuery(f.FieldValue, v.Token.Value),
+                        //(OperatorType.And , _, _) => BinaryMatch.YieldAnd(),
+                        _ => throw new NotSupportedException()
+                    };
+                default:
+                    return null;
+            }
         }
 
         // foreach term in 2010 .. 2020

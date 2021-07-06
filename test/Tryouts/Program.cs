@@ -195,33 +195,47 @@ namespace Tryouts
 
             using (var searcher = new IndexSearcher(env))
             {
-                Console.WriteLine("Arava");
-                var termMatch = searcher.TermQuery("Name", "Arava");
-                while (termMatch.MoveNext(out var id))
-                {
-                    Console.WriteLine(searcher.GetEntryById(id));
-                }
-
-                Console.WriteLine("Eini");
-                termMatch = searcher.TermQuery("Family", "Eini");
-                while (termMatch.MoveNext(out var id))
-                {
-                    Console.WriteLine(searcher.GetEntryById(id));
-                }
+                var termMatch = searcher.Search("from Dogs where Type = 'Dog'");
+                PrintIds(termMatch, searcher);
                 
-                Console.WriteLine("Dogs");
-                termMatch = searcher.TermQuery("Type", "Dog");
-                var list = new List<string>();
-                while (termMatch.MoveNext(out var id))
-                {
-                    list.Add(searcher.GetEntryById(id));
-                }
-
-                Console.WriteLine("Results: " + list.Count);
-                Console.WriteLine(string.Join(", ", list));
+                //  searcher.And(searcher.TermQuery("Type", args["$foo"] ), searcher.TermQuery...));
+                
+                // Console.WriteLine("Arava");
+                //  termMatch = searcher.TermQuery("Name", "Arava");
+                // PrintIds(termMatch, searcher);
+                //
+                // Console.WriteLine("Eini");
+                // termMatch = searcher.TermQuery("Family", "Eini");
+                // while (termMatch.MoveNext(out var id))
+                // {
+                //     Console.WriteLine(searcher.GetEntryById(id));
+                // }
+                //
+                // Console.WriteLine("Dogs");
+                // termMatch = searcher.TermQuery("Type", "Dog");
+                // var list = new List<string>();
+                // while (termMatch.MoveNext(out var id))
+                // {
+                //     list.Add(searcher.GetEntryById(id));
+                // }
+                //
+                // Console.WriteLine("Results: " + list.Count);
+                // Console.WriteLine(string.Join(", ", list.Take(16)));
             }
             
             
+        }
+
+        private static void PrintIds(IIndexMatch termMatch, IndexSearcher searcher)
+        {
+            var list = new List<string>();
+            while (termMatch.MoveNext(out var id))
+            {
+                list.Add(searcher.GetEntryById(id));
+            }
+
+            Console.WriteLine(list.Count + " results");
+            Console.WriteLine(string.Join(", ", list.Take(16)));
         }
     }
 }
