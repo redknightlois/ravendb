@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
+using System.Text;
 using Sparrow.Server.Compression;
 using Voron;
 using Voron.Impl;
@@ -77,14 +78,16 @@ namespace Corax
 
             static bool MoveNextFunc(ref TermMatch term, out long v)
             {
-                Unsafe.SkipInit(out v);
+                v = term._current;
+                var result = term._currentIdx != QueryMatch.Invalid;
                 term._currentIdx = QueryMatch.Invalid;
-                return false;
+                return result;
             }
 
             return new TermMatch(&SeekFunc, &MoveNextFunc, 1)
             {
-                _current = value
+                _current = value,
+                _currentIdx = 0
             };
         }
 
@@ -95,22 +98,18 @@ namespace Corax
             {
                 var stream = term._container.ToSpan();
 
-                int pos = 0;
-                long current = QueryMatch.Invalid;
-                while (pos < stream.Length)
+                while (term._currentIdx < stream.Length)
                 {
-                    current = ZigZagEncoding.Decode<long>(stream, out var len, pos);
-                    pos += len;
-                    if (current > next)
-                    {
-                        // We found values bigger than next.
-                        term._current = current;
-                        term._currentIdx = pos;
-                        return true;
-                    }
+                    var current = ZigZagEncoding.Decode<long>(stream, out var len, (int)term._currentIdx);
+                    term._currentIdx += len;
+                    if (current <= next) 
+                        continue;
+                    
+                    // We found values bigger than next.
+                    term._current = current;
+                    return true;
                 }
 
-                term._current = QueryMatch.Invalid;
                 term._currentIdx = QueryMatch.Invalid;
                 return false;
             }
@@ -125,8 +124,8 @@ namespace Corax
                     return false;
                 }
 
-                v = ZigZagEncoding.Decode<long>(stream, out var len, (int)term._currentIdx);
-                term._current = v;
+                term._current += ZigZagEncoding.Decode<long>(stream, out var len, (int)term._currentIdx);
+                v = term._current;
                 term._currentIdx += len;
 
                 return true;
@@ -136,7 +135,8 @@ namespace Corax
             return new TermMatch(&SeekFunc, &MoveNextFunc, itemsCount)
             {
                 _container = containerItem,
-                _currentIdx = len
+                _currentIdx = len,
+                _current = 0
             };
         }
 
@@ -275,6 +275,13 @@ namespace Corax
             _transaction = environment.ReadTransaction();
         }
 
+        public string GetEntryById(long id)
+        {
+            var data = Container.Get(_transaction.LowLevelTransaction, id).ToSpan();
+            int size = ZigZagEncoding.Decode<int>(data, out var len);
+            return Encoding.UTF8.GetString(data.Slice(len, size));
+        }
+
         // foreach term in 2010 .. 2020
         //     yield return TermMatch(field, term)// <-- one term , not sorted
 
@@ -298,7 +305,7 @@ namespace Corax
                 var set = new Set(_transaction.LowLevelTransaction, Slices.Empty, setState);
                 matches = TermMatch.YieldSet(set);                
             }
-            else if ((value & (long)TermIdMask.Single) != 0)
+            else if ((value & (long)TermIdMask.Small) != 0)
             {
                 var smallSetId = value & ~0b11;
                 var small = Container.Get(_transaction.LowLevelTransaction, smallSetId);
@@ -309,7 +316,6 @@ namespace Corax
                 matches = TermMatch.YieldOnce(value);
             }
                 
-            matches.SeekTo(0);
             return matches;
         }
 

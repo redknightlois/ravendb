@@ -16,6 +16,7 @@ using Sparrow.Json;
 using Sparrow.Json.Parsing;
 using Sparrow.Server;
 using Sparrow.Server.Compression;
+using Sparrow.Threading;
 using Tests.Infrastructure;
 using Voron;
 using Voron.Data.CompactTrees;
@@ -133,45 +134,94 @@ namespace Tryouts
             }
         }
 
-        public static async Task Main(string[] args)
+        public static void Main(string[] args)
         {
-            //CoraxEnron.Stats();
-            CoraxEnron.Index();
-            //LuceneEnron.Index();
-            //new SetTests(new ConsoleTestOutputHelper()).CanCreateSet();
-            //new ContainerTests(new ConsoleTestOutputHelper()).CanStoreMoreThanASinglePage();
-            //new IntegerEncodingTests(new ConsoleTestOutputHelper()).WriteVariableSizeIntegers();
-            //SyncMain();
+            using var env = new StorageEnvironment(StorageEnvironmentOptions.CreateMemoryOnly());
 
+            using (var writer = new IndexWriter(env))
+            {
+                using var bsc = new ByteStringContext(SharedMultipleUseFlag.None);
+                Slice.From(bsc, "Name", ByteStringType.Immutable, out var nameSlice);
+                Slice.From(bsc, "Family", ByteStringType.Immutable, out var familySlice);
+                Slice.From(bsc, "Age", ByteStringType.Immutable, out var ageSlice);
+                Slice.From(bsc, "Type", ByteStringType.Immutable, out var typeSlice);
 
-            // var tests = new Encoder3GramTests();
-            // tests.VerifyOrderPreservation();
+                Span<byte> buffer = new byte[256];
+                var fields = new Dictionary<Slice,int>
+                {
+                    [nameSlice] = 0,
+                    [familySlice] = 1,
+                    [ageSlice] = 2,
+                    [typeSlice] = 3
+                };
 
-            //CoraxEnron.Index(true, "Z:\\corax-d");
-            //LuceneEnron.IndexInLucene(true);
+                {
+                    var entryWriter = new IndexEntryWriter(buffer, fields);
+                    entryWriter.Write(0, Encoding.UTF8.GetBytes("Arava"));
+                    entryWriter.Write(1, Encoding.UTF8.GetBytes("Eini"));
+                    entryWriter.Write(2, BitConverter.GetBytes(12), 12L, 12D);
+                    entryWriter.Write(3, Encoding.UTF8.GetBytes("Dog"));
+                    entryWriter.Finish(out var entry);
 
-            //CoraxReddit.Index(true, "Z:\\corax");
-            //LuceneReddit.Index(true, "Z:\\corax");
-            //CoraxReddit.SearchExact("Z:\\corax");
-            //LuceneReddit.SearchExact("Z:\\corax");
+                    writer.Index("dogs/arava", entry, fields);
+                }
+                
+                {
+                    var entryWriter = new IndexEntryWriter(buffer, fields);
+                    entryWriter.Write(0, Encoding.UTF8.GetBytes("Phoebe"));
+                    entryWriter.Write(1, Encoding.UTF8.GetBytes("Eini"));
+                    entryWriter.Write(2, BitConverter.GetBytes(7), 7L, 7D);
+                    entryWriter.Write(3, Encoding.UTF8.GetBytes("Dog"));
+                    entryWriter.Finish(out var entry);
 
-            //using (var searcher = new IndexSearcher(env))
-            //{
-            //    QueryOp q = new BinaryQuery(
-            //        new QueryOp[] {new TermQuery("Dogs", "Arava"), new TermQuery("Gender", "Male"),},
-            //        BitmapOp.And
-            //    );
-            //    using var ctx = JsonOperationContext.ShortTermSingleUse();
-            //    var results = searcher.Query(ctx, q, 2, "Name");
+                    writer.Index("dogs/phoebe", entry, fields);
+                }
 
-            //    foreach (object result in results)
-            //    {
-            //        Console.WriteLine(result);
-            //    }
-            //}
+                for (int i = 0; i < 10_000; i++)
+                {
+                    var entryWriter = new IndexEntryWriter(buffer, fields);
+                    entryWriter.Write(0, Encoding.UTF8.GetBytes("Dog #" + i));
+                    entryWriter.Write(1, Encoding.UTF8.GetBytes("families/" + (i % 1024)));
+                    var age = i % 17;
+                    entryWriter.Write(2, BitConverter.GetBytes(age), age, age);
+                    entryWriter.Write(3, Encoding.UTF8.GetBytes("Dog"));
+                    entryWriter.Finish(out var entry);
+                
+                    writer.Index("dogs/" + i, entry, fields);
+                }
+                
+                writer.Commit();
+            }
 
-            Console.WriteLine("Done");
-            //Console.ReadLine();
+            using (var searcher = new IndexSearcher(env))
+            {
+                Console.WriteLine("Arava");
+                var termMatch = searcher.TermQuery("Name", "Arava");
+                while (termMatch.MoveNext(out var id))
+                {
+                    Console.WriteLine(searcher.GetEntryById(id));
+                }
+
+                Console.WriteLine("Eini");
+                termMatch = searcher.TermQuery("Family", "Eini");
+                while (termMatch.MoveNext(out var id))
+                {
+                    Console.WriteLine(searcher.GetEntryById(id));
+                }
+                
+                Console.WriteLine("Dogs");
+                termMatch = searcher.TermQuery("Type", "Dog");
+                var list = new List<string>();
+                while (termMatch.MoveNext(out var id))
+                {
+                    list.Add(searcher.GetEntryById(id));
+                }
+
+                Console.WriteLine("Results: " + list.Count);
+                Console.WriteLine(string.Join(", ", list));
+            }
+            
+            
         }
     }
 }
