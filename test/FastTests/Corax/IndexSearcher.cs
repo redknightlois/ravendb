@@ -221,6 +221,20 @@ namespace FastTests.Corax
 
                 Assert.Equal(i, match.TotalResults);
                 Assert.Equal(QueryMatch.Invalid, match.Current);
+
+                Assert.True(match.SeekTo(QueryMatch.Start));
+                
+                int j = 0;
+                while (match.MoveNext(out var v))
+                {
+                    j++;
+
+                    Assert.Equal(v, match.Current);
+                    Assert.NotEqual(QueryMatch.Invalid, match.Current);
+                    Assert.NotEqual(QueryMatch.Start, match.Current);
+                }
+
+                Assert.Equal(j, i);
             }
         }
     }

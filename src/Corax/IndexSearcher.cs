@@ -164,7 +164,11 @@ namespace Corax
                 {
                     term._current = QueryMatch.Start;
                     term._currentIdx = QueryMatch.Start;
+
+                    // We change it in order for the Set Seek operation to seek to the start. 
+                    next = long.MinValue;
                 }
+                    
                 return term._set.Seek(next);
             }
 

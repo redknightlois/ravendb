@@ -515,7 +515,7 @@ namespace Voron.Data.Sets
                 _it = leafPage.GetIterator(_parent._llt);
             }
 
-            public bool Seek(long from)
+            public bool Seek(long from = long.MinValue)
             {
                 _parent.FindPageFor(from);
                 ref var state = ref _parent._stk[_parent._pos];
@@ -523,6 +523,9 @@ namespace Voron.Data.Sets
                 _it.Dispose();
 
                 _it = leafPage.GetIterator(_parent._llt);
+                if (from == long.MinValue)
+                    return true;
+
                 _it.SkipTo(from);
                 while (_it.MoveNext(out long v))
                 {
