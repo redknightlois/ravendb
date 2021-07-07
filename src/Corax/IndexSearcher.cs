@@ -2,7 +2,6 @@ using System;
 using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using System.Text;
-using Lucene.Net.Index;
 using Raven.Server.Documents.Queries.AST;
 using Raven.Server.Documents.Queries.Parser;
 using Sparrow.Server.Compression;
@@ -15,7 +14,7 @@ namespace Corax
 {
     public interface IIndexMatch
     {
-        long TotalResults { get; }
+        long Count { get; }
         long Current { get; }
 
         bool SeekTo(long next = 0);
@@ -41,7 +40,7 @@ namespace Corax
         private Container.Item _container;
         private Set.Iterator _set;
 
-        public long TotalResults => _totalResults;
+        public long Count => _totalResults;
         public long Current => _currentIdx <= QueryMatch.Start ? _currentIdx : _current;
 
         private TermMatch(delegate*<ref TermMatch, long, bool> seekFunc, delegate*<ref TermMatch, out long, bool> moveNext, long totalResults)
@@ -68,8 +67,7 @@ namespace Corax
             {
                 term._currentIdx = QueryMatch.Invalid;
                 term._current = QueryMatch.Invalid;
-
-                Unsafe.SkipInit(out v);
+                v = QueryMatch.Invalid;
                 return false;
             }
 
@@ -135,8 +133,8 @@ namespace Corax
                 var stream = term._container.ToSpan();
                 if (term._currentIdx == QueryMatch.Invalid || term._currentIdx >= stream.Length)
                 {
-                    Unsafe.SkipInit(out v);
                     term._currentIdx = QueryMatch.Invalid;
+                    v = QueryMatch.Invalid;
                     return false;
                 }
 
@@ -202,28 +200,30 @@ namespace Corax
         }
     }
 
-    public unsafe struct BinaryMatch : IIndexMatch
+    public unsafe struct BinaryMatch<TInner, TOuter> : IIndexMatch
+        where TInner : struct, IIndexMatch
+        where TOuter : struct, IIndexMatch
     {
-        private readonly delegate*<ref BinaryMatch, long, bool> _seekToFunc;
-        private readonly delegate*<ref BinaryMatch, out long, bool> _moveNext;
+        private readonly delegate*<ref BinaryMatch<TInner, TOuter>, long, bool> _seekToFunc;
+        private readonly delegate*<ref BinaryMatch<TInner, TOuter>, out long, bool> _moveNext;
 
-        private readonly IIndexMatch _inner;
-        private readonly IIndexMatch _outer;
+        private TInner _inner;
+        private TOuter _outer;
 
         private long _totalResults;
         private long _current;
 
-        public long TotalResults => _totalResults;
+        public long Count => _totalResults;
         public long Current => _current;
 
-        private BinaryMatch(delegate*<ref BinaryMatch, long, bool> seekFunc, delegate*<ref BinaryMatch, out long, bool> moveNext, long totalResults)
+        private BinaryMatch(ref TInner inner, ref TOuter outer, delegate*<ref BinaryMatch<TInner, TOuter>, long, bool> seekFunc, delegate*<ref BinaryMatch<TInner, TOuter>, out long, bool> moveNext, long totalResults)
         {
             _totalResults = totalResults;
-            _current = QueryMatch.Invalid;
+            _current = QueryMatch.Start;
             _seekToFunc = seekFunc;
             _moveNext = moveNext;
-            _inner = default;
-            _outer = default;
+            _inner = inner;
+            _outer = outer;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -239,51 +239,134 @@ namespace Corax
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static BinaryMatch YieldAnd<TInner, TOuter>(ref TInner inner, ref TOuter outer)
-            where TInner : struct, IIndexMatch
-            where TOuter : struct, IIndexMatch
+        public static BinaryMatch<TInner, TOuter> YieldAnd(ref TInner inner, ref TOuter outer)
         {
-            static bool SeekToFunc(ref BinaryMatch match, long v)
+            static bool SeekToFunc(ref BinaryMatch<TInner, TOuter> match, long v)
             {
-                var inner = (TInner)match._inner;
-                var outer = (TOuter)match._outer;
+                ref var inner = ref match._inner;
+                ref var outer = ref match._outer;
 
                 return inner.SeekTo(v) && outer.SeekTo(v);
             }
 
-            static bool MoveNextFunc(ref BinaryMatch match, out long v)
+            static bool MoveNextFunc(ref BinaryMatch<TInner, TOuter> match, out long v)
             {
-                var inner = (TInner)match._inner;
-                var outer = (TOuter)match._outer;
+                ref var inner = ref match._inner;
+                ref var outer = ref match._outer;
 
-                Unsafe.SkipInit(out v);
                 if (inner.Current == QueryMatch.Invalid || outer.Current == QueryMatch.Invalid)
-                    return false;
+                    goto Fail;
+
+                // Last were equal, moving forward. 
+                inner.MoveNext(out v);
+                outer.MoveNext(out v);
 
                 while (inner.Current != outer.Current)
                 {
                     if (inner.Current < outer.Current)
                     {
                         if (inner.MoveNext(out v) == false)
-                            return false;
+                            goto Fail;
                     }
                     else
                     {
                         if (outer.MoveNext(out v) == false)
-                            return false;
+                            goto Fail;
                     }
                 }
-                return inner.Current == outer.Current;
+
+                // PERF: We dont need to check both as the equal later will take care of that. 
+                if (inner.Current == QueryMatch.Invalid)
+                    goto Fail;
+
+                if (inner.Current == outer.Current)
+                {
+                    match._current = inner.Current;
+                    return true;
+                }
+
+                Fail:  
+                match._current = QueryMatch.Invalid;
+                v = QueryMatch.Invalid;
+                return false;
             }
 
-            return new BinaryMatch(&SeekToFunc, &MoveNextFunc, Math.Min(inner.TotalResults, outer.TotalResults));
+            return new BinaryMatch<TInner, TOuter>(ref inner, ref outer, &SeekToFunc, &MoveNextFunc, Math.Min(inner.Count, outer.Count));
         }
 
-        public static BinaryMatch YieldOr<TInner, TOuter>(ref TInner inner, ref TOuter outer)
-            where TInner : struct, IIndexMatch
-            where TOuter : struct, IIndexMatch
+        public static BinaryMatch<TInner, TOuter> YieldOr(ref TInner inner, ref TOuter outer)
         {
-            throw new NotImplementedException();
+            static bool SeekToFunc(ref BinaryMatch<TInner, TOuter> match, long v)
+            {
+                ref var inner = ref match._inner;
+                ref var outer = ref match._outer;
+
+                return inner.SeekTo(v) && outer.SeekTo(v);
+            }
+
+            static bool MoveNextFunc(ref BinaryMatch<TInner, TOuter> match, out long v)
+            {
+                ref var inner = ref match._inner;
+                ref var outer = ref match._outer;                
+                
+                // Nothing else left to add
+                if (inner.Current == QueryMatch.Invalid && outer.Current == QueryMatch.Invalid)
+                {
+                    v = QueryMatch.Invalid;
+                    goto Done;
+                }
+                else if (inner.Current == QueryMatch.Invalid)
+                {
+                    outer.MoveNext(out v);
+                    goto Done;
+                }
+                else if (outer.Current == QueryMatch.Invalid)
+                {
+                    inner.MoveNext(out v);
+                    goto Done;
+                }
+
+                long x, y;
+                if (inner.Current == outer.Current)
+                {
+                    inner.MoveNext(out x);
+                    outer.MoveNext(out y);
+                }
+                else if (inner.Current < outer.Current)
+                {
+                    inner.MoveNext(out x);
+                    y = outer.Current;
+                }
+                else
+                {
+                    x = inner.Current;
+                    outer.MoveNext(out y);
+                }
+
+                if (x == QueryMatch.Invalid && y == QueryMatch.Invalid)
+                {
+                    v = QueryMatch.Invalid;
+                    match._current = QueryMatch.Invalid;
+                    return false;
+                }
+                else if (x == QueryMatch.Invalid)
+                {
+                    v = y;
+                }
+                else if (y == QueryMatch.Invalid)
+                {
+                    v = x;
+                }
+                else
+                {
+                    v = x < y ? x : y;
+                }
+
+                Done: match._current = v;
+                return v != QueryMatch.Invalid;
+            }
+
+            return new BinaryMatch<TInner, TOuter>(ref inner, ref outer, &SeekToFunc, &MoveNextFunc, inner.Count + outer.Count);
         }
     }
 
@@ -376,15 +459,19 @@ namespace Corax
         }
 
 
-        //public BinaryMatch And(in TermMatch set1, in TermMatch set2)
-        //{
-        //    return BinaryMatch.YieldAnd(set1, set2);
-        //}
+        public BinaryMatch<TInner, TOuter> And<TInner, TOuter>(ref TInner set1, ref TOuter set2)
+            where TInner : struct, IIndexMatch
+            where TOuter : struct, IIndexMatch
+        {
+            return BinaryMatch<TInner, TOuter>.YieldAnd(ref set1, ref set2);
+        }
 
-        //public BinaryMatch Or(in TermMatch set1, in TermMatch set2)
-        //{
-        //    return BinaryMatch.YieldOr(set1, set2);
-        //}
+        public BinaryMatch<TInner, TOuter> Or<TInner, TOuter>(ref TInner set1, ref TOuter set2)
+            where TInner : struct, IIndexMatch
+            where TOuter : struct, IIndexMatch
+        {
+            return BinaryMatch<TInner, TOuter>.YieldOr(ref set1, ref set2);
+        }
 
         public void Dispose()
         {
