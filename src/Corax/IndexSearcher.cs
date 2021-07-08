@@ -201,8 +201,8 @@ namespace Corax
     }
 
     public unsafe struct BinaryMatch<TInner, TOuter> : IIndexMatch
-        where TInner : struct, IIndexMatch
-        where TOuter : struct, IIndexMatch
+        where TInner : IIndexMatch
+        where TOuter : IIndexMatch
     {
         private readonly delegate*<ref BinaryMatch<TInner, TOuter>, long, bool> _seekToFunc;
         private readonly delegate*<ref BinaryMatch<TInner, TOuter>, out long, bool> _moveNext;
@@ -216,7 +216,7 @@ namespace Corax
         public long Count => _totalResults;
         public long Current => _current;
 
-        private BinaryMatch(ref TInner inner, ref TOuter outer, delegate*<ref BinaryMatch<TInner, TOuter>, long, bool> seekFunc, delegate*<ref BinaryMatch<TInner, TOuter>, out long, bool> moveNext, long totalResults)
+        private BinaryMatch(in TInner inner, in TOuter outer, delegate*<ref BinaryMatch<TInner, TOuter>, long, bool> seekFunc, delegate*<ref BinaryMatch<TInner, TOuter>, out long, bool> moveNext, long totalResults)
         {
             _totalResults = totalResults;
             _current = QueryMatch.Start;
@@ -239,7 +239,7 @@ namespace Corax
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static BinaryMatch<TInner, TOuter> YieldAnd(ref TInner inner, ref TOuter outer)
+        public static BinaryMatch<TInner, TOuter> YieldAnd(in TInner inner, in TOuter outer)
         {
             static bool SeekToFunc(ref BinaryMatch<TInner, TOuter> match, long v)
             {
@@ -281,7 +281,8 @@ namespace Corax
 
                 if (inner.Current == outer.Current)
                 {
-                    match._current = inner.Current;
+                    v = inner.Current;
+                    match._current = v;
                     return true;
                 }
 
@@ -291,10 +292,10 @@ namespace Corax
                 return false;
             }
 
-            return new BinaryMatch<TInner, TOuter>(ref inner, ref outer, &SeekToFunc, &MoveNextFunc, Math.Min(inner.Count, outer.Count));
+            return new BinaryMatch<TInner, TOuter>(in inner, in outer, &SeekToFunc, &MoveNextFunc, Math.Min(inner.Count, outer.Count));
         }
 
-        public static BinaryMatch<TInner, TOuter> YieldOr(ref TInner inner, ref TOuter outer)
+        public static BinaryMatch<TInner, TOuter> YieldOr(in TInner inner, in TOuter outer)
         {
             static bool SeekToFunc(ref BinaryMatch<TInner, TOuter> match, long v)
             {
@@ -366,7 +367,7 @@ namespace Corax
                 return v != QueryMatch.Invalid;
             }
 
-            return new BinaryMatch<TInner, TOuter>(ref inner, ref outer, &SeekToFunc, &MoveNextFunc, inner.Count + outer.Count);
+            return new BinaryMatch<TInner, TOuter>(in inner, in outer, &SeekToFunc, &MoveNextFunc, inner.Count + outer.Count);
         }
     }
 
@@ -413,12 +414,19 @@ namespace Corax
                     return (be.Operator, be.Left, be.Right) switch
                     {
                         (OperatorType.Equal, FieldExpression f, ValueExpression v) => TermQuery(f.FieldValue, v.Token.Value),
-                        //(OperatorType.And , _, _) => BinaryMatch.YieldAnd(),
+                        (OperatorType.And, QueryExpression q1, QueryExpression q2) => EvaluateAnd(q1, q2),
                         _ => throw new NotSupportedException()
                     };
                 default:
                     return null;
             }
+        }
+
+        private BinaryMatch<IIndexMatch, IIndexMatch> EvaluateAnd(QueryExpression q1, QueryExpression q2)
+        {
+
+
+            throw new NotImplementedException();
         }
 
         // foreach term in 2010 .. 2020
@@ -459,18 +467,18 @@ namespace Corax
         }
 
 
-        public BinaryMatch<TInner, TOuter> And<TInner, TOuter>(ref TInner set1, ref TOuter set2)
+        public BinaryMatch<TInner, TOuter> And<TInner, TOuter>(in TInner set1, in TOuter set2)
             where TInner : struct, IIndexMatch
             where TOuter : struct, IIndexMatch
         {
-            return BinaryMatch<TInner, TOuter>.YieldAnd(ref set1, ref set2);
+            return BinaryMatch<TInner, TOuter>.YieldAnd(in set1, in set2);
         }
 
-        public BinaryMatch<TInner, TOuter> Or<TInner, TOuter>(ref TInner set1, ref TOuter set2)
+        public BinaryMatch<TInner, TOuter> Or<TInner, TOuter>(in TInner set1, in TOuter set2)
             where TInner : struct, IIndexMatch
             where TOuter : struct, IIndexMatch
         {
-            return BinaryMatch<TInner, TOuter>.YieldOr(ref set1, ref set2);
+            return BinaryMatch<TInner, TOuter>.YieldOr(in set1, in set2);
         }
 
         public void Dispose()

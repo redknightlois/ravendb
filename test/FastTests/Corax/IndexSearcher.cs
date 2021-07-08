@@ -259,7 +259,7 @@ namespace FastTests.Corax
                 using var searcher = new IndexSearcher(Env);
                 var match1 = searcher.TermQuery("Id", "entry/1");
                 var match2 = searcher.TermQuery("Content", "mountain");
-                var andMatch = searcher.And(ref match1, ref match2);
+                var andMatch = searcher.And(in match1, in match2);
 
                 Assert.Equal(QueryMatch.Start, andMatch.Current);
 
@@ -292,7 +292,7 @@ namespace FastTests.Corax
                 using var searcher = new IndexSearcher(Env);
                 var match1 = searcher.TermQuery("Id", "entry/1");
                 var match2 = searcher.TermQuery("Content", "mountain");
-                var andMatch = searcher.And(ref match1, ref match2);
+                var andMatch = searcher.And(in match1, in match2);
 
                 Assert.Equal(QueryMatch.Start, andMatch.Current);
 
@@ -325,7 +325,7 @@ namespace FastTests.Corax
                 using var searcher = new IndexSearcher(Env);
                 var match1 = searcher.TermQuery("Id", "entry/1");
                 var match2 = searcher.TermQuery("Content", "mountain");
-                var andMatch = searcher.And(ref match1, ref match2);
+                var andMatch = searcher.And(in match1, in match2);
 
                 Assert.Equal(QueryMatch.Start, andMatch.Current);
 
@@ -358,7 +358,7 @@ namespace FastTests.Corax
                 using var searcher = new IndexSearcher(Env);
                 var match1 = searcher.TermQuery("Id", "entry/3");
                 var match2 = searcher.TermQuery("Content", "highway");
-                var andMatch = searcher.Or(ref match1, ref match2);
+                var andMatch = searcher.Or(in match1, in match2);
 
                 Assert.Equal(QueryMatch.Start, andMatch.Current);
 
@@ -391,7 +391,7 @@ namespace FastTests.Corax
                 using var searcher = new IndexSearcher(Env);
                 var match1 = searcher.TermQuery("Id", "entry/1");
                 var match2 = searcher.TermQuery("Content", "highway");
-                var andMatch = searcher.Or(ref match1, ref match2);
+                var andMatch = searcher.Or(in match1, in match2);
 
                 Assert.Equal(QueryMatch.Start, andMatch.Current);
 
@@ -404,7 +404,7 @@ namespace FastTests.Corax
 
                 match1 = searcher.TermQuery("Id", "entry/3");
                 match2 = searcher.TermQuery("Content", "mountain");
-                andMatch = searcher.Or(ref match1, ref match2);
+                andMatch = searcher.Or(in match1, in match2);
 
                 Assert.Equal(QueryMatch.Start, andMatch.Current);
 
@@ -438,7 +438,7 @@ namespace FastTests.Corax
                 using var searcher = new IndexSearcher(Env);
                 var match1 = searcher.TermQuery("Id", "entry/1");
                 var match2 = searcher.TermQuery("Content", "mountain");
-                var andMatch = searcher.Or(ref match1, ref match2);
+                var andMatch = searcher.Or(in match1, in match2);
 
                 Assert.Equal(QueryMatch.Start, andMatch.Current);
 
@@ -447,6 +447,64 @@ namespace FastTests.Corax
                     i++;
 
                 Assert.Equal(QueryMatch.Invalid, andMatch.Current);
+                Assert.Equal(2, i);
+            }
+        }
+
+        [Fact]
+        public void SimpleAndOr()
+        {
+            var entry1 = new IndexEntry
+            {
+                Id = "entry/1",
+                Content = new string[] { "road", "lake", "mountain" },
+            };
+            var entry2 = new IndexEntry
+            {
+                Id = "entry/2",
+                Content = new string[] { "road", "mountain" },
+            };
+            var entry3 = new IndexEntry
+            {
+                Id = "entry/3",
+                Content = new string[] { "sky", "space" },
+            };
+
+            IndexEntries(new[] { entry1, entry2, entry3 });
+
+            {
+                using var searcher = new IndexSearcher(Env);
+                var match1 = searcher.TermQuery("Id", "entry/1");
+                var match2 = searcher.TermQuery("Content", "mountain");
+                var andMatch = searcher.And(in match1, in match2);
+                var match3 = searcher.TermQuery("Id", "entry/3");
+                var orMatch = searcher.Or(in andMatch, in match3);
+
+                Assert.Equal(QueryMatch.Start, orMatch.Current);
+
+                int i = 0;
+                while (orMatch.MoveNext(out var _))
+                    i++;
+
+                Assert.Equal(QueryMatch.Invalid, orMatch.Current);
+                Assert.Equal(2, i);
+            }
+
+            {
+                using var searcher = new IndexSearcher(Env);
+                var match1 = searcher.TermQuery("Id", "entry/1");
+                var match2 = searcher.TermQuery("Content", "mountain");
+                var andMatch = searcher.And(in match1, in match2);
+                var match3 = searcher.TermQuery("Id", "entry/3");
+                var orMatch = searcher.Or(in match3, in andMatch);
+
+                Assert.Equal(QueryMatch.Start, orMatch.Current);
+
+                int i = 0;
+                while (orMatch.MoveNext(out var _))
+                    i++;
+
+                Assert.Equal(QueryMatch.Invalid, orMatch.Current);
                 Assert.Equal(2, i);
             }
         }
