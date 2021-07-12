@@ -2,6 +2,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using System.Text;
+using Corax.Queries;
 using Raven.Server.Documents.Queries.AST;
 using Raven.Server.Documents.Queries.Parser;
 using Sparrow.Server.Compression;
@@ -484,6 +485,11 @@ namespace Corax
         public void Dispose()
         {
             _transaction?.Dispose();
+        }
+
+        public AbstractQueryTask AllDocuments()
+        {
+            throw new NotImplementedException();
         }
     }
 }

@@ -20,6 +20,9 @@ using Sparrow.Threading;
 using Tests.Infrastructure;
 using Voron;
 using Voron.Data.CompactTrees;
+using Voron.Data.Sets;
+using Raven.Server.Documents.Queries.Parser;
+using Corax.Queries;
 
 namespace Tryouts
 {
@@ -134,10 +137,101 @@ namespace Tryouts
             }
         }
 
-        public static void Main(string[] args)
+        public static void Main()
         {
+            var parser = new QueryParser();
+            parser.Init("from Dogs where Type = 'Dog' and Family = 'Eini'");
+            var generator = new QueryCodeGenerator();
+            QueryDefinition queryDefinition = new QueryDefinition("Name", parser.Parse());
+            var sp = Stopwatch.StartNew();
+            QueryInstanceGenerator queryInstanceGenerator = generator.Create(queryDefinition);
+            Console.WriteLine(sp.Elapsed);
+
             using var env = new StorageEnvironment(StorageEnvironmentOptions.CreateMemoryOnly());
 
+            GenerateData(env);
+            
+            using var indexSearcher = new IndexSearcher(env);
+            
+            AbstractQueryTask query = queryInstanceGenerator(queryDefinition, indexSearcher, new Dictionary<string, string>());
+
+            Span<long> ids = stackalloc long[128];
+            var len = query.Execute(ids);
+            for (int i = 0; i < len; i++)
+            {
+                Console.WriteLine(indexSearcher.GetEntryById(ids[i]));
+            }
+
+            //new IndexSearcherTest(new ConsoleTestOutputHelper()).SimpleAndOr();
+
+
+
+            //using (var writer = new IndexWriter(env))
+            //{
+            //    using var bsc = new ByteStringContext(SharedMultipleUseFlag.None);
+            //    Slice.From(bsc, "Name", ByteStringType.Immutable, out var nameSlice);
+            //    Slice.From(bsc, "Family", ByteStringType.Immutable, out var familySlice);
+            //    Slice.From(bsc, "Age", ByteStringType.Immutable, out var ageSlice);
+            //    Slice.From(bsc, "Type", ByteStringType.Immutable, out var typeSlice);
+
+            //    Span<byte> buffer = new byte[256];
+            //    var fields = new Dictionary<Slice,int>
+            //    {
+            //        [nameSlice] = 0,
+            //        [familySlice] = 1,
+            //        [ageSlice] = 2,
+            //        [typeSlice] = 3
+            //    };
+
+            //    {
+            //        var entryWriter = new IndexEntryWriter(buffer, fields);
+            //        entryWriter.Write(0, Encoding.UTF8.GetBytes("Arava"));
+            //        entryWriter.Write(1, Encoding.UTF8.GetBytes("Eini"));
+            //        entryWriter.Write(2, BitConverter.GetBytes(12), 12L, 12D);
+            //        entryWriter.Write(3, Encoding.UTF8.GetBytes("Dog"));
+            //        entryWriter.Finish(out var entry);
+
+            //        writer.Index("dogs/arava", entry, fields);
+            //    }
+
+            //    {
+            //        var entryWriter = new IndexEntryWriter(buffer, fields);
+            //        entryWriter.Write(0, Encoding.UTF8.GetBytes("Phoebe"));
+            //        entryWriter.Write(1, Encoding.UTF8.GetBytes("Eini"));
+            //        entryWriter.Write(2, BitConverter.GetBytes(7), 7L, 7D);
+            //        entryWriter.Write(3, Encoding.UTF8.GetBytes("Dog"));
+            //        entryWriter.Finish(out var entry);
+
+            //        writer.Index("dogs/phoebe", entry, fields);
+            //    }
+
+            //    for (int i = 0; i < 10_000; i++)
+            //    {
+            //        var entryWriter = new IndexEntryWriter(buffer, fields);
+            //        entryWriter.Write(0, Encoding.UTF8.GetBytes("Dog #" + i));
+            //        entryWriter.Write(1, Encoding.UTF8.GetBytes("families/" + (i % 1024)));
+            //        var age = i % 17;
+            //        entryWriter.Write(2, BitConverter.GetBytes(age), age, age);
+            //        entryWriter.Write(3, Encoding.UTF8.GetBytes("Dog"));
+            //        entryWriter.Finish(out var entry);
+
+            //        writer.Index("dogs/" + i, entry, fields);
+            //    }
+
+            //    writer.Commit();
+            //}
+
+
+            //using (var searcher = new IndexSearcher(env))
+            //{
+            //    var termMatch = searcher.Search("from Dogs where Type = 'Dog' and Family = 'Eini'");
+            //    PrintIds(termMatch, searcher);
+            //}
+
+        }
+
+        private static void GenerateData(StorageEnvironment env)
+        {
             using (var writer = new IndexWriter(env))
             {
                 using var bsc = new ByteStringContext(SharedMultipleUseFlag.None);
@@ -147,13 +241,7 @@ namespace Tryouts
                 Slice.From(bsc, "Type", ByteStringType.Immutable, out var typeSlice);
 
                 Span<byte> buffer = new byte[256];
-                var fields = new Dictionary<Slice,int>
-                {
-                    [nameSlice] = 0,
-                    [familySlice] = 1,
-                    [ageSlice] = 2,
-                    [typeSlice] = 3
-                };
+                var fields = new Dictionary<Slice, int> {[nameSlice] = 0, [familySlice] = 1, [ageSlice] = 2, [typeSlice] = 3};
 
                 {
                     var entryWriter = new IndexEntryWriter(buffer, fields);
@@ -165,7 +253,7 @@ namespace Tryouts
 
                     writer.Index("dogs/arava", entry, fields);
                 }
-                
+
                 {
                     var entryWriter = new IndexEntryWriter(buffer, fields);
                     entryWriter.Write(0, Encoding.UTF8.GetBytes("Phoebe"));
@@ -186,44 +274,12 @@ namespace Tryouts
                     entryWriter.Write(2, BitConverter.GetBytes(age), age, age);
                     entryWriter.Write(3, Encoding.UTF8.GetBytes("Dog"));
                     entryWriter.Finish(out var entry);
-                
+
                     writer.Index("dogs/" + i, entry, fields);
                 }
-                
+
                 writer.Commit();
             }
-
-            using (var searcher = new IndexSearcher(env))
-            {
-                var termMatch = searcher.Search("from Dogs where Type = 'Dog'");
-                PrintIds(termMatch, searcher);
-                
-                //  searcher.And(searcher.TermQuery("Type", args["$foo"] ), searcher.TermQuery...));
-                
-                // Console.WriteLine("Arava");
-                //  termMatch = searcher.TermQuery("Name", "Arava");
-                // PrintIds(termMatch, searcher);
-                //
-                // Console.WriteLine("Eini");
-                // termMatch = searcher.TermQuery("Family", "Eini");
-                // while (termMatch.MoveNext(out var id))
-                // {
-                //     Console.WriteLine(searcher.GetEntryById(id));
-                // }
-                //
-                // Console.WriteLine("Dogs");
-                // termMatch = searcher.TermQuery("Type", "Dog");
-                // var list = new List<string>();
-                // while (termMatch.MoveNext(out var id))
-                // {
-                //     list.Add(searcher.GetEntryById(id));
-                // }
-                //
-                // Console.WriteLine("Results: " + list.Count);
-                // Console.WriteLine(string.Join(", ", list.Take(16)));
-            }
-            
-            
         }
 
         private static void PrintIds(IIndexMatch termMatch, IndexSearcher searcher)
