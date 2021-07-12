@@ -42,7 +42,9 @@ namespace Corax.Queries
         public override int Execute(Span<long> results)
         {
             int i = 0;
-            while (_queryInstance.MoveNext(out var v) && i < results.Length)
+            ref var instance = ref _queryInstance;
+
+            while (instance.MoveNext(out var v) && i < results.Length)
             {
                 results[i++] = v;
             }
