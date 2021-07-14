@@ -566,6 +566,27 @@ namespace Corax
             where TInner : IIndexMatch
             where TOuter : IIndexMatch
         {
+            // TODO: We need to create this code using a template or using typed delegates (which either way would need templating for boilerplate code generation)
+
+            // If any of the generic types is not known to be a struct (calling from interface) the code executed will
+            // do all the work to figure out what to emit. The cost is in instantiation not on execution.             
+            if (set1.GetType() == typeof(TermMatch) && set2.GetType() == typeof(TermMatch))
+            {
+                return BinaryMatch.Create(BinaryMatch<TermMatch, TermMatch>.YieldAnd((TermMatch)(object)set1, (TermMatch)(object)set2));
+            }
+            else if (set1.GetType() == typeof(BinaryMatch) && set2.GetType() == typeof(TermMatch))
+            {
+                return BinaryMatch.Create(BinaryMatch<BinaryMatch, TermMatch>.YieldAnd((BinaryMatch)(object)set1, (TermMatch)(object)set2));
+            }
+            else if (set1.GetType() == typeof(TermMatch) && set2.GetType() == typeof(BinaryMatch))
+            {
+                return BinaryMatch.Create(BinaryMatch<TermMatch, BinaryMatch>.YieldAnd((TermMatch)(object)set1, (BinaryMatch)(object)set2));
+            }
+            else if (set1.GetType() == typeof(BinaryMatch) && set2.GetType() == typeof(BinaryMatch))
+            {
+                return BinaryMatch.Create(BinaryMatch<BinaryMatch, BinaryMatch>.YieldAnd((BinaryMatch)(object)set1, (BinaryMatch)(object)set2));
+            }
+
             return BinaryMatch.Create(BinaryMatch<TInner, TOuter>.YieldAnd(in set1, in set2));
         }
 
@@ -574,6 +595,25 @@ namespace Corax
             where TInner : IIndexMatch
             where TOuter : IIndexMatch
         {
+            // If any of the generic types is not known to be a struct (calling from interface) the code executed will
+            // do all the work to figure out what to emit. The cost is in instantiation not on execution. 
+            if (set1.GetType() == typeof(TermMatch) && set2.GetType() == typeof(TermMatch))
+            {
+                return BinaryMatch.Create(BinaryMatch<TermMatch, TermMatch>.YieldOr((TermMatch)(object)set1, (TermMatch)(object)set2));
+            }
+            else if (set1.GetType() == typeof(BinaryMatch) && set2.GetType() == typeof(TermMatch))
+            {
+                return BinaryMatch.Create(BinaryMatch<BinaryMatch, TermMatch>.YieldOr((BinaryMatch)(object)set1, (TermMatch)(object)set2));
+            }
+            else if (set1.GetType() == typeof(TermMatch) && set2.GetType() == typeof(BinaryMatch))
+            {
+                return BinaryMatch.Create(BinaryMatch<TermMatch, BinaryMatch>.YieldOr((TermMatch)(object)set1, (BinaryMatch)(object)set2));
+            }
+            else if (set1.GetType() == typeof(BinaryMatch) && set2.GetType() == typeof(BinaryMatch))
+            {
+                return BinaryMatch.Create(BinaryMatch<BinaryMatch, BinaryMatch>.YieldOr((BinaryMatch)(object)set1, (BinaryMatch)(object)set2));
+            }
+
             return BinaryMatch.Create(BinaryMatch<TInner, TOuter>.YieldOr(in set1, in set2));
         }
 
