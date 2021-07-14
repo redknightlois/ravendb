@@ -140,26 +140,24 @@ namespace Tryouts
         public static void Main()
         {
             var parser = new QueryParser();
-            parser.Init("from Dogs where Type = 'Dog' and Family = 'Eini'");
-            var generator = new QueryCodeGenerator();
+            parser.Init("from Dogs where Type = 'Dog' and Age = '15'");
             QueryDefinition queryDefinition = new QueryDefinition("Name", parser.Parse());
-            var sp = Stopwatch.StartNew();
-            QueryInstanceGenerator queryInstanceGenerator = generator.Create(queryDefinition);
-            Console.WriteLine(sp.Elapsed);
 
             using var env = new StorageEnvironment(StorageEnvironmentOptions.CreateMemoryOnly());
 
             GenerateData(env);
             
             using var indexSearcher = new IndexSearcher(env);
-            
-            AbstractQueryTask query = queryInstanceGenerator(queryDefinition, indexSearcher, new Dictionary<string, string>());
 
-            Span<long> ids = stackalloc long[128];
-            var len = query.Execute(ids);
-            for (int i = 0; i < len; i++)
+            
+            var query = indexSearcher.Search(queryDefinition.Query.Where);
+
+            int i = 0;
+            //Span<long> ids = stackalloc long[128];
+            while (query.MoveNext(out long v))
             {
-                Console.WriteLine(indexSearcher.GetEntryById(ids[i]));
+                //ids[i++] = v;
+                Console.WriteLine(indexSearcher.GetEntryById(v));
             }
 
             //new IndexSearcherTest(new ConsoleTestOutputHelper()).SimpleAndOr();
@@ -247,7 +245,8 @@ namespace Tryouts
                     var entryWriter = new IndexEntryWriter(buffer, fields);
                     entryWriter.Write(0, Encoding.UTF8.GetBytes("Arava"));
                     entryWriter.Write(1, Encoding.UTF8.GetBytes("Eini"));
-                    entryWriter.Write(2, BitConverter.GetBytes(12), 12L, 12D);
+                    //entryWriter.Write(2, BitConverter.GetBytes(12), 12L, 12D);
+                    entryWriter.Write(2, Encoding.UTF8.GetBytes(12L.ToString()), 12L, 12D);
                     entryWriter.Write(3, Encoding.UTF8.GetBytes("Dog"));
                     entryWriter.Finish(out var entry);
 
@@ -258,7 +257,8 @@ namespace Tryouts
                     var entryWriter = new IndexEntryWriter(buffer, fields);
                     entryWriter.Write(0, Encoding.UTF8.GetBytes("Phoebe"));
                     entryWriter.Write(1, Encoding.UTF8.GetBytes("Eini"));
-                    entryWriter.Write(2, BitConverter.GetBytes(7), 7L, 7D);
+                    //entryWriter.Write(2, BitConverter.GetBytes(7), 7L, 7D);
+                    entryWriter.Write(2, Encoding.UTF8.GetBytes(7.ToString()), 7L, 7D);
                     entryWriter.Write(3, Encoding.UTF8.GetBytes("Dog"));
                     entryWriter.Finish(out var entry);
 
@@ -271,7 +271,8 @@ namespace Tryouts
                     entryWriter.Write(0, Encoding.UTF8.GetBytes("Dog #" + i));
                     entryWriter.Write(1, Encoding.UTF8.GetBytes("families/" + (i % 1024)));
                     var age = i % 17;
-                    entryWriter.Write(2, BitConverter.GetBytes(age), age, age);
+                    //entryWriter.Write(2, BitConverter.GetBytes(age), age, age);
+                    entryWriter.Write(2, Encoding.UTF8.GetBytes(age.ToString()), age, age);
                     entryWriter.Write(3, Encoding.UTF8.GetBytes("Dog"));
                     entryWriter.Finish(out var entry);
 

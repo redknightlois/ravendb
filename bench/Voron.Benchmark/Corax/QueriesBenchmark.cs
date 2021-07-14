@@ -137,7 +137,7 @@ namespace Voron.Benchmark.Corax
                     var entryWriter = new IndexEntryWriter(buffer, fields);
                     entryWriter.Write(0, Encoding.UTF8.GetBytes("Arava"));
                     entryWriter.Write(1, Encoding.UTF8.GetBytes("Eini"));
-                    entryWriter.Write(2, BitConverter.GetBytes(12), 12L, 12D);
+                    entryWriter.Write(2, Encoding.UTF8.GetBytes(12L.ToString()), 12L, 12D);
                     entryWriter.Write(3, Encoding.UTF8.GetBytes("Dog"));
                     entryWriter.Finish(out var entry);
 
@@ -148,7 +148,7 @@ namespace Voron.Benchmark.Corax
                     var entryWriter = new IndexEntryWriter(buffer, fields);
                     entryWriter.Write(0, Encoding.UTF8.GetBytes("Phoebe"));
                     entryWriter.Write(1, Encoding.UTF8.GetBytes("Eini"));
-                    entryWriter.Write(2, BitConverter.GetBytes(7), 7L, 7D);
+                    entryWriter.Write(2, Encoding.UTF8.GetBytes(7.ToString()), 7L, 7D);
                     entryWriter.Write(3, Encoding.UTF8.GetBytes("Dog"));
                     entryWriter.Finish(out var entry);
 
@@ -161,7 +161,7 @@ namespace Voron.Benchmark.Corax
                     entryWriter.Write(0, Encoding.UTF8.GetBytes("Dog #" + i));
                     entryWriter.Write(1, Encoding.UTF8.GetBytes("families/" + (i % 1024)));
                     var age = i % 17;
-                    entryWriter.Write(2, BitConverter.GetBytes(age), age, age);
+                    entryWriter.Write(2, Encoding.UTF8.GetBytes(age.ToString()), age, age);
                     entryWriter.Write(3, Encoding.UTF8.GetBytes("Dog"));
                     entryWriter.Finish(out var entry);
 
@@ -185,12 +185,9 @@ namespace Voron.Benchmark.Corax
 
             var parser = new QueryParser();
             parser.Init("from Dogs where Type = 'Dog' and Age = '15'");
-
             _queryDefinition = new QueryDefinition("Name", parser.Parse());
-            _queryGenerator = new QueryCodeGenerator().Create(_queryDefinition);
         }
 
-        protected QueryInstanceGenerator _queryGenerator;
         protected QueryDefinition _queryDefinition;
 
         [GlobalCleanup]
@@ -226,21 +223,6 @@ namespace Voron.Benchmark.Corax
         }
 
         private long[] _ids = new long[128];
-        private readonly Dictionary<string, string> _empty = new Dictionary<string, string>();
-
-        [Benchmark]
-        public void GeneratedQuery()
-        {
-            using var indexSearcher = new IndexSearcher(Env);
-            var query = _queryGenerator(_queryDefinition, indexSearcher, _empty);
-            
-            var ids = _ids;
-            var len = query.Execute(_ids.AsSpan());
-            for (int i = 0; i < len; i++)
-            {
-                indexSearcher.GetEntryById(ids[i]);
-            }
-        }
 
         [Benchmark]
         public void RuntimeQuery()
@@ -248,33 +230,52 @@ namespace Voron.Benchmark.Corax
             using var indexSearcher = new IndexSearcher(Env);
             var typeTerm = indexSearcher.TermQuery("Type", "Dog");
             var familyTerm = indexSearcher.TermQuery("Age", "15");
-            var query = indexSearcher.And(typeTerm, familyTerm);            
+            var query = indexSearcher.And(typeTerm, familyTerm);
 
             int i = 0;
-            var ids = _ids;
+            //var ids = _ids;
             while (query.MoveNext(out long v))
             {
-                ids[i++] = v;
+                //ids[i++] = v;
                 indexSearcher.GetEntryById(v);
             }
         }
 
-
         [Benchmark]
-        public void StructQuery()
+        public void RuntimeQueryOnlyIteration()
         {
             using var indexSearcher = new IndexSearcher(Env);
             var typeTerm = indexSearcher.TermQuery("Type", "Dog");
             var familyTerm = indexSearcher.TermQuery("Age", "15");
-            var query = indexSearcher.AndTyped(typeTerm, familyTerm);
-                        
+            var query = indexSearcher.And(typeTerm, familyTerm);
+
+            while (query.MoveNext(out long v))
+            { }
+        }
+
+        [Benchmark]
+        public void ParserQuery()
+        {
+            using var indexSearcher = new IndexSearcher(Env);
+            var query = indexSearcher.Search(_queryDefinition.Query.Where);
+
             int i = 0;
-            var ids = _ids;
+            //var ids = _ids;
             while (query.MoveNext(out long v))
             {
-                ids[i++] = v;
+                //ids[i++] = v;
                 indexSearcher.GetEntryById(v);
             }
+        }
+
+        [Benchmark]
+        public void ParserQueryOnlyIteration()
+        {
+            using var indexSearcher = new IndexSearcher(Env);
+            var query = indexSearcher.Search(_queryDefinition.Query.Where);
+
+            while (query.MoveNext(out long v))
+            { }
         }
     }
 }

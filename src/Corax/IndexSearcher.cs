@@ -2,7 +2,6 @@ using System;
 using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using System.Text;
-using Corax.Queries;
 using Raven.Server.Documents.Queries.AST;
 using Raven.Server.Documents.Queries.Parser;
 using Sparrow.Server.Compression;
@@ -205,7 +204,7 @@ namespace Corax
         private readonly FunctionTable _functionTable;
         private IIndexMatch _inner;
 
-        internal BinaryMatch( IIndexMatch match, FunctionTable functionTable)
+        internal BinaryMatch(IIndexMatch match, FunctionTable functionTable)
         {
             _inner = match;
             _functionTable = functionTable;
@@ -499,33 +498,29 @@ namespace Corax
             return Search(query.Where);
         }
 
-        private IIndexMatch Search(QueryExpression where)
+        public IIndexMatch Search(QueryExpression where)
         {
-            // if (where.Compiled != null)
-            //     return;
-            
+            return Evaluate(@where);
+        }
+
+        private IIndexMatch Evaluate(QueryExpression where)
+        {
             switch (@where)
             {
                 case TrueExpression _:
                 case null:
                     return null; // all docs here
-                case Raven.Server.Documents.Queries.AST.BinaryExpression be:
+                case BinaryExpression be:
                     return (be.Operator, be.Left, be.Right) switch
                     {
                         (OperatorType.Equal, FieldExpression f, ValueExpression v) => TermQuery(f.FieldValue, v.Token.Value),
-                        (OperatorType.And, QueryExpression q1, QueryExpression q2) => EvaluateAnd(q1, q2),
+                        (OperatorType.And, QueryExpression q1, QueryExpression q2) => And(Evaluate(q1), Evaluate(q2)),
+                        (OperatorType.Or, QueryExpression q1, QueryExpression q2) => Or(Evaluate(q1), Evaluate(q2)),
                         _ => throw new NotSupportedException()
                     };
                 default:
                     return null;
             }
-        }
-
-        private BinaryMatch<IIndexMatch, IIndexMatch> EvaluateAnd(QueryExpression q1, QueryExpression q2)
-        {
-
-
-            throw new NotImplementedException();
         }
 
         // foreach term in 2010 .. 2020
@@ -568,44 +563,23 @@ namespace Corax
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public BinaryMatch And<TInner, TOuter>(in TInner set1, in TOuter set2)
-            where TInner : struct, IIndexMatch
-            where TOuter : struct, IIndexMatch
+            where TInner : IIndexMatch
+            where TOuter : IIndexMatch
         {
             return BinaryMatch.Create(BinaryMatch<TInner, TOuter>.YieldAnd(in set1, in set2));
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public BinaryMatch Or<TInner, TOuter>(in TInner set1, in TOuter set2)
-            where TInner : struct, IIndexMatch
-            where TOuter : struct, IIndexMatch
+            where TInner : IIndexMatch
+            where TOuter : IIndexMatch
         {
             return BinaryMatch.Create(BinaryMatch<TInner, TOuter>.YieldOr(in set1, in set2));
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public BinaryMatch<TInner, TOuter> AndTyped<TInner, TOuter>(in TInner set1, in TOuter set2)
-            where TInner : struct, IIndexMatch
-            where TOuter : struct, IIndexMatch
-        {
-            return BinaryMatch<TInner, TOuter>.YieldAnd(in set1, in set2);
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public BinaryMatch<TInner, TOuter> OrStruct<TInner, TOuter>(in TInner set1, in TOuter set2)
-            where TInner : struct, IIndexMatch
-            where TOuter : struct, IIndexMatch
-        {
-            return BinaryMatch<TInner, TOuter>.YieldOr(in set1, in set2);
         }
 
         public void Dispose()
         {
             _transaction?.Dispose();
-        }
-
-        public AbstractQueryTask AllDocuments()
-        {
-            throw new NotImplementedException();
         }
     }
 }
