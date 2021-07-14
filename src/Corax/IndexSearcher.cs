@@ -582,6 +582,22 @@ namespace Corax
             return BinaryMatch.Create(BinaryMatch<TInner, TOuter>.YieldOr(in set1, in set2));
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public BinaryMatch<TInner, TOuter> AndTyped<TInner, TOuter>(in TInner set1, in TOuter set2)
+            where TInner : struct, IIndexMatch
+            where TOuter : struct, IIndexMatch
+        {
+            return BinaryMatch<TInner, TOuter>.YieldAnd(in set1, in set2);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public BinaryMatch<TInner, TOuter> OrStruct<TInner, TOuter>(in TInner set1, in TOuter set2)
+            where TInner : struct, IIndexMatch
+            where TOuter : struct, IIndexMatch
+        {
+            return BinaryMatch<TInner, TOuter>.YieldOr(in set1, in set2);
+        }
+
         public void Dispose()
         {
             _transaction?.Dispose();
