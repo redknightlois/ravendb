@@ -9,466 +9,11 @@ using Voron;
 using Voron.Impl;
 using Voron.Data.Sets;
 using Voron.Data.Containers;
+using Corax.Queries;
+
 
 namespace Corax
 {
-    public interface IIndexMatch
-    {
-        long Count { get; }
-        long Current { get; }
-
-        bool SeekTo(long next = 0);
-        bool MoveNext(out long v);
-    }
-
-    public static class QueryMatch
-    {
-        public const long Invalid = -1;
-        public const long Start = 0;
-    }
-
-    public unsafe struct TermMatch : IIndexMatch
-    {
-        private readonly delegate*<ref TermMatch, long, bool> _seekToFunc;
-        private readonly delegate*<ref TermMatch, out long, bool> _moveNext;
-
-        private long _totalResults;
-        private long _currentIdx;
-        private long _current;
-        
-        private Container.Item _container;
-        private Set.Iterator _set;
-
-        public long Count => _totalResults;
-        public long Current => _currentIdx <= QueryMatch.Start ? _currentIdx : _current;
-
-        private TermMatch(delegate*<ref TermMatch, long, bool> seekFunc, delegate*<ref TermMatch, out long, bool> moveNext, long totalResults)
-        {
-            _totalResults = totalResults;
-            _current = QueryMatch.Start;
-            _currentIdx = QueryMatch.Start;
-            _seekToFunc = seekFunc;
-            _moveNext = moveNext;
-
-            _container = default;
-            _set = default;
-        }
-
-        public static TermMatch CreateEmpty()
-        {
-            static bool SeekFunc(ref TermMatch term, long next)
-            {
-                term._current = next == QueryMatch.Start ? QueryMatch.Start : QueryMatch.Invalid;
-                return false;
-            }
-
-            static bool MoveNextFunc(ref TermMatch term, out long v)
-            {
-                term._currentIdx = QueryMatch.Invalid;
-                term._current = QueryMatch.Invalid;
-                v = QueryMatch.Invalid;
-                return false;
-            }
-
-            return new TermMatch(&SeekFunc, &MoveNextFunc, 0);
-        }
-
-        public static TermMatch YieldOnce(long value)
-        {
-            static bool SeekFunc(ref TermMatch term, long next)
-            {
-                term._currentIdx = next > term._current ? QueryMatch.Invalid : QueryMatch.Start;
-                return term._currentIdx == QueryMatch.Start;
-            }
-
-            static bool MoveNextFunc(ref TermMatch term, out long v)
-            {
-                if (term._currentIdx == QueryMatch.Start)
-                {
-                    term._currentIdx = term._current;
-                    v = term._current;
-                    return true;
-                }
-
-                v = QueryMatch.Invalid;
-                term._currentIdx = QueryMatch.Invalid;
-                return false;
-            }
-
-            return new TermMatch(&SeekFunc, &MoveNextFunc, 1)
-            {
-                _current = value,
-                _currentIdx = QueryMatch.Start
-            };
-        }
-
-        public static TermMatch YieldSmall(Container.Item containerItem)
-        {
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            static bool SeekFunc(ref TermMatch term, long next)
-            {
-                var stream = term._container.ToSpan();
-
-                while (term._currentIdx < stream.Length)
-                {
-                    var current = ZigZagEncoding.Decode<long>(stream, out var len, (int)term._currentIdx);
-                    term._currentIdx += len;
-                    if (current <= next) 
-                        continue;
-                    
-                    // We found values bigger than next.
-                    term._current = current;
-                    return true;
-                }
-
-                term._currentIdx = QueryMatch.Invalid;
-
-                return false;
-            }
-
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            static bool MoveNextFunc(ref TermMatch term, out long v)
-            {
-                var stream = term._container.ToSpan();
-                if (term._currentIdx == QueryMatch.Invalid || term._currentIdx >= stream.Length)
-                {
-                    term._currentIdx = QueryMatch.Invalid;
-                    v = QueryMatch.Invalid;
-                    return false;
-                }
-
-                term._current += ZigZagEncoding.Decode<long>(stream, out var len, (int)term._currentIdx);
-                v = term._current;
-                term._currentIdx += len;
-
-                return true;
-            }
-
-            var itemsCount = ZigZagEncoding.Decode<int>(containerItem.ToSpan(), out var len);
-            return new TermMatch(&SeekFunc, &MoveNextFunc, itemsCount)
-            {
-                _container = containerItem,
-                _currentIdx = len,
-            };
-        }
-
-        public static TermMatch YieldSet(Set set)
-        {
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            static bool SeekFunc(ref TermMatch term, long next)
-            {
-                if (next == QueryMatch.Start)
-                {
-                    term._current = QueryMatch.Start;
-                    term._currentIdx = QueryMatch.Start;
-
-                    // We change it in order for the Set Seek operation to seek to the start. 
-                    next = long.MinValue;
-                }
-                    
-                return term._set.Seek(next);
-            }
-
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            static bool MoveNextFunc(ref TermMatch term, out long v)
-            {
-                bool hasMove = term._set.MoveNext();
-                v = term._set.Current;
-                term._currentIdx = hasMove ? v : QueryMatch.Invalid;
-                term._current = v;
-
-                return hasMove;
-            }
-
-            return new TermMatch(&SeekFunc, &MoveNextFunc, set.State.NumberOfEntries)
-            {                
-                _set = set.Iterate(),
-            };
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool SeekTo(long next = QueryMatch.Start)
-        {
-            return _seekToFunc(ref this, next);
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool MoveNext(out long v)
-        {
-            return _moveNext(ref this, out v);
-        }
-    }
-
-    public unsafe struct BinaryMatch : IIndexMatch
-    {
-        private readonly FunctionTable _functionTable;
-        private IIndexMatch _inner;
-
-        internal BinaryMatch(IIndexMatch match, FunctionTable functionTable)
-        {
-            _inner = match;
-            _functionTable = functionTable;
-        }
-
-        public long Count => _functionTable.CountFunc(ref this);
-
-        public long Current => _functionTable.CurrentFunc(ref this);
-
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool SeekTo(long next = 0)
-        {
-            return _functionTable.SeekToFunc(ref this, next);
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool MoveNext(out long v)
-        {
-            return _functionTable.MoveNextFunc(ref this, out v);
-        }
-
-        internal class FunctionTable
-        {
-            public readonly delegate*<ref BinaryMatch, long, bool> SeekToFunc;
-            public readonly delegate*<ref BinaryMatch, out long, bool> MoveNextFunc;
-            public readonly delegate*<ref BinaryMatch, long> CountFunc;
-            public readonly delegate*<ref BinaryMatch, long> CurrentFunc;
-
-            public FunctionTable(
-                delegate*<ref BinaryMatch, long, bool> seekToFunc,
-                delegate*<ref BinaryMatch, out long, bool> moveNextFunc,
-                delegate*<ref BinaryMatch, long> countFunc,
-                delegate*<ref BinaryMatch, long> currentFunc)
-            {
-                SeekToFunc = seekToFunc;
-                MoveNextFunc = moveNextFunc;
-                CountFunc = countFunc;
-                CurrentFunc = currentFunc;
-            }
-        }
-
-        private static class StaticFunctionCache<TInner, TOuter>
-            where TInner : IIndexMatch
-            where TOuter : IIndexMatch
-        {
-            public static readonly FunctionTable FunctionTable;
- 
-            static StaticFunctionCache()
-            {
-                static long CountFunc(ref BinaryMatch match)
-                {
-                    return ((BinaryMatch<TInner, TOuter>)match._inner).Count;
-                }
-                static long CurrentFunc(ref BinaryMatch match)
-                {
-                    return ((BinaryMatch<TInner, TOuter>)match._inner).Current;
-                }
-                static bool SeekToFunc(ref BinaryMatch match, long v)
-                {
-                    if (match._inner is BinaryMatch<TInner, TOuter> inner)
-                    {
-                        var result = inner.SeekTo(v);
-                        match._inner = inner;
-                        return result;
-                    }
-                    return false;
-                }
-                static bool MoveNextFunc(ref BinaryMatch match, out long v)
-                {
-                    if (match._inner is BinaryMatch<TInner, TOuter> inner)
-                    {
-                        var result = inner.MoveNext(out v);
-                        match._inner = inner;
-                        return result;
-                    }
-                    Unsafe.SkipInit(out v);
-                    return false;
-                }
-
-                FunctionTable = new FunctionTable(&SeekToFunc, &MoveNextFunc, &CountFunc, &CurrentFunc);
-            }
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static BinaryMatch Create<TInner, TOuter>(in BinaryMatch<TInner, TOuter> query)
-            where TInner : IIndexMatch
-            where TOuter : IIndexMatch
-        {
-            return new BinaryMatch(query, StaticFunctionCache<TInner, TOuter>.FunctionTable);
-        }
-    }
-
-    public unsafe struct BinaryMatch<TInner, TOuter> : IIndexMatch
-        where TInner : IIndexMatch
-        where TOuter : IIndexMatch
-    {
-        private readonly delegate*<ref BinaryMatch<TInner, TOuter>, long, bool> _seekToFunc;
-        private readonly delegate*<ref BinaryMatch<TInner, TOuter>, out long, bool> _moveNext;
-
-        private TInner _inner;
-        private TOuter _outer;
-
-        private long _totalResults;
-        private long _current;
-
-        public long Count => _totalResults;
-        public long Current => _current;
-
-        private BinaryMatch(in TInner inner, in TOuter outer, delegate*<ref BinaryMatch<TInner, TOuter>, long, bool> seekFunc, delegate*<ref BinaryMatch<TInner, TOuter>, out long, bool> moveNext, long totalResults)
-        {
-            _totalResults = totalResults;
-            _current = QueryMatch.Start;
-            _seekToFunc = seekFunc;
-            _moveNext = moveNext;
-            _inner = inner;
-            _outer = outer;
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool SeekTo(long next = 0)
-        {
-            return _seekToFunc(ref this, next);
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool MoveNext(out long v)
-        {
-            return _moveNext(ref this, out v);
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static BinaryMatch<TInner, TOuter> YieldAnd(in TInner inner, in TOuter outer)
-        {
-            static bool SeekToFunc(ref BinaryMatch<TInner, TOuter> match, long v)
-            {
-                ref var inner = ref match._inner;
-                ref var outer = ref match._outer;
-
-                return inner.SeekTo(v) && outer.SeekTo(v);
-            }
-
-            static bool MoveNextFunc(ref BinaryMatch<TInner, TOuter> match, out long v)
-            {
-                ref var inner = ref match._inner;
-                ref var outer = ref match._outer;
-
-                if (inner.Current == QueryMatch.Invalid || outer.Current == QueryMatch.Invalid)
-                    goto Fail;
-
-                // Last were equal, moving forward. 
-                inner.MoveNext(out v);
-                outer.MoveNext(out v);
-
-                while (inner.Current != outer.Current)
-                {
-                    if (inner.Current < outer.Current)
-                    {
-                        if (inner.MoveNext(out v) == false)
-                            goto Fail;
-                    }
-                    else
-                    {
-                        if (outer.MoveNext(out v) == false)
-                            goto Fail;
-                    }
-                }
-
-                // PERF: We dont need to check both as the equal later will take care of that. 
-                if (inner.Current == QueryMatch.Invalid)
-                    goto Fail;
-
-                if (inner.Current == outer.Current)
-                {
-                    v = inner.Current;
-                    match._current = v;
-                    return true;
-                }
-
-                Fail:  
-                match._current = QueryMatch.Invalid;
-                v = QueryMatch.Invalid;
-                return false;
-            }
-
-            return new BinaryMatch<TInner, TOuter>(in inner, in outer, &SeekToFunc, &MoveNextFunc, Math.Min(inner.Count, outer.Count));
-        }
-
-        public static BinaryMatch<TInner, TOuter> YieldOr(in TInner inner, in TOuter outer)
-        {
-            static bool SeekToFunc(ref BinaryMatch<TInner, TOuter> match, long v)
-            {
-                ref var inner = ref match._inner;
-                ref var outer = ref match._outer;
-
-                return inner.SeekTo(v) && outer.SeekTo(v);
-            }
-
-            static bool MoveNextFunc(ref BinaryMatch<TInner, TOuter> match, out long v)
-            {
-                ref var inner = ref match._inner;
-                ref var outer = ref match._outer;                
-                
-                // Nothing else left to add
-                if (inner.Current == QueryMatch.Invalid && outer.Current == QueryMatch.Invalid)
-                {
-                    v = QueryMatch.Invalid;
-                    goto Done;
-                }
-                else if (inner.Current == QueryMatch.Invalid)
-                {
-                    outer.MoveNext(out v);
-                    goto Done;
-                }
-                else if (outer.Current == QueryMatch.Invalid)
-                {
-                    inner.MoveNext(out v);
-                    goto Done;
-                }
-
-                long x, y;
-                if (inner.Current == outer.Current)
-                {
-                    inner.MoveNext(out x);
-                    outer.MoveNext(out y);
-                }
-                else if (inner.Current < outer.Current)
-                {
-                    inner.MoveNext(out x);
-                    y = outer.Current;
-                }
-                else
-                {
-                    x = inner.Current;
-                    outer.MoveNext(out y);
-                }
-
-                if (x == QueryMatch.Invalid && y == QueryMatch.Invalid)
-                {
-                    v = QueryMatch.Invalid;
-                    match._current = QueryMatch.Invalid;
-                    return false;
-                }
-                else if (x == QueryMatch.Invalid)
-                {
-                    v = y;
-                }
-                else if (y == QueryMatch.Invalid)
-                {
-                    v = x;
-                }
-                else
-                {
-                    v = x < y ? x : y;
-                }
-
-                Done: match._current = v;
-                return v != QueryMatch.Invalid;
-            }
-
-            return new BinaryMatch<TInner, TOuter>(in inner, in outer, &SeekToFunc, &MoveNextFunc, inner.Count + outer.Count);
-        }
-    }
-
     public class IndexSearcher : IDisposable
     {
         private readonly StorageEnvironment _environment;
@@ -490,7 +35,7 @@ namespace Corax
             return Encoding.UTF8.GetString(data.Slice(len, size));
         }
 
-        public IIndexMatch Search(string q)
+        public IQueryMatch Search(string q)
         {
             var parser = new QueryParser();
             parser.Init(q);
@@ -498,12 +43,12 @@ namespace Corax
             return Search(query.Where);
         }
 
-        public IIndexMatch Search(QueryExpression where)
+        public IQueryMatch Search(QueryExpression where)
         {
             return Evaluate(@where);
         }
 
-        private IIndexMatch Evaluate(QueryExpression where)
+        private IQueryMatch Evaluate(QueryExpression where)
         {
             switch (@where)
             {
@@ -536,7 +81,7 @@ namespace Corax
             var terms = fields.CompactTreeFor(field);
             if (terms == null || terms.TryGetValue(term, out var value) == false)
                 return TermMatch.CreateEmpty();
-            
+
             TermMatch matches;
             if ((value & (long)TermIdMask.Set) != 0)
             {
@@ -544,27 +89,26 @@ namespace Corax
                 var setStateSpan = Container.Get(_transaction.LowLevelTransaction, setId).ToSpan();
                 ref readonly var setState = ref MemoryMarshal.AsRef<SetState>(setStateSpan);
                 var set = new Set(_transaction.LowLevelTransaction, Slices.Empty, setState);
-                matches = TermMatch.YieldSet(set);                
+                matches = TermMatch.YieldSet(set);
             }
             else if ((value & (long)TermIdMask.Small) != 0)
             {
                 var smallSetId = value & ~0b11;
                 var small = Container.Get(_transaction.LowLevelTransaction, smallSetId);
-                matches = TermMatch.YieldSmall(small);                
+                matches = TermMatch.YieldSmall(small);
             }
             else
             {
                 matches = TermMatch.YieldOnce(value);
             }
-                
+
             return matches;
         }
 
-
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public BinaryMatch And<TInner, TOuter>(in TInner set1, in TOuter set2)
-            where TInner : IIndexMatch
-            where TOuter : IIndexMatch
+            where TInner : IQueryMatch
+            where TOuter : IQueryMatch
         {
             // TODO: We need to create this code using a template or using typed delegates (which either way would need templating for boilerplate code generation)
 
@@ -592,8 +136,8 @@ namespace Corax
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public BinaryMatch Or<TInner, TOuter>(in TInner set1, in TOuter set2)
-            where TInner : IIndexMatch
-            where TOuter : IIndexMatch
+            where TInner : IQueryMatch
+            where TOuter : IQueryMatch
         {
             // If any of the generic types is not known to be a struct (calling from interface) the code executed will
             // do all the work to figure out what to emit. The cost is in instantiation not on execution. 

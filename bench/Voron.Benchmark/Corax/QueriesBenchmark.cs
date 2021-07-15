@@ -260,10 +260,8 @@ namespace Voron.Benchmark.Corax
             var query = indexSearcher.Search(_queryDefinition.Query.Where);
 
             int i = 0;
-            //var ids = _ids;
             while (query.MoveNext(out long v))
             {
-                //ids[i++] = v;
                 indexSearcher.GetEntryById(v);
             }
         }

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using Corax;
+using Corax.Queries;
 using FastTests.Voron;
 using Sparrow;
 using Sparrow.Server;
