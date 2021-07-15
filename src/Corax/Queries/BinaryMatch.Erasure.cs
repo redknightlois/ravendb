@@ -27,31 +27,31 @@ namespace Corax.Queries
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool MoveNext(out long v)
+        public QueryMatchStatus MoveNext(out long v)
         {
             return _functionTable.MoveNextFunc(ref this, out v);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool MoveNext(Span<long> buffer, out int read)
+        public QueryMatchStatus MoveNext(Span<long> buffer, out int read)
         {
             read = 0;
-            while (read < buffer.Length && _functionTable.MoveNextFunc(ref this, out var v))
+            while (read < buffer.Length && _functionTable.MoveNextFunc(ref this, out var v) != QueryMatchStatus.NoMore)
                 buffer[read++] = v;
 
-            return read == buffer.Length;
+            return read == buffer.Length ? QueryMatchStatus.InOrder : QueryMatchStatus.NoMore;
         }
 
         internal class FunctionTable
         {
             public readonly delegate*<ref BinaryMatch, long, bool> SeekToFunc;
-            public readonly delegate*<ref BinaryMatch, out long, bool> MoveNextFunc;
+            public readonly delegate*<ref BinaryMatch, out long, QueryMatchStatus> MoveNextFunc;
             public readonly delegate*<ref BinaryMatch, long> CountFunc;
             public readonly delegate*<ref BinaryMatch, long> CurrentFunc;
 
             public FunctionTable(
                 delegate*<ref BinaryMatch, long, bool> seekToFunc,
-                delegate*<ref BinaryMatch, out long, bool> moveNextFunc,
+                delegate*<ref BinaryMatch, out long, QueryMatchStatus> moveNextFunc,
                 delegate*<ref BinaryMatch, long> countFunc,
                 delegate*<ref BinaryMatch, long> currentFunc)
             {
@@ -88,7 +88,7 @@ namespace Corax.Queries
                     }
                     return false;
                 }
-                static bool MoveNextFunc(ref BinaryMatch match, out long v)
+                static QueryMatchStatus MoveNextFunc(ref BinaryMatch match, out long v)
                 {
                     if (match._inner is BinaryMatch<TInner, TOuter> inner)
                     {
@@ -97,7 +97,7 @@ namespace Corax.Queries
                         return result;
                     }
                     Unsafe.SkipInit(out v);
-                    return false;
+                    return QueryMatchStatus.NoMore;
                 }
 
                 FunctionTable = new FunctionTable(&SeekToFunc, &MoveNextFunc, &CountFunc, &CurrentFunc);

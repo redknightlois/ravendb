@@ -234,7 +234,7 @@ namespace Voron.Benchmark.Corax
 
             int i = 0;
             //var ids = _ids;
-            while (query.MoveNext(out long v))
+            while (query.MoveNext(out long v) != QueryMatchStatus.NoMore)
             {
                 //ids[i++] = v;
                 indexSearcher.GetEntryById(v);
@@ -249,7 +249,7 @@ namespace Voron.Benchmark.Corax
             var familyTerm = indexSearcher.TermQuery("Age", "15");
             var query = indexSearcher.And(typeTerm, familyTerm);
 
-            while (query.MoveNext(out long v))
+            while (query.MoveNext(out long v) != QueryMatchStatus.NoMore)
             { }
         }
 
@@ -260,7 +260,7 @@ namespace Voron.Benchmark.Corax
             var query = indexSearcher.Search(_queryDefinition.Query.Where);
 
             int i = 0;
-            while (query.MoveNext(out long v))
+            while (query.MoveNext(out long v) != QueryMatchStatus.NoMore)
             {
                 indexSearcher.GetEntryById(v);
             }
@@ -272,7 +272,7 @@ namespace Voron.Benchmark.Corax
             using var indexSearcher = new IndexSearcher(Env);
             var query = indexSearcher.Search(_queryDefinition.Query.Where);
 
-            while (query.MoveNext(out long v))
+            while (query.MoveNext(out long v) != QueryMatchStatus.NoMore)
             { }
         }
     }

@@ -9,7 +9,7 @@ namespace Corax.Queries
     public unsafe struct TermMatch : IQueryMatch
     {
         private readonly delegate*<ref TermMatch, long, bool> _seekToFunc;
-        private readonly delegate*<ref TermMatch, out long, bool> _moveNext;
+        private readonly delegate*<ref TermMatch, out long, QueryMatchStatus> _moveNext;
 
         private long _totalResults;
         private long _currentIdx;
@@ -21,7 +21,9 @@ namespace Corax.Queries
         public long Count => _totalResults;
         public long Current => _currentIdx <= QueryMatch.Start ? _currentIdx : _current;
 
-        private TermMatch(delegate*<ref TermMatch, long, bool> seekFunc, delegate*<ref TermMatch, out long, bool> moveNext, long totalResults)
+        private TermMatch(
+            delegate*<ref TermMatch, long, bool> seekFunc, 
+            delegate*<ref TermMatch, out long, QueryMatchStatus> moveNext, long totalResults)
         {
             _totalResults = totalResults;
             _current = QueryMatch.Start;
@@ -41,12 +43,12 @@ namespace Corax.Queries
                 return false;
             }
 
-            static bool MoveNextFunc(ref TermMatch term, out long v)
+            static QueryMatchStatus MoveNextFunc(ref TermMatch term, out long v)
             {
                 term._currentIdx = QueryMatch.Invalid;
                 term._current = QueryMatch.Invalid;
                 v = QueryMatch.Invalid;
-                return false;
+                return QueryMatchStatus.NoMore;
             }
 
             return new TermMatch(&SeekFunc, &MoveNextFunc, 0);
@@ -60,18 +62,18 @@ namespace Corax.Queries
                 return term._currentIdx == QueryMatch.Start;
             }
 
-            static bool MoveNextFunc(ref TermMatch term, out long v)
+            static QueryMatchStatus MoveNextFunc(ref TermMatch term, out long v)
             {
                 if (term._currentIdx == QueryMatch.Start)
                 {
                     term._currentIdx = term._current;
                     v = term._current;
-                    return true;
+                    return QueryMatchStatus.InOrder;
                 }
 
                 v = QueryMatch.Invalid;
                 term._currentIdx = QueryMatch.Invalid;
-                return false;
+                return QueryMatchStatus.NoMore;
             }
 
             return new TermMatch(&SeekFunc, &MoveNextFunc, 1)
@@ -106,21 +108,21 @@ namespace Corax.Queries
             }
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            static bool MoveNextFunc(ref TermMatch term, out long v)
+            static QueryMatchStatus MoveNextFunc(ref TermMatch term, out long v)
             {
                 var stream = term._container.ToSpan();
                 if (term._currentIdx == QueryMatch.Invalid || term._currentIdx >= stream.Length)
                 {
                     term._currentIdx = QueryMatch.Invalid;
                     v = QueryMatch.Invalid;
-                    return false;
+                    return QueryMatchStatus.NoMore;
                 }
 
                 term._current += ZigZagEncoding.Decode<long>(stream, out var len, (int)term._currentIdx);
                 v = term._current;
                 term._currentIdx += len;
 
-                return true;
+                return QueryMatchStatus.InOrder;
             }
 
             var itemsCount = ZigZagEncoding.Decode<int>(containerItem.ToSpan(), out var len);
@@ -149,14 +151,14 @@ namespace Corax.Queries
             }
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            static bool MoveNextFunc(ref TermMatch term, out long v)
+            static QueryMatchStatus MoveNextFunc(ref TermMatch term, out long v)
             {
                 bool hasMove = term._set.MoveNext();
                 v = term._set.Current;
                 term._currentIdx = hasMove ? v : QueryMatch.Invalid;
                 term._current = v;
 
-                return hasMove;
+                return hasMove ? QueryMatchStatus.InOrder : QueryMatchStatus.NoMore;
             }
 
             return new TermMatch(&SeekFunc, &MoveNextFunc, set.State.NumberOfEntries)
@@ -172,19 +174,19 @@ namespace Corax.Queries
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool MoveNext(out long v)
+        public QueryMatchStatus MoveNext(out long v)
         {
             return _moveNext(ref this, out v);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool MoveNext(Span<long> buffer, out int read)
+        public QueryMatchStatus MoveNext(Span<long> buffer, out int read)
         {
             read = 0;
-            while (read < buffer.Length && _moveNext(ref this, out var v))
+            while (read < buffer.Length && _moveNext(ref this, out var v) != QueryMatchStatus.NoMore)
                 buffer[read++] = v;
 
-            return read == buffer.Length;
+            return read == buffer.Length ? QueryMatchStatus.InOrder : QueryMatchStatus.NoMore;
         }
     }
 }

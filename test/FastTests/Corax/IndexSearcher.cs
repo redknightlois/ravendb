@@ -116,13 +116,13 @@ namespace FastTests.Corax
                 var match = searcher.TermQuery("Unknown", "1");
                 Assert.Equal(QueryMatch.Start, match.Current);
                 Assert.Equal(0, match.Count);                
-                Assert.False(match.MoveNext(out var _));
+                Assert.Equal(QueryMatchStatus.NoMore, match.MoveNext(out var _));
                 Assert.Equal(QueryMatch.Invalid, match.Current);
 
                 match = searcher.TermQuery("Id", "1");
                 Assert.Equal(QueryMatch.Start, match.Current);
                 Assert.Equal(0, match.Count);
-                Assert.False(match.MoveNext(out var _));
+                Assert.Equal(QueryMatchStatus.NoMore, match.MoveNext(out var _));
                 Assert.Equal(QueryMatch.Invalid, match.Current);
             }
         }
@@ -142,9 +142,9 @@ namespace FastTests.Corax
                 var match = searcher.TermQuery("Id", "entry/1");
                 Assert.Equal(QueryMatch.Start, match.Current);
                 Assert.Equal(1, match.Count);
-                Assert.True(match.MoveNext(out var _));
+                Assert.Equal(QueryMatchStatus.InOrder, match.MoveNext(out var _));
                 Assert.NotEqual(QueryMatch.Invalid, match.Current);
-                Assert.False(match.MoveNext(out var _));
+                Assert.Equal(QueryMatchStatus.NoMore, match.MoveNext(out var _));
                 Assert.Equal(QueryMatch.Invalid, match.Current);
             }
         }
@@ -173,7 +173,7 @@ namespace FastTests.Corax
                 // Assert.Equal(QueryMatch.Start, match.Current);
 
                 int i = 0;
-                while (match.MoveNext(out var v))
+                while (match.MoveNext(out var v) != QueryMatchStatus.NoMore)
                 {
                     i++;
 
@@ -211,7 +211,7 @@ namespace FastTests.Corax
                 Assert.Equal(QueryMatch.Start, match.Current);
 
                 int i = 0;
-                while (match.MoveNext(out var v))
+                while (match.MoveNext(out var v) != QueryMatchStatus.NoMore)
                 {
                     i++;
 
@@ -226,7 +226,7 @@ namespace FastTests.Corax
                 Assert.True(match.SeekTo(QueryMatch.Start));
                 
                 int j = 0;
-                while (match.MoveNext(out var v))
+                while (match.MoveNext(out var v) != QueryMatchStatus.NoMore)
                 {
                     j++;
 
@@ -265,7 +265,7 @@ namespace FastTests.Corax
                 Assert.Equal(QueryMatch.Start, andMatch.Current);
 
                 int i = 0;
-                while(andMatch.MoveNext(out var _))
+                while(andMatch.MoveNext(out var _) != QueryMatchStatus.NoMore)
                     i++;
 
                 Assert.Equal(QueryMatch.Invalid, andMatch.Current);
@@ -298,7 +298,7 @@ namespace FastTests.Corax
                 Assert.Equal(QueryMatch.Start, andMatch.Current);
 
                 int i = 0;
-                while (andMatch.MoveNext(out var _))
+                while (andMatch.MoveNext(out var _) != QueryMatchStatus.NoMore)
                     i++;
 
                 Assert.Equal(QueryMatch.Invalid, andMatch.Current);
@@ -331,7 +331,7 @@ namespace FastTests.Corax
                 Assert.Equal(QueryMatch.Start, andMatch.Current);
 
                 int i = 0;
-                while (andMatch.MoveNext(out var _))
+                while (andMatch.MoveNext(out var _) != QueryMatchStatus.NoMore)
                     i++;
 
                 Assert.Equal(QueryMatch.Invalid, andMatch.Current);
@@ -364,7 +364,7 @@ namespace FastTests.Corax
                 Assert.Equal(QueryMatch.Start, orMatch.Current);
 
                 int i = 0;
-                while (orMatch.MoveNext(out var _))
+                while (orMatch.MoveNext(out var _) != QueryMatchStatus.NoMore)
                     i++;
 
                 Assert.Equal(QueryMatch.Invalid, orMatch.Current);
@@ -397,7 +397,7 @@ namespace FastTests.Corax
                 Assert.Equal(QueryMatch.Start, orMatch.Current);
 
                 int i = 0;
-                while (orMatch.MoveNext(out var _))
+                while (orMatch.MoveNext(out var _) != QueryMatchStatus.NoMore)
                     i++;
 
                 Assert.Equal(QueryMatch.Invalid, orMatch.Current);
@@ -410,7 +410,7 @@ namespace FastTests.Corax
                 Assert.Equal(QueryMatch.Start, orMatch.Current);
 
                 i = 0;
-                while (orMatch.MoveNext(out var _))
+                while (orMatch.MoveNext(out var _) != QueryMatchStatus.NoMore)
                     i++;
 
                 Assert.Equal(QueryMatch.Invalid, orMatch.Current);
@@ -444,7 +444,7 @@ namespace FastTests.Corax
                 Assert.Equal(QueryMatch.Start, orMatch.Current);
 
                 int i = 0;
-                while (orMatch.MoveNext(out var _))
+                while (orMatch.MoveNext(out var _) != QueryMatchStatus.NoMore)
                     i++;
 
                 Assert.Equal(QueryMatch.Invalid, orMatch.Current);
@@ -479,7 +479,7 @@ namespace FastTests.Corax
                 Span<long> buffer = stackalloc long[16];
                 buffer.Fill(QueryMatch.Invalid);
 
-                Assert.False(orMatch.MoveNext(buffer, out var read));
+                Assert.Equal(QueryMatchStatus.NoMore, orMatch.MoveNext(buffer, out var read));
                 Assert.Equal(2, read);
                 Assert.Equal(QueryMatch.Invalid, orMatch.Current);
 
@@ -516,7 +516,7 @@ namespace FastTests.Corax
                 buffer.Fill(QueryMatch.Invalid);
 
                 int i = 0;
-                while (orMatch.MoveNext(buffer, out var read))
+                while (orMatch.MoveNext(buffer, out var read) != QueryMatchStatus.NoMore)
                 {
                     Assert.Equal(1, read);
                     Assert.True(buffer.Slice(0, read).IndexOf(QueryMatch.Invalid) < 0);
@@ -562,7 +562,7 @@ namespace FastTests.Corax
                 Assert.Equal(QueryMatch.Start, orMatch.Current);
 
                 int i = 0;
-                while (orMatch.MoveNext(out var _))
+                while (orMatch.MoveNext(out var _) != QueryMatchStatus.NoMore)
                     i++;
 
                 Assert.Equal(QueryMatch.Invalid, orMatch.Current);
@@ -580,7 +580,7 @@ namespace FastTests.Corax
                 Assert.Equal(QueryMatch.Start, orMatch.Current);
 
                 int i = 0;
-                while (orMatch.MoveNext(out var _))
+                while (orMatch.MoveNext(out var _) != QueryMatchStatus.NoMore)
                     i++;
 
                 Assert.Equal(QueryMatch.Invalid, orMatch.Current);

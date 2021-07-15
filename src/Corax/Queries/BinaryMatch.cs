@@ -9,7 +9,7 @@ namespace Corax.Queries
         where TOuter : IQueryMatch
     {
         private readonly delegate*<ref BinaryMatch<TInner, TOuter>, long, bool> _seekToFunc;
-        private readonly delegate*<ref BinaryMatch<TInner, TOuter>, out long, bool> _moveNext;
+        private readonly delegate*<ref BinaryMatch<TInner, TOuter>, out long, QueryMatchStatus> _moveNext;
 
         private TInner _inner;
         private TOuter _outer;
@@ -20,7 +20,9 @@ namespace Corax.Queries
         public long Count => _totalResults;
         public long Current => _current;
 
-        private BinaryMatch(in TInner inner, in TOuter outer, delegate*<ref BinaryMatch<TInner, TOuter>, long, bool> seekFunc, delegate*<ref BinaryMatch<TInner, TOuter>, out long, bool> moveNext, long totalResults)
+        private BinaryMatch(in TInner inner, in TOuter outer, 
+            delegate*<ref BinaryMatch<TInner, TOuter>, long, bool> seekFunc, 
+            delegate*<ref BinaryMatch<TInner, TOuter>, out long, QueryMatchStatus> moveNext, long totalResults)
         {
             _totalResults = totalResults;
             _current = QueryMatch.Start;
@@ -37,19 +39,19 @@ namespace Corax.Queries
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool MoveNext(out long v)
+        public QueryMatchStatus MoveNext(out long v)
         {
             return _moveNext(ref this, out v);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool MoveNext(Span<long> buffer, out int read)
+        public QueryMatchStatus MoveNext(Span<long> buffer, out int read)
         {
             read = 0;
-            while (read < buffer.Length && _moveNext(ref this, out var v))
+            while (read < buffer.Length && _moveNext(ref this, out var v) != QueryMatchStatus.NoMore)
                 buffer[read++] = v;
 
-            return read == buffer.Length;
+            return read == buffer.Length ? QueryMatchStatus.InOrder : QueryMatchStatus.NoMore;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -63,7 +65,7 @@ namespace Corax.Queries
                 return inner.SeekTo(v) && outer.SeekTo(v);
             }
 
-            static bool MoveNextFunc(ref BinaryMatch<TInner, TOuter> match, out long v)
+            static QueryMatchStatus MoveNextFunc(ref BinaryMatch<TInner, TOuter> match, out long v)
             {
                 ref var inner = ref match._inner;
                 ref var outer = ref match._outer;
@@ -79,12 +81,12 @@ namespace Corax.Queries
                 {
                     if (inner.Current < outer.Current)
                     {
-                        if (inner.MoveNext(out v) == false)
+                        if (inner.MoveNext(out v) == QueryMatchStatus.NoMore)
                             goto Fail;
                     }
                     else
                     {
-                        if (outer.MoveNext(out v) == false)
+                        if (outer.MoveNext(out v) == QueryMatchStatus.NoMore)
                             goto Fail;
                     }
                 }
@@ -97,13 +99,13 @@ namespace Corax.Queries
                 {
                     v = inner.Current;
                     match._current = v;
-                    return true;
+                    return QueryMatchStatus.InOrder;
                 }
 
             Fail:
                 match._current = QueryMatch.Invalid;
                 v = QueryMatch.Invalid;
-                return false;
+                return QueryMatchStatus.NoMore;
             }
 
             return new BinaryMatch<TInner, TOuter>(in inner, in outer, &SeekToFunc, &MoveNextFunc, Math.Min(inner.Count, outer.Count));
@@ -119,7 +121,7 @@ namespace Corax.Queries
                 return inner.SeekTo(v) && outer.SeekTo(v);
             }
 
-            static bool MoveNextFunc(ref BinaryMatch<TInner, TOuter> match, out long v)
+            static QueryMatchStatus MoveNextFunc(ref BinaryMatch<TInner, TOuter> match, out long v)
             {
                 ref var inner = ref match._inner;
                 ref var outer = ref match._outer;
@@ -162,7 +164,7 @@ namespace Corax.Queries
                 {
                     v = QueryMatch.Invalid;
                     match._current = QueryMatch.Invalid;
-                    return false;
+                    return QueryMatchStatus.NoMore;
                 }
                 else if (x == QueryMatch.Invalid)
                 {
@@ -179,7 +181,7 @@ namespace Corax.Queries
 
             Done:
                 match._current = v;
-                return v != QueryMatch.Invalid;
+                return v != QueryMatch.Invalid ? QueryMatchStatus.InOrder : QueryMatchStatus.NoMore;
             }
 
             return new BinaryMatch<TInner, TOuter>(in inner, in outer, &SeekToFunc, &MoveNextFunc, inner.Count + outer.Count);
