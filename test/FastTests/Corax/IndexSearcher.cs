@@ -359,15 +359,15 @@ namespace FastTests.Corax
                 using var searcher = new IndexSearcher(Env);
                 var match1 = searcher.TermQuery("Id", "entry/3");
                 var match2 = searcher.TermQuery("Content", "highway");
-                var andMatch = searcher.Or(in match1, in match2);
+                var orMatch = searcher.Or(in match1, in match2);
 
-                Assert.Equal(QueryMatch.Start, andMatch.Current);
+                Assert.Equal(QueryMatch.Start, orMatch.Current);
 
                 int i = 0;
-                while (andMatch.MoveNext(out var _))
+                while (orMatch.MoveNext(out var _))
                     i++;
 
-                Assert.Equal(QueryMatch.Invalid, andMatch.Current);
+                Assert.Equal(QueryMatch.Invalid, orMatch.Current);
                 Assert.Equal(0, i);
             }
         }
@@ -392,28 +392,28 @@ namespace FastTests.Corax
                 using var searcher = new IndexSearcher(Env);
                 var match1 = searcher.TermQuery("Id", "entry/1");
                 var match2 = searcher.TermQuery("Content", "highway");
-                var andMatch = searcher.Or(in match1, in match2);
+                var orMatch = searcher.Or(in match1, in match2);
 
-                Assert.Equal(QueryMatch.Start, andMatch.Current);
+                Assert.Equal(QueryMatch.Start, orMatch.Current);
 
                 int i = 0;
-                while (andMatch.MoveNext(out var _))
+                while (orMatch.MoveNext(out var _))
                     i++;
 
-                Assert.Equal(QueryMatch.Invalid, andMatch.Current);
+                Assert.Equal(QueryMatch.Invalid, orMatch.Current);
                 Assert.Equal(1, i);
 
                 match1 = searcher.TermQuery("Id", "entry/3");
                 match2 = searcher.TermQuery("Content", "mountain");
-                andMatch = searcher.Or(in match1, in match2);
+                orMatch = searcher.Or(in match1, in match2);
 
-                Assert.Equal(QueryMatch.Start, andMatch.Current);
+                Assert.Equal(QueryMatch.Start, orMatch.Current);
 
                 i = 0;
-                while (andMatch.MoveNext(out var _))
+                while (orMatch.MoveNext(out var _))
                     i++;
 
-                Assert.Equal(QueryMatch.Invalid, andMatch.Current);
+                Assert.Equal(QueryMatch.Invalid, orMatch.Current);
                 Assert.Equal(1, i);
             }
         }
@@ -439,16 +439,50 @@ namespace FastTests.Corax
                 using var searcher = new IndexSearcher(Env);
                 var match1 = searcher.TermQuery("Id", "entry/1");
                 var match2 = searcher.TermQuery("Content", "mountain");
-                var andMatch = searcher.Or(in match1, in match2);
+                var orMatch = searcher.Or(in match1, in match2);
 
-                Assert.Equal(QueryMatch.Start, andMatch.Current);
+                Assert.Equal(QueryMatch.Start, orMatch.Current);
 
                 int i = 0;
-                while (andMatch.MoveNext(out var _))
+                while (orMatch.MoveNext(out var _))
                     i++;
 
-                Assert.Equal(QueryMatch.Invalid, andMatch.Current);
+                Assert.Equal(QueryMatch.Invalid, orMatch.Current);
                 Assert.Equal(2, i);
+            }
+        }
+
+        [Fact]
+        public void AllOrInBatches()
+        {
+            var entry1 = new IndexEntry
+            {
+                Id = "entry/1",
+                Content = new string[] { "road", "lake" },
+            };
+            var entry2 = new IndexEntry
+            {
+                Id = "entry/2",
+                Content = new string[] { "road", "mountain" },
+            };
+
+            IndexEntries(new[] { entry1, entry2 });
+
+            {
+                using var searcher = new IndexSearcher(Env);
+                var match1 = searcher.TermQuery("Id", "entry/1");
+                var match2 = searcher.TermQuery("Content", "mountain");
+                var orMatch = searcher.Or(in match1, in match2);
+
+                Assert.Equal(QueryMatch.Start, orMatch.Current);
+
+                Span<long> buffer = stackalloc long[16];
+                buffer.Fill(QueryMatch.Invalid);
+
+                var result = orMatch.MoveNext(buffer);
+                Assert.Equal(2, result.Length);
+                Assert.True(result.IndexOf(QueryMatch.Invalid) < 0);
+                Assert.Equal(QueryMatch.Invalid, orMatch.Current);
             }
         }
 

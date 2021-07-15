@@ -2,6 +2,7 @@
 using Sparrow.Server.Compression;
 using Voron.Data.Sets;
 using Voron.Data.Containers;
+using System;
 
 namespace Corax.Queries
 {
@@ -174,6 +175,17 @@ namespace Corax.Queries
         public bool MoveNext(out long v)
         {
             return _moveNext(ref this, out v);
+        }
+
+        public Span<long> MoveNext(in Span<long> buffer)
+        {
+            // TODO: The proper way to do this is to support the batched MoveNext operation natively to improve the performance. 
+            int i = 0;
+            long v;
+            while (i < buffer.Length && _moveNext(ref this, out v))
+                buffer[i++] = v;
+
+            return buffer.Slice(0, i);
         }
     }
 }

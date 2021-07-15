@@ -43,6 +43,18 @@ namespace Corax.Queries
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public Span<long> MoveNext(in Span<long> buffer)
+        {
+
+            int i = 0;
+            long v;
+            while (i < buffer.Length && _moveNext(ref this, out v))
+                buffer[i++] = v;
+
+            return buffer.Slice(0, i);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static BinaryMatch<TInner, TOuter> YieldAnd(in TInner inner, in TOuter outer)
         {
             static bool SeekToFunc(ref BinaryMatch<TInner, TOuter> match, long v)
@@ -174,5 +186,7 @@ namespace Corax.Queries
 
             return new BinaryMatch<TInner, TOuter>(in inner, in outer, &SeekToFunc, &MoveNextFunc, inner.Count + outer.Count);
         }
+
+
     }
 }
