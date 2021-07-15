@@ -39,8 +39,9 @@ namespace Corax.Queries
         {
             static bool SeekFunc(ref TermMatch term, long next)
             {
-                term._current = next == QueryMatch.Start ? QueryMatch.Start : QueryMatch.Invalid;
-                return false;
+                bool result = next == QueryMatch.Start;
+                term._current = result ? QueryMatch.Start : QueryMatch.Invalid;
+                return result;
             }
 
             static QueryMatchStatus MoveNextFunc(ref TermMatch term, out long v)
