@@ -33,15 +33,13 @@ namespace Corax.Queries
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public Span<long> MoveNext(in Span<long> buffer)
+        public bool MoveNext(Span<long> buffer, out int read)
         {
-            // TODO: The proper way to do this is to support the batched MoveNext operation natively to improve the performance. 
-            int i = 0;
-            long v;
-            while (i < buffer.Length && _functionTable.MoveNextFunc(ref this, out v))
-                buffer[i++] = v;
+            read = 0;
+            while (read < buffer.Length && _functionTable.MoveNextFunc(ref this, out var v))
+                buffer[read++] = v;
 
-            return buffer.Slice(0, i);
+            return read == buffer.Length;
         }
 
         internal class FunctionTable

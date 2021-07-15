@@ -43,15 +43,13 @@ namespace Corax.Queries
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public Span<long> MoveNext(in Span<long> buffer)
+        public bool MoveNext(Span<long> buffer, out int read)
         {
+            read = 0;
+            while (read < buffer.Length && _moveNext(ref this, out var v))
+                buffer[read++] = v;
 
-            int i = 0;
-            long v;
-            while (i < buffer.Length && _moveNext(ref this, out v))
-                buffer[i++] = v;
-
-            return buffer.Slice(0, i);
+            return read == buffer.Length;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -186,7 +184,5 @@ namespace Corax.Queries
 
             return new BinaryMatch<TInner, TOuter>(in inner, in outer, &SeekToFunc, &MoveNextFunc, inner.Count + outer.Count);
         }
-
-
     }
 }

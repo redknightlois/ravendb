@@ -479,10 +479,54 @@ namespace FastTests.Corax
                 Span<long> buffer = stackalloc long[16];
                 buffer.Fill(QueryMatch.Invalid);
 
-                var result = orMatch.MoveNext(buffer);
-                Assert.Equal(2, result.Length);
-                Assert.True(result.IndexOf(QueryMatch.Invalid) < 0);
+                Assert.False(orMatch.MoveNext(buffer, out var read));
+                Assert.Equal(2, read);
                 Assert.Equal(QueryMatch.Invalid, orMatch.Current);
+
+                var results = buffer.Slice(0, read);
+                Assert.True(results.IndexOf(QueryMatch.Invalid) < 0);
+            }
+        }
+
+        [Fact]
+        public void AllOrInMultipleBatches()
+        {
+            var entry1 = new IndexEntry
+            {
+                Id = "entry/1",
+                Content = new string[] { "road", "lake" },
+            };
+            var entry2 = new IndexEntry
+            {
+                Id = "entry/2",
+                Content = new string[] { "road", "mountain" },
+            };
+
+            IndexEntries(new[] { entry1, entry2 });
+
+            {
+                using var searcher = new IndexSearcher(Env);
+                var match1 = searcher.TermQuery("Id", "entry/1");
+                var match2 = searcher.TermQuery("Content", "mountain");
+                var orMatch = searcher.Or(in match1, in match2);
+
+                Assert.Equal(QueryMatch.Start, orMatch.Current);
+
+                Span<long> buffer = stackalloc long[1];
+                buffer.Fill(QueryMatch.Invalid);
+
+                int i = 0;
+                while (orMatch.MoveNext(buffer, out var read))
+                {
+                    Assert.Equal(1, read);
+                    Assert.True(buffer.Slice(0, read).IndexOf(QueryMatch.Invalid) < 0);
+                    
+                    buffer.Fill(QueryMatch.Invalid);
+                    i++;
+                }
+
+                Assert.Equal(QueryMatch.Invalid, orMatch.Current);
+                Assert.Equal(2, i);
             }
         }
 
