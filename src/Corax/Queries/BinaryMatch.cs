@@ -8,7 +8,6 @@ namespace Corax.Queries
         where TInner : IQueryMatch
         where TOuter : IQueryMatch
     {
-        private readonly delegate*<ref BinaryMatch<TInner, TOuter>, long, bool> _seekToFunc;
         private readonly delegate*<ref BinaryMatch<TInner, TOuter>, Span<long>, int>  _fillFunc;
         private readonly delegate*<ref BinaryMatch<TInner, TOuter>, Span<long>, int> _andWith;
         private TInner _inner;
@@ -21,24 +20,16 @@ namespace Corax.Queries
         public long Current => _current;
 
         private BinaryMatch(in TInner inner, in TOuter outer,
-            delegate*<ref BinaryMatch<TInner, TOuter>, long, bool> seekFunc,
             delegate*<ref BinaryMatch<TInner, TOuter>, Span<long>, int> fillFunc,
             delegate*<ref BinaryMatch<TInner, TOuter>, Span<long>, int> andWith,
             long totalResults)
         {
             _totalResults = totalResults;
             _current = QueryMatch.Start;
-            _seekToFunc = seekFunc;
             _fillFunc = fillFunc;
             _andWith = andWith;
             _inner = inner;
             _outer = outer;
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool SeekTo(long next = 0)
-        {
-            return _seekToFunc(ref this, next);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -61,9 +52,17 @@ namespace Corax.Queries
                 ref var inner = ref match._inner;
                 ref var outer = ref match._outer;
 
-                var results = inner.Fill(matches);
+                while (true)
+                {
+                    var results = inner.Fill(matches);
+                    if (results == 0)
+                        return 0;
 
-                return outer.AndWith(matches.Slice(0, results));
+                    results = outer.AndWith(matches.Slice(0, results));
+                    if (results != 0)
+                        return results;
+                }
+
             }
 
             static int AndWith(ref BinaryMatch<TInner, TOuter> match, Span<long> matches)
@@ -76,19 +75,11 @@ namespace Corax.Queries
                 return outer.AndWith(matches.Slice(0, results));
             }
 
-            return new BinaryMatch<TInner, TOuter>(in inner, in outer, &SeekToFunc, &FillFunc, &AndWith, Math.Min(inner.Count, outer.Count));
+            return new BinaryMatch<TInner, TOuter>(in inner, in outer, &FillFunc, &AndWith, Math.Min(inner.Count, outer.Count));
         }
 
         public static BinaryMatch<TInner, TOuter> YieldOr(in TInner inner, in TOuter outer)
         {
-            static bool SeekToFunc(ref BinaryMatch<TInner, TOuter> match, long v)
-            {
-                ref var inner = ref match._inner;
-                ref var outer = ref match._outer;
-
-                return inner.SeekTo(v) && outer.SeekTo(v);
-            }
-
             static int AndWith(ref BinaryMatch<TInner, TOuter> match, Span<long> matches)
             {
                 Span<long> orMatches = stackalloc long[matches.Length];
@@ -148,7 +139,7 @@ namespace Corax.Queries
                 return matchesIdx;
             }
 
-            return new BinaryMatch<TInner, TOuter>(in inner, in outer, &SeekToFunc, &FillFunc, &AndWith, inner.Count + outer.Count);
+            return new BinaryMatch<TInner, TOuter>(in inner, in outer, &FillFunc, &AndWith, inner.Count + outer.Count);
         }
     }
 }

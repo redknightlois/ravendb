@@ -36,7 +36,7 @@ namespace Corax.Queries
             _seekToFunc = seekFunc;
             _fillFunc = fillFunc;
             _andWithFunc = andWithFunc;
-
+Span<byte>.Empty
             _container = default;
             _set = default;
         }

@@ -28,7 +28,14 @@ namespace Corax
             _transaction = environment.ReadTransaction();
         }
 
-        public string GetEntryById(long id)
+        public IndexEntryReader GetReaderFor(long id)
+        {
+            var data = Container.Get(_transaction.LowLevelTransaction, id).ToSpan();
+            int size = ZigZagEncoding.Decode<int>(data, out var len);
+            return new IndexEntryReader(data.Slice(size + len));
+        }
+
+        public string GetIdentityFor(long id)
         {
             var data = Container.Get(_transaction.LowLevelTransaction, id).ToSpan();
             int size = ZigZagEncoding.Decode<int>(data, out var len);
@@ -114,82 +121,37 @@ namespace Corax
 
             private int _currentIdx;
             private TermMatch _currentTerm;
-            private long _seekTo;
 
             public InQueryOperation(IndexSearcher searcher, string field, List<string> terms)
             {
-                this.Searcher = searcher;
-                this.Field = field;
-                this.Terms = terms;
+                Searcher = searcher;
+                Field = field;
+                Terms = terms;
 
                 _currentIdx = 0;
-                _seekTo = 0;
                 Unsafe.SkipInit(out _currentTerm);
-            }
-
-            internal static bool SeekTo(ref MultiTermMatch<InQueryOperation> match, long next)
-            {
-                match._currentIdx = 0;
-                match._inner._currentTerm = match._inner.Searcher.TermQuery(match._inner.Field, match._inner.Terms[0]);
-
-                // TODO: Does Seek even make sense under this scenario?
-                match._inner._seekTo = next;
-                match._inner._currentTerm.SeekTo(next);
-                
-                // TODO: Is this true? Should we look into all of them?
-                return true;
             }
 
             internal static int Fill(ref MultiTermMatch<InQueryOperation> match, Span<long> matches)
             {
                 int read = match.Fill(matches);
-                if (read == matches.Length)
+                if (read != 0)
                     return read;
 
-                match._currentIdx++;
                 while (match._currentIdx < match._inner.Terms.Count)
                 {
-                    // We get the new term. 
-                    match._inner._currentTerm = match._inner.Searcher.TermQuery(match._inner.Field, match._inner.Terms[match._inner._currentIdx]);
-
-                    read += match._inner._currentTerm.Fill(matches.Slice(read));
-                    if (read == matches.Length)
+                    var curTerm = match._inner.Terms[match._inner._currentIdx++];
+                    match._inner._currentTerm = match._inner.Searcher.TermQuery(match._inner.Field, curTerm);
+                    read = match._inner._currentTerm.Fill(matches);
+                    if (read != 0)
                         return read;
-
-                    match._currentIdx++;
                 }
 
-                // We sort it because they come from different terms.
-                matches.Sort();
-                return read;
+                return 0;
             }
 
             internal static int AndWith(ref MultiTermMatch<InQueryOperation> match, Span<long> matches)
             {
-                throw new NotImplementedException();
-                //int read = match.Fill(matches);
-                //if (read == matches.Length)
-                //    return read;
-
-                //match._currentIdx++;
-                //while (match._currentIdx < match._inner.Terms.Count)
-                //{
-                //    // We get the new term. 
-                //    match._inner._currentTerm = match._inner.Searcher.TermQuery(match._inner.Field, match._inner.Terms[match._inner._currentIdx]);
-
-                //    // And we seek to the last seek value.                    
-                //    match._inner._currentTerm.SeekTo(match._inner._seekTo);
-
-                //    read += match._inner._currentTerm.AndWith(matches.Slice(read));
-                //    if (read == matches.Length)
-                //        return read;
-
-                //    match._currentIdx++;
-                //}
-
-                //// We sort it because they come from different terms.
-                //matches.Sort();
-                //return read;
             }
         }
 
@@ -202,8 +164,7 @@ namespace Corax
                 return MultiTermMatch.CreateEmpty(terms);
 
             return MultiTermMatch.Create(new MultiTermMatch<InQueryOperation>( 
-                new InQueryOperation(this, field, inTerms),
-                &InQueryOperation.SeekTo, &InQueryOperation.Fill, &InQueryOperation.AndWith));
+                new InQueryOperation(this, field, inTerms), &InQueryOperation.Fill, &InQueryOperation.AndWith));
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

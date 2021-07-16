@@ -237,7 +237,7 @@ namespace Voron.Benchmark.Corax
             while (query.MoveNext(out long v) != QueryMatchStatus.NoMore)
             {
                 //ids[i++] = v;
-                indexSearcher.GetEntryById(v);
+                indexSearcher.GetIdentityFor(v);
             }
         }
 
@@ -262,7 +262,7 @@ namespace Voron.Benchmark.Corax
             int i = 0;
             while (query.MoveNext(out long v) != QueryMatchStatus.NoMore)
             {
-                indexSearcher.GetEntryById(v);
+                indexSearcher.GetIdentityFor(v);
             }
         }
 

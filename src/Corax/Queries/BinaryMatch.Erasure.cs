@@ -21,13 +21,6 @@ namespace Corax.Queries
 
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool SeekTo(long next = 0)
-        {
-            return _functionTable.SeekToFunc(ref this, next);
-        }
-
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public int Fill(Span<long> buffer)
         {
             return _functionTable.FillFunc(ref this, buffer);
@@ -41,20 +34,17 @@ namespace Corax.Queries
 
         internal class FunctionTable
         {
-            public readonly delegate*<ref BinaryMatch, long, bool> SeekToFunc;
             public readonly delegate*<ref BinaryMatch, Span<long>, int> FillFunc;
             public readonly delegate*<ref BinaryMatch, Span<long>, int> AndWithFunc;
             public readonly delegate*<ref BinaryMatch, long> CountFunc;
             public readonly delegate*<ref BinaryMatch, long> CurrentFunc;
 
             public FunctionTable(
-                delegate*<ref BinaryMatch, long, bool> seekToFunc,
                 delegate*<ref BinaryMatch, Span<long>, int> fillFunc,
                 delegate*<ref BinaryMatch, Span<long>, int> andWithFunc,
                 delegate*<ref BinaryMatch, long> countFunc,
                 delegate*<ref BinaryMatch, long> currentFunc)
             {
-                SeekToFunc = seekToFunc;
                 FillFunc = fillFunc;
                 AndWithFunc = andWithFunc;
                 CountFunc = countFunc;
@@ -78,16 +68,7 @@ namespace Corax.Queries
                 {
                     return ((BinaryMatch<TInner, TOuter>)match._inner).Current;
                 }
-                static bool SeekToFunc(ref BinaryMatch match, long v)
-                {
-                    if (match._inner is BinaryMatch<TInner, TOuter> inner)
-                    {
-                        var result = inner.SeekTo(v);
-                        match._inner = inner;
-                        return result;
-                    }
-                    return false;
-                }
+           
                 static int FillFunc(ref BinaryMatch match, Span<long> matches)
                 {
                     if (match._inner is BinaryMatch<TInner, TOuter> inner)
@@ -110,7 +91,7 @@ namespace Corax.Queries
                     return 0;
                 }
 
-                FunctionTable = new FunctionTable(&SeekToFunc, &FillFunc, &AndWithFunc, &CountFunc, &CurrentFunc);
+                FunctionTable = new FunctionTable(&FillFunc, &AndWithFunc, &CountFunc, &CurrentFunc);
             }
         }
 

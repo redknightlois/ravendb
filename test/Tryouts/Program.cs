@@ -157,7 +157,7 @@ namespace Tryouts
             while (query.MoveNext(out long v))
             {
                 //ids[i++] = v;
-                Console.WriteLine(indexSearcher.GetEntryById(v));
+                Console.WriteLine(indexSearcher.GetIdentityFor(v));
             }
 
             //new IndexSearcherTest(new ConsoleTestOutputHelper()).SimpleAndOr();

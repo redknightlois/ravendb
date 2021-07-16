@@ -29,5 +29,30 @@ namespace Corax.Queries
             }
             return dstIdx;
         }
+
+        /// <summary>
+        /// dst and left may *not* be the same buffer
+        /// </summary>
+        public static int Or(Span<long> dst, Span<long> left, Span<long> right)
+        {
+            int dstIdx = 0, leftIdx = 0, rightIdx = 0;
+            while (leftIdx < left.Length && rightIdx < right.Length)
+            {
+                if (left[leftIdx] < right[rightIdx])
+                {
+                    dst[dstIdx++] = left[leftIdx++];
+                }
+                else if (left[leftIdx] > right[rightIdx])
+                {
+                    dst[dstIdx++] = right[rightIdx++];
+                }
+                else
+                {
+                    dst[dstIdx++] = left[leftIdx++];
+                    rightIdx++;
+                }
+            }
+            return dstIdx;
+        }
     }
 }
