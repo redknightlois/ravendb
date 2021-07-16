@@ -18,7 +18,7 @@ namespace Corax.Queries
 
         public long Count => _totalResults;
         public long Current => _currentIdx <= QueryMatch.Start ? _currentIdx : _current;
-        tr
+       
         public MultiTermMatch(CompactTree tree, TInner inner,
             delegate*<ref MultiTermMatch<TInner>, long, bool> seekToFunc,
             delegate*<ref MultiTermMatch<TInner>, Span<long>, out int, QueryMatchStatus> moveNextFunc)

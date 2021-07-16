@@ -9,8 +9,8 @@ namespace Corax.Queries
         where TOuter : IQueryMatch
     {
         private readonly delegate*<ref BinaryMatch<TInner, TOuter>, long, bool> _seekToFunc;
-        private readonly delegate*<ref BinaryMatch<TInner, TOuter>, out long, QueryMatchStatus> _moveNext;
-
+        private readonly delegate*<ref BinaryMatch<TInner, TOuter>, Span<long>, int>  _fillFunc;
+        private readonly delegate*<ref BinaryMatch<TInner, TOuter>, Span<long>, int> _andWith;
         private TInner _inner;
         private TOuter _outer;
 
@@ -22,12 +22,15 @@ namespace Corax.Queries
 
         private BinaryMatch(in TInner inner, in TOuter outer, 
             delegate*<ref BinaryMatch<TInner, TOuter>, long, bool> seekFunc, 
-            delegate*<ref BinaryMatch<TInner, TOuter>, out long, QueryMatchStatus> moveNext, long totalResults)
+            delegate*<ref BinaryMatch<TInner, TOuter>, Span<long>, int> fillFunc,
+            delegate*<ref BinaryMatch<TInner, TOuter>, Span<long>, int> andWith,
+            long totalResults)
         {
             _totalResults = totalResults;
             _current = QueryMatch.Start;
             _seekToFunc = seekFunc;
-            _moveNext = moveNext;
+            _fillFunc = fillFunc;
+            _andWith = andWith;
             _inner = inner;
             _outer = outer;
         }
@@ -39,19 +42,15 @@ namespace Corax.Queries
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public QueryMatchStatus MoveNext(out long v)
+        public int Fill(Span<long> buffer)
         {
-            return _moveNext(ref this, out v);
+            return _fillFunc(ref this, buffer);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public QueryMatchStatus MoveNext(Span<long> buffer, out int read)
+        public int AndWith(Span<long> buffer)
         {
-            read = 0;
-            while (read < buffer.Length && _moveNext(ref this, out var v) != QueryMatchStatus.NoMore)
-                buffer[read++] = v;
-
-            return read == buffer.Length ? QueryMatchStatus.InOrder : QueryMatchStatus.NoMore;
+            return _andWith(ref this, buffer);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -65,50 +64,28 @@ namespace Corax.Queries
                 return inner.SeekTo(v) && outer.SeekTo(v);
             }
 
-            static QueryMatchStatus MoveNextFunc(ref BinaryMatch<TInner, TOuter> match, out long v)
+            static int FillFunc(ref BinaryMatch<TInner, TOuter> match, Span<long> matches)
             {
                 ref var inner = ref match._inner;
                 ref var outer = ref match._outer;
 
-                if (inner.Current == QueryMatch.Invalid || outer.Current == QueryMatch.Invalid)
-                    goto Fail;
+                var results = inner.Fill(matches);
 
-                // Last were equal, moving forward. 
-                inner.MoveNext(out v);
-                outer.MoveNext(out v);
-
-                while (inner.Current != outer.Current)
-                {
-                    if (inner.Current < outer.Current)
-                    {
-                        if (inner.MoveNext(out v) == QueryMatchStatus.NoMore)
-                            goto Fail;
-                    }
-                    else
-                    {
-                        if (outer.MoveNext(out v) == QueryMatchStatus.NoMore)
-                            goto Fail;
-                    }
-                }
-
-                // PERF: We dont need to check both as the equal later will take care of that. 
-                if (inner.Current == QueryMatch.Invalid)
-                    goto Fail;
-
-                if (inner.Current == outer.Current)
-                {
-                    v = inner.Current;
-                    match._current = v;
-                    return QueryMatchStatus.InOrder;
-                }
-
-            Fail:
-                match._current = QueryMatch.Invalid;
-                v = QueryMatch.Invalid;
-                return QueryMatchStatus.NoMore;
+                return outer.AndWith(matches.Slice(0, results));
             }
 
-            return new BinaryMatch<TInner, TOuter>(in inner, in outer, &SeekToFunc, &MoveNextFunc, Math.Min(inner.Count, outer.Count));
+
+            static int AndWith(ref BinaryMatch<TInner, TOuter> match, Span<long> matches)
+            {
+                ref var inner = ref match._inner;
+                ref var outer = ref match._outer;
+
+                var results = inner.AndWith(matches);
+
+                return outer.AndWith(matches.Slice(0, results));
+            }
+
+            return new BinaryMatch<TInner, TOuter>(in inner, in outer, &SeekToFunc, &FillFunc, &AndWith, Math.Min(inner.Count, outer.Count));
         }
 
         public static BinaryMatch<TInner, TOuter> YieldOr(in TInner inner, in TOuter outer)
@@ -121,70 +98,67 @@ namespace Corax.Queries
                 return inner.SeekTo(v) && outer.SeekTo(v);
             }
 
-            static QueryMatchStatus MoveNextFunc(ref BinaryMatch<TInner, TOuter> match, out long v)
+            static int AndWith(ref BinaryMatch<TInner, TOuter> match, Span<long> matches)
+            {
+                Span<long> orMatches = stackalloc long[matches.Length];
+                var count = FillFunc(ref match, orMatches);
+
+                return MergeHelper.And(matches, matches, orMatches.Slice(0, count));
+            }
+
+
+
+            static int FillFunc(ref BinaryMatch<TInner, TOuter> match, Span<long> matches)
             {
                 ref var inner = ref match._inner;
                 ref var outer = ref match._outer;
+                // need to be ready to put both outputs to the matches
+                Span<long> innerMatches = stackalloc long[matches.Length/2];
+                Span<long> outerMatches = stackalloc long[matches.Length/2];
 
-                // Nothing else left to add
-                if (inner.Current == QueryMatch.Invalid && outer.Current == QueryMatch.Invalid)
+                var innerCount = inner.Fill(innerMatches);
+                var outerCount = outer.Fill(outerMatches);
+                if (innerCount == 0)
                 {
-                    v = QueryMatch.Invalid;
-                    goto Done;
+                    outerMatches.Slice(0, outerCount).CopyTo(matches);
+                    return outerCount;
                 }
-                else if (inner.Current == QueryMatch.Invalid)
+                if (outerCount == 0)
                 {
-                    outer.MoveNext(out v);
-                    goto Done;
-                }
-                else if (outer.Current == QueryMatch.Invalid)
-                {
-                    inner.MoveNext(out v);
-                    goto Done;
-                }
-
-                long x, y;
-                if (inner.Current == outer.Current)
-                {
-                    inner.MoveNext(out x);
-                    outer.MoveNext(out y);
-                }
-                else if (inner.Current < outer.Current)
-                {
-                    inner.MoveNext(out x);
-                    y = outer.Current;
-                }
-                else
-                {
-                    x = inner.Current;
-                    outer.MoveNext(out y);
+                    innerMatches.Slice(0, innerCount).CopyTo(matches);
+                    return innerCount;
                 }
 
-                if (x == QueryMatch.Invalid && y == QueryMatch.Invalid)
+                int innerIdx = 0, outerIdx = 0, matchesIdx = 0;
+                while (innerIdx < innerCount && outerIdx < outerCount)
                 {
-                    v = QueryMatch.Invalid;
-                    match._current = QueryMatch.Invalid;
-                    return QueryMatchStatus.NoMore;
-                }
-                else if (x == QueryMatch.Invalid)
-                {
-                    v = y;
-                }
-                else if (y == QueryMatch.Invalid)
-                {
-                    v = x;
-                }
-                else
-                {
-                    v = x < y ? x : y;
+                    if (innerMatches[innerIdx] == outerMatches[outerIdx])
+                    {
+                        matches[matchesIdx++] = innerMatches[innerIdx++];
+                        outerIdx++;
+                    }
+                    else if (innerMatches[innerIdx] < outerMatches[outerIdx])
+                    {
+                        matches[matchesIdx++] = innerMatches[innerIdx++];
+                    }
+                    else
+                    {
+                        matches[matchesIdx++] = outerMatches[outerIdx++];
+                    }
                 }
 
-            Done:
-                match._current = v;
-                return v != QueryMatch.Invalid ? QueryMatchStatus.InOrder : QueryMatchStatus.NoMore;
+                while (innerIdx < innerCount)
+                {
+                    matches[matchesIdx++] = innerMatches[innerIdx++];
+                }
+                while (outerIdx < outerCount)
+                {
+                    matches[matchesIdx++] = outerMatches[outerIdx++];
+                }
+                return matchesIdx;
             }
 
-            return new BinaryMatch<TInner, TOuter>(in inner, in outer, &SeekToFunc, &MoveNextFunc, inner.Count + outer.Count);
+            return new BinaryMatch<TInner, TOuter>(in inner, in outer, &SeekToFunc, &FillFunc, &AndWith, inner.Count + outer.Count);
         }
     }
 }

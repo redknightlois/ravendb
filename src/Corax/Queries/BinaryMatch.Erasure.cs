@@ -26,37 +26,37 @@ namespace Corax.Queries
             return _functionTable.SeekToFunc(ref this, next);
         }
 
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public QueryMatchStatus MoveNext(out long v)
+        public int Fill(Span<long> buffer)
         {
-            return _functionTable.MoveNextFunc(ref this, out v);
+            return _functionTable.FillFunc(ref this, buffer);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public QueryMatchStatus MoveNext(Span<long> buffer, out int read)
+        public int AndWith(Span<long> buffer)
         {
-            read = 0;
-            while (read < buffer.Length && _functionTable.MoveNextFunc(ref this, out var v) != QueryMatchStatus.NoMore)
-                buffer[read++] = v;
-
-            return read == buffer.Length ? QueryMatchStatus.InOrder : QueryMatchStatus.NoMore;
+            return _functionTable.AndWithFunc(ref this, buffer);
         }
 
         internal class FunctionTable
         {
             public readonly delegate*<ref BinaryMatch, long, bool> SeekToFunc;
-            public readonly delegate*<ref BinaryMatch, out long, QueryMatchStatus> MoveNextFunc;
+            public readonly delegate*<ref BinaryMatch, Span<long>, int> FillFunc;
+            public readonly delegate*<ref BinaryMatch, Span<long>, int> AndWithFunc;
             public readonly delegate*<ref BinaryMatch, long> CountFunc;
             public readonly delegate*<ref BinaryMatch, long> CurrentFunc;
 
             public FunctionTable(
                 delegate*<ref BinaryMatch, long, bool> seekToFunc,
-                delegate*<ref BinaryMatch, out long, QueryMatchStatus> moveNextFunc,
+                delegate*<ref BinaryMatch, Span<long>, int> fillFunc,
+                delegate*<ref BinaryMatch, Span<long>, int> andWithFunc,
                 delegate*<ref BinaryMatch, long> countFunc,
                 delegate*<ref BinaryMatch, long> currentFunc)
             {
                 SeekToFunc = seekToFunc;
-                MoveNextFunc = moveNextFunc;
+                FillFunc = fillFunc;
+                AndWithFunc = andWithFunc;
                 CountFunc = countFunc;
                 CurrentFunc = currentFunc;
             }
@@ -88,19 +88,29 @@ namespace Corax.Queries
                     }
                     return false;
                 }
-                static QueryMatchStatus MoveNextFunc(ref BinaryMatch match, out long v)
+                static int FillFunc(ref BinaryMatch match, Span<long> matches)
                 {
                     if (match._inner is BinaryMatch<TInner, TOuter> inner)
                     {
-                        var result = inner.MoveNext(out v);
+                        var result = inner.Fill(matches);
                         match._inner = inner;
                         return result;
                     }
-                    Unsafe.SkipInit(out v);
-                    return QueryMatchStatus.NoMore;
+                    return 0;
                 }
 
-                FunctionTable = new FunctionTable(&SeekToFunc, &MoveNextFunc, &CountFunc, &CurrentFunc);
+                static int AndWithFunc(ref BinaryMatch match, Span<long> matches)
+                {
+                    if (match._inner is BinaryMatch<TInner, TOuter> inner)
+                    {
+                        var result = inner.AndWith(matches);
+                        match._inner = inner;
+                        return result;
+                    }
+                    return 0;
+                }
+
+                FunctionTable = new FunctionTable(&SeekToFunc, &FillFunc, &AndWithFunc, &CountFunc, &CurrentFunc);
             }
         }
 
