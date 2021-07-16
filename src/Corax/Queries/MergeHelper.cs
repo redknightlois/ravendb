@@ -10,7 +10,7 @@ namespace Corax.Queries
         public static int And(Span<long> dst, Span<long> left, Span<long> right)
         {
             int dstIdx = 0, leftIdx = 0, rightIdx = 0;
-            while(leftIdx < left.Length && rightIdx < right.Length)
+            while (leftIdx < left.Length && rightIdx < right.Length)
             {
                 if (left[leftIdx] < right[rightIdx])
                 {

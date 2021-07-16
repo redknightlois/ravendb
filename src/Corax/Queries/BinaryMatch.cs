@@ -20,8 +20,8 @@ namespace Corax.Queries
         public long Count => _totalResults;
         public long Current => _current;
 
-        private BinaryMatch(in TInner inner, in TOuter outer, 
-            delegate*<ref BinaryMatch<TInner, TOuter>, long, bool> seekFunc, 
+        private BinaryMatch(in TInner inner, in TOuter outer,
+            delegate*<ref BinaryMatch<TInner, TOuter>, long, bool> seekFunc,
             delegate*<ref BinaryMatch<TInner, TOuter>, Span<long>, int> fillFunc,
             delegate*<ref BinaryMatch<TInner, TOuter>, Span<long>, int> andWith,
             long totalResults)
@@ -56,14 +56,6 @@ namespace Corax.Queries
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static BinaryMatch<TInner, TOuter> YieldAnd(in TInner inner, in TOuter outer)
         {
-            static bool SeekToFunc(ref BinaryMatch<TInner, TOuter> match, long v)
-            {
-                ref var inner = ref match._inner;
-                ref var outer = ref match._outer;
-
-                return inner.SeekTo(v) && outer.SeekTo(v);
-            }
-
             static int FillFunc(ref BinaryMatch<TInner, TOuter> match, Span<long> matches)
             {
                 ref var inner = ref match._inner;
@@ -73,7 +65,6 @@ namespace Corax.Queries
 
                 return outer.AndWith(matches.Slice(0, results));
             }
-
 
             static int AndWith(ref BinaryMatch<TInner, TOuter> match, Span<long> matches)
             {
@@ -106,8 +97,6 @@ namespace Corax.Queries
                 return MergeHelper.And(matches, matches, orMatches.Slice(0, count));
             }
 
-
-
             static int FillFunc(ref BinaryMatch<TInner, TOuter> match, Span<long> matches)
             {
                 ref var inner = ref match._inner;
@@ -118,6 +107,7 @@ namespace Corax.Queries
 
                 var innerCount = inner.Fill(innerMatches);
                 var outerCount = outer.Fill(outerMatches);
+
                 if (innerCount == 0)
                 {
                     outerMatches.Slice(0, outerCount).CopyTo(matches);

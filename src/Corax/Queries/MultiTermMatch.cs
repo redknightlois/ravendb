@@ -7,30 +7,31 @@ namespace Corax.Queries
 {
     public unsafe struct MultiTermMatch<TInner> : IQueryMatch
     {
-        private readonly CompactTree _tree;
         private readonly delegate*<ref MultiTermMatch<TInner>, long, bool> _seekToFunc;
-        private readonly delegate*<ref MultiTermMatch<TInner>, Span<long>, out int, QueryMatchStatus> _moveNext;
+        private readonly delegate*<ref MultiTermMatch<TInner>, Span<long>, int> _fillFunc;
+        private readonly delegate*<ref MultiTermMatch<TInner>, Span<long>, int> _andWith;
 
-        private long _totalResults;
-        private long _current;
-        private long _currentIdx;
-        private TInner _inner;
+        internal long _totalResults;
+        internal long _current;
+        internal long _currentIdx;
+        internal TInner _inner;
 
         public long Count => _totalResults;
         public long Current => _currentIdx <= QueryMatch.Start ? _currentIdx : _current;
        
-        public MultiTermMatch(CompactTree tree, TInner inner,
-            delegate*<ref MultiTermMatch<TInner>, long, bool> seekToFunc,
-            delegate*<ref MultiTermMatch<TInner>, Span<long>, out int, QueryMatchStatus> moveNextFunc)
+        public MultiTermMatch(TInner inner,
+            delegate*<ref MultiTermMatch<TInner>, long, bool> seekFunc,
+            delegate*<ref MultiTermMatch<TInner>, Span<long>, int> fillFunc,
+            delegate*<ref MultiTermMatch<TInner>, Span<long>, int> andWith)
         {
             _inner = inner;
             _totalResults = 0;
             _current = QueryMatch.Start;
             _currentIdx = QueryMatch.Start;
 
-            _tree = tree;
-            _seekToFunc = seekToFunc;
-            _moveNext = moveNextFunc;
+            _seekToFunc = seekFunc;
+            _fillFunc = fillFunc;
+            _andWith = andWith;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -40,38 +41,34 @@ namespace Corax.Queries
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public QueryMatchStatus MoveNext(out long v)
+        public int Fill(Span<long> buffer)
         {
-            Span<long> value = stackalloc long[1];
-            QueryMatchStatus hasMore = _moveNext(ref this, value, out var len);
-            v = value[0];
-            return hasMore;
+            return _fillFunc(ref this, buffer);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public QueryMatchStatus MoveNext(Span<long> buffer, out int read)
+        public int AndWith(Span<long> buffer)
         {
-            return _moveNext(ref this, buffer, out read);
+            return _andWith(ref this, buffer);
         }
 
         internal static MultiTermMatch<byte> CreateEmpty(CompactTree tree)
         {
-            static bool SeekFunc(ref MultiTermMatch<byte> term, long next)
+            static bool SeekFunc(ref MultiTermMatch<byte> match, long next)
             {
                 bool result = next == QueryMatch.Start;
-                term._current = result ? QueryMatch.Start : QueryMatch.Invalid;
+                match._current = result ? QueryMatch.Start : QueryMatch.Invalid;
                 return result;
             }
 
-            static QueryMatchStatus MoveNext(ref MultiTermMatch<byte> term, Span<long> buffer, out int read)
+            static int FillFunc(ref MultiTermMatch<byte> match, Span<long> matches)
             {
-                term._currentIdx = QueryMatch.Invalid;
-                term._current = QueryMatch.Invalid;
-                read = 0;
-                return QueryMatchStatus.NoMore;
+                match._currentIdx = QueryMatch.Invalid;
+                match._current = QueryMatch.Invalid;
+                return 0;
             }
 
-            return new MultiTermMatch<byte>(tree, 0, &SeekFunc, &MoveNext);
+            return new MultiTermMatch<byte>(tree, 0, &SeekFunc, &FillFunc, &FillFunc);
         }
     }
 }

@@ -14,7 +14,7 @@ using System.Collections.Generic;
 
 namespace Corax
 {
-    public class IndexSearcher : IDisposable
+    public sealed unsafe class IndexSearcher : IDisposable
     {
         private readonly StorageEnvironment _environment;
         private readonly Transaction _transaction;
@@ -105,40 +105,105 @@ namespace Corax
             return matches;
         }
 
-        public MultiTermMatch InQuery(string field, IEnumerable<string> inTerms)
+
+        internal struct InQueryOperation
+        {
+            internal readonly string Field;
+            internal readonly List<string> Terms;
+            internal readonly IndexSearcher Searcher;
+
+            private int _currentIdx;
+            private TermMatch _currentTerm;
+            private long _seekTo;
+
+            public InQueryOperation(IndexSearcher searcher, string field, List<string> terms)
+            {
+                this.Searcher = searcher;
+                this.Field = field;
+                this.Terms = terms;
+
+                _currentIdx = 0;
+                _seekTo = 0;
+                Unsafe.SkipInit(out _currentTerm);
+            }
+
+            internal static bool SeekTo(ref MultiTermMatch<InQueryOperation> match, long next)
+            {
+                match._currentIdx = 0;
+                match._inner._currentTerm = match._inner.Searcher.TermQuery(match._inner.Field, match._inner.Terms[0]);
+
+                // TODO: Does Seek even make sense under this scenario?
+                match._inner._seekTo = next;
+                match._inner._currentTerm.SeekTo(next);
+                
+                // TODO: Is this true? Should we look into all of them?
+                return true;
+            }
+
+            internal static int Fill(ref MultiTermMatch<InQueryOperation> match, Span<long> matches)
+            {
+                int read = match.Fill(matches);
+                if (read == matches.Length)
+                    return read;
+
+                match._currentIdx++;
+                while (match._currentIdx < match._inner.Terms.Count)
+                {
+                    // We get the new term. 
+                    match._inner._currentTerm = match._inner.Searcher.TermQuery(match._inner.Field, match._inner.Terms[match._inner._currentIdx]);
+
+                    read += match._inner._currentTerm.Fill(matches.Slice(read));
+                    if (read == matches.Length)
+                        return read;
+
+                    match._currentIdx++;
+                }
+
+                // We sort it because they come from different terms.
+                matches.Sort();
+                return read;
+            }
+
+            internal static int AndWith(ref MultiTermMatch<InQueryOperation> match, Span<long> matches)
+            {
+                throw new NotImplementedException();
+                //int read = match.Fill(matches);
+                //if (read == matches.Length)
+                //    return read;
+
+                //match._currentIdx++;
+                //while (match._currentIdx < match._inner.Terms.Count)
+                //{
+                //    // We get the new term. 
+                //    match._inner._currentTerm = match._inner.Searcher.TermQuery(match._inner.Field, match._inner.Terms[match._inner._currentIdx]);
+
+                //    // And we seek to the last seek value.                    
+                //    match._inner._currentTerm.SeekTo(match._inner._seekTo);
+
+                //    read += match._inner._currentTerm.AndWith(matches.Slice(read));
+                //    if (read == matches.Length)
+                //        return read;
+
+                //    match._currentIdx++;
+                //}
+
+                //// We sort it because they come from different terms.
+                //matches.Sort();
+                //return read;
+            }
+        }
+
+        public MultiTermMatch InQuery(string field, List<string> inTerms)
         {
             // TODO: The IEnumerable<string> will die eventually, this is for prototyping only. 
             var fields = _transaction.ReadTree(IndexWriter.FieldsSlice);
             var terms = fields.CompactTreeFor(field);
             if (terms == null)
                 return MultiTermMatch.CreateEmpty(terms);
-            
 
-
-
-            throw new NotImplementedException();
-
-            //TermMatch matches;
-            //if ((value & (long)TermIdMask.Set) != 0)
-            //{
-            //    var setId = value & ~0b11;
-            //    var setStateSpan = Container.Get(_transaction.LowLevelTransaction, setId).ToSpan();
-            //    ref readonly var setState = ref MemoryMarshal.AsRef<SetState>(setStateSpan);
-            //    var set = new Set(_transaction.LowLevelTransaction, Slices.Empty, setState);
-            //    matches = TermMatch.YieldSet(set);
-            //}
-            //else if ((value & (long)TermIdMask.Small) != 0)
-            //{
-            //    var smallSetId = value & ~0b11;
-            //    var small = Container.Get(_transaction.LowLevelTransaction, smallSetId);
-            //    matches = TermMatch.YieldSmall(small);
-            //}
-            //else
-            //{
-            //    matches = TermMatch.YieldOnce(value);
-            //}
-
-            //return matches;
+            return MultiTermMatch.Create(new MultiTermMatch<InQueryOperation>( 
+                new InQueryOperation(this, field, inTerms),
+                &InQueryOperation.SeekTo, &InQueryOperation.Fill, &InQueryOperation.AndWith));
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

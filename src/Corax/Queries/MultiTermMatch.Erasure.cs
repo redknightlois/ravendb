@@ -31,42 +31,41 @@ namespace Corax.Queries
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public QueryMatchStatus MoveNext(out long v)
+        public int Fill(Span<long> buffer)
         {
-            Span<long> buffer = stackalloc long[1];
-            var result = _functionTable.MoveNextFunc(ref this, buffer, out var _);
-            v = buffer[0];
-            return result;
+            return _functionTable.FillFunc(ref this, buffer);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public QueryMatchStatus MoveNext(Span<long> buffer, out int read)
+        public int AndWith(Span<long> buffer)
         {
-            return _functionTable.MoveNextFunc(ref this, buffer, out read);
+            return _functionTable.AndWithFunc(ref this, buffer);
         }
 
         internal class FunctionTable
         {
             public readonly delegate*<ref MultiTermMatch, long, bool> SeekToFunc;
-            public readonly delegate*<ref MultiTermMatch, Span<long>, out int, QueryMatchStatus> MoveNextFunc;
+            public readonly delegate*<ref MultiTermMatch, Span<long>, int> FillFunc;
+            public readonly delegate*<ref MultiTermMatch, Span<long>, int> AndWithFunc;
             public readonly delegate*<ref MultiTermMatch, long> CountFunc;
             public readonly delegate*<ref MultiTermMatch, long> CurrentFunc;
 
             public FunctionTable(
                 delegate*<ref MultiTermMatch, long, bool> seekToFunc,
-                delegate*<ref MultiTermMatch, Span<long>, out int, QueryMatchStatus> moveNextFunc,
+                delegate*<ref MultiTermMatch, Span<long>, int> fillFunc,
+                delegate*<ref MultiTermMatch, Span<long>, int> andWithFunc,
                 delegate*<ref MultiTermMatch, long> countFunc,
                 delegate*<ref MultiTermMatch, long> currentFunc)
             {
                 SeekToFunc = seekToFunc;
-                MoveNextFunc = moveNextFunc;
+                FillFunc = fillFunc;
+                AndWithFunc = andWithFunc;
                 CountFunc = countFunc;
                 CurrentFunc = currentFunc;
             }
         }
 
-        private static class StaticFunctionCache<TInner>
-            where TInner : IQueryMatch
+        private static class StaticFunctionCache<TInner>            
         {
             public static readonly FunctionTable FunctionTable;
 
@@ -90,35 +89,43 @@ namespace Corax.Queries
                     }
                     return false;
                 }
-                static QueryMatchStatus MoveNextFunc(ref MultiTermMatch match, Span<long> buffer, out int read)
+
+                static int FillFunc(ref MultiTermMatch match, Span<long> matches)
                 {
                     if (match._inner is MultiTermMatch<TInner> inner)
                     {
-                        var result = inner.MoveNext(buffer, out read);
+                        var result = inner.Fill(matches);
                         match._inner = inner;
                         return result;
                     }
-                    Unsafe.SkipInit(out read);
-                    return QueryMatchStatus.NoMore;
+                    return 0;
                 }
 
-                FunctionTable = new FunctionTable(&SeekToFunc, &MoveNextFunc, &CountFunc, &CurrentFunc);
+                static int AndWithFunc(ref MultiTermMatch match, Span<long> matches)
+                {
+                    if (match._inner is MultiTermMatch<TInner> inner)
+                    {
+                        var result = inner.AndWith(matches);
+                        match._inner = inner;
+                        return result;
+                    }
+                    return 0;
+                }
+
+                FunctionTable = new FunctionTable(&SeekToFunc, &FillFunc, &AndWithFunc, &CountFunc, &CurrentFunc);
             }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static MultiTermMatch Create<TInner>(in MultiTermMatch<TInner> query)
-            where TInner : IQueryMatch
         {
             return new MultiTermMatch(query, StaticFunctionCache<TInner>.FunctionTable);
         }
-
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static MultiTermMatch CreateEmpty(CompactTree tree)
         {
             return new MultiTermMatch(MultiTermMatch<byte>.CreateEmpty(tree), StaticFunctionCache<MultiTermMatch<byte>>.FunctionTable);
         }
-
     }
 }
