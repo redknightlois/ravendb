@@ -10,7 +10,7 @@ using Voron.Impl;
 using Voron.Data.Sets;
 using Voron.Data.Containers;
 using Corax.Queries;
-
+using System.Collections.Generic;
 
 namespace Corax
 {
@@ -103,6 +103,42 @@ namespace Corax
             }
 
             return matches;
+        }
+
+        public MultiTermMatch InQuery(string field, IEnumerable<string> inTerms)
+        {
+            // TODO: The IEnumerable<string> will die eventually, this is for prototyping only. 
+            var fields = _transaction.ReadTree(IndexWriter.FieldsSlice);
+            var terms = fields.CompactTreeFor(field);
+            if (terms == null)
+                return MultiTermMatch.CreateEmpty(terms);
+            
+
+
+
+            throw new NotImplementedException();
+
+            //TermMatch matches;
+            //if ((value & (long)TermIdMask.Set) != 0)
+            //{
+            //    var setId = value & ~0b11;
+            //    var setStateSpan = Container.Get(_transaction.LowLevelTransaction, setId).ToSpan();
+            //    ref readonly var setState = ref MemoryMarshal.AsRef<SetState>(setStateSpan);
+            //    var set = new Set(_transaction.LowLevelTransaction, Slices.Empty, setState);
+            //    matches = TermMatch.YieldSet(set);
+            //}
+            //else if ((value & (long)TermIdMask.Small) != 0)
+            //{
+            //    var smallSetId = value & ~0b11;
+            //    var small = Container.Get(_transaction.LowLevelTransaction, smallSetId);
+            //    matches = TermMatch.YieldSmall(small);
+            //}
+            //else
+            //{
+            //    matches = TermMatch.YieldOnce(value);
+            //}
+
+            //return matches;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
