@@ -11,8 +11,6 @@ namespace Corax.Queries
     public interface IQueryMatch
     {
         long Count { get; }
-        
-        long Current { get; }
 
         // Guarantees: The output of Fill will be sorted and deduplicated for the call.
         //             Different calls to Fill may return identical values are not guaranteed to be sorted between calls.

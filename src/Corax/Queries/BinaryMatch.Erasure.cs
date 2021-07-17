@@ -17,9 +17,6 @@ namespace Corax.Queries
 
         public long Count => _functionTable.CountFunc(ref this);
 
-        public long Current => _functionTable.CurrentFunc(ref this);
-
-
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public int Fill(Span<long> buffer)
         {
@@ -37,18 +34,15 @@ namespace Corax.Queries
             public readonly delegate*<ref BinaryMatch, Span<long>, int> FillFunc;
             public readonly delegate*<ref BinaryMatch, Span<long>, int> AndWithFunc;
             public readonly delegate*<ref BinaryMatch, long> CountFunc;
-            public readonly delegate*<ref BinaryMatch, long> CurrentFunc;
 
             public FunctionTable(
                 delegate*<ref BinaryMatch, Span<long>, int> fillFunc,
                 delegate*<ref BinaryMatch, Span<long>, int> andWithFunc,
-                delegate*<ref BinaryMatch, long> countFunc,
-                delegate*<ref BinaryMatch, long> currentFunc)
+                delegate*<ref BinaryMatch, long> countFunc)
             {
                 FillFunc = fillFunc;
                 AndWithFunc = andWithFunc;
                 CountFunc = countFunc;
-                CurrentFunc = currentFunc;
             }
         }
 
@@ -63,10 +57,6 @@ namespace Corax.Queries
                 static long CountFunc(ref BinaryMatch match)
                 {
                     return ((BinaryMatch<TInner, TOuter>)match._inner).Count;
-                }
-                static long CurrentFunc(ref BinaryMatch match)
-                {
-                    return ((BinaryMatch<TInner, TOuter>)match._inner).Current;
                 }
            
                 static int FillFunc(ref BinaryMatch match, Span<long> matches)
@@ -91,7 +81,7 @@ namespace Corax.Queries
                     return 0;
                 }
 
-                FunctionTable = new FunctionTable(&FillFunc, &AndWithFunc, &CountFunc, &CurrentFunc);
+                FunctionTable = new FunctionTable(&FillFunc, &AndWithFunc, &CountFunc);
             }
         }
 

@@ -57,12 +57,11 @@ namespace Corax.Queries
                     var results = inner.Fill(matches);
                     if (results == 0)
                         return 0;
-
+                    
                     results = outer.AndWith(matches.Slice(0, results));
                     if (results != 0)
                         return results;
                 }
-
             }
 
             static int AndWith(ref BinaryMatch<TInner, TOuter> match, Span<long> matches)
@@ -92,9 +91,10 @@ namespace Corax.Queries
             {
                 ref var inner = ref match._inner;
                 ref var outer = ref match._outer;
+
                 // need to be ready to put both outputs to the matches
-                Span<long> innerMatches = stackalloc long[matches.Length/2];
-                Span<long> outerMatches = stackalloc long[matches.Length/2];
+                Span<long> innerMatches = stackalloc long[matches.Length / 2];
+                Span<long> outerMatches = stackalloc long[matches.Length / 2];
 
                 var innerCount = inner.Fill(innerMatches);
                 var outerCount = outer.Fill(outerMatches);

@@ -21,15 +21,6 @@ namespace Corax.Queries
 
         public long Count => _functionTable.CountFunc(ref this);
 
-        public long Current => _functionTable.CurrentFunc(ref this);
-
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool SeekTo(long next = 0)
-        {
-            return _functionTable.SeekToFunc(ref this, next);
-        }
-
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public int Fill(Span<long> buffer)
         {
@@ -44,28 +35,23 @@ namespace Corax.Queries
 
         internal class FunctionTable
         {
-            public readonly delegate*<ref MultiTermMatch, long, bool> SeekToFunc;
             public readonly delegate*<ref MultiTermMatch, Span<long>, int> FillFunc;
             public readonly delegate*<ref MultiTermMatch, Span<long>, int> AndWithFunc;
             public readonly delegate*<ref MultiTermMatch, long> CountFunc;
-            public readonly delegate*<ref MultiTermMatch, long> CurrentFunc;
 
             public FunctionTable(
-                delegate*<ref MultiTermMatch, long, bool> seekToFunc,
                 delegate*<ref MultiTermMatch, Span<long>, int> fillFunc,
                 delegate*<ref MultiTermMatch, Span<long>, int> andWithFunc,
-                delegate*<ref MultiTermMatch, long> countFunc,
-                delegate*<ref MultiTermMatch, long> currentFunc)
+                delegate*<ref MultiTermMatch, long> countFunc)
             {
-                SeekToFunc = seekToFunc;
                 FillFunc = fillFunc;
                 AndWithFunc = andWithFunc;
                 CountFunc = countFunc;
-                CurrentFunc = currentFunc;
             }
         }
 
-        private static class StaticFunctionCache<TInner>            
+        private static class StaticFunctionCache<TInner>
+            where TInner : ITermProvider
         {
             public static readonly FunctionTable FunctionTable;
 
@@ -75,21 +61,6 @@ namespace Corax.Queries
                 {
                     return ((MultiTermMatch<TInner>)match._inner).Count;
                 }
-                static long CurrentFunc(ref MultiTermMatch match)
-                {
-                    return ((MultiTermMatch<TInner>)match._inner).Current;
-                }
-                static bool SeekToFunc(ref MultiTermMatch match, long v)
-                {
-                    if (match._inner is MultiTermMatch<TInner> inner)
-                    {
-                        var result = inner.SeekTo(v);
-                        match._inner = inner;
-                        return result;
-                    }
-                    return false;
-                }
-
                 static int FillFunc(ref MultiTermMatch match, Span<long> matches)
                 {
                     if (match._inner is MultiTermMatch<TInner> inner)
@@ -112,20 +83,40 @@ namespace Corax.Queries
                     return 0;
                 }
 
-                FunctionTable = new FunctionTable(&SeekToFunc, &FillFunc, &AndWithFunc, &CountFunc, &CurrentFunc);
+                FunctionTable = new FunctionTable(&FillFunc, &AndWithFunc, &CountFunc);
             }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static MultiTermMatch Create<TInner>(in MultiTermMatch<TInner> query)
+             where TInner : ITermProvider
         {
             return new MultiTermMatch(query, StaticFunctionCache<TInner>.FunctionTable);
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static MultiTermMatch CreateEmpty(CompactTree tree)
+        private struct EmptyTermProvider : ITermProvider
         {
-            return new MultiTermMatch(MultiTermMatch<byte>.CreateEmpty(tree), StaticFunctionCache<MultiTermMatch<byte>>.FunctionTable);
+            public int TermsCount => 0;
+
+            public bool Evaluate(long id)
+            {
+                throw new NotSupportedException();
+            }
+
+            public bool Next(out TermMatch term)
+            {
+                Unsafe.SkipInit(out term);
+                return false;
+            }
+
+            public void Reset(){}
+        }
+
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static MultiTermMatch CreateEmpty()
+        {
+            return new MultiTermMatch(new MultiTermMatch<EmptyTermProvider>(new EmptyTermProvider()), StaticFunctionCache<EmptyTermProvider>.FunctionTable);
         }
     }
 }

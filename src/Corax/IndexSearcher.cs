@@ -112,59 +112,15 @@ namespace Corax
             return matches;
         }
 
-
-        internal struct InQueryOperation
-        {
-            internal readonly string Field;
-            internal readonly List<string> Terms;
-            internal readonly IndexSearcher Searcher;
-
-            private int _currentIdx;
-            private TermMatch _currentTerm;
-
-            public InQueryOperation(IndexSearcher searcher, string field, List<string> terms)
-            {
-                Searcher = searcher;
-                Field = field;
-                Terms = terms;
-
-                _currentIdx = 0;
-                Unsafe.SkipInit(out _currentTerm);
-            }
-
-            internal static int Fill(ref MultiTermMatch<InQueryOperation> match, Span<long> matches)
-            {
-                int read = match.Fill(matches);
-                if (read != 0)
-                    return read;
-
-                while (match._currentIdx < match._inner.Terms.Count)
-                {
-                    var curTerm = match._inner.Terms[match._inner._currentIdx++];
-                    match._inner._currentTerm = match._inner.Searcher.TermQuery(match._inner.Field, curTerm);
-                    read = match._inner._currentTerm.Fill(matches);
-                    if (read != 0)
-                        return read;
-                }
-
-                return 0;
-            }
-
-            internal static int AndWith(ref MultiTermMatch<InQueryOperation> match, Span<long> matches)
-            {
-            }
-        }
-
         public MultiTermMatch InQuery(string field, List<string> inTerms)
         {
             // TODO: The IEnumerable<string> will die eventually, this is for prototyping only. 
             var fields = _transaction.ReadTree(IndexWriter.FieldsSlice);
             var terms = fields.CompactTreeFor(field);
             if (terms == null)
-                return MultiTermMatch.CreateEmpty(terms);
+                return MultiTermMatch.CreateEmpty();
 
-            return MultiTermMatch.Create(new MultiTermMatch<InQueryOperation>( 
-                new InQueryOperation(this, field, inTerms), &InQueryOperation.Fill, &InQueryOperation.AndWith));
+            return MultiTermMatch.Create(new MultiTermMatch<InTermProvider>(new InTermProvider(this, field, 0, inTerms)));
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
