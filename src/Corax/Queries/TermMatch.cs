@@ -3,6 +3,7 @@ using Sparrow.Server.Compression;
 using Voron.Data.Sets;
 using Voron.Data.Containers;
 using System;
+using System.Diagnostics;
 
 namespace Corax.Queries
 {
@@ -170,23 +171,49 @@ namespace Corax.Queries
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             static int AndWithFunc(ref TermMatch term, Span<long> matches)
             {
-                if (term._current >= matches[0])
-                {
-                    // need to seek from strart
-                    term._set.Seek(matches[0] - 1);
-                }
-                //TODO: can probably optimize this if set is large and matches is small, better to Seek() to the next values
-                int i = 0;
                 int matchedIdx = 0;
-                while (i < matches.Length && term._set.MoveNext())
+
+                long current = term._current;
+                if (current == long.MinValue)                
                 {
-                    if (term._set.Current == matches[i])
-                    {
-                        matches[matchedIdx++] = term._set.Current;
-                        i++;
-                    }
+                    // We are starting and therefore we will move to the first element.
+                    term._set.Seek(matches[0] - 1);
+
+                    // We update the current value we want to work with.
+                    current = term._set.Current;
                 }
 
+                // Check if there are matches left to process or is any posibility of a match to be available in this block.
+                int i = 0;                
+                while (i < matches.Length && current <= matches[^1])
+                {
+                    // While the current match is smaller we advance.
+                    while (matches[i] < current)
+                    {
+                        i++;
+                        if (i >= matches.Length)
+                            goto End;
+                    }
+
+                    // We are guaranteed that matches[i] is at least equal if not higher than current.
+                    Debug.Assert(matches[i] >= current);
+
+                    // We have a match, we include it into the matches and go on. 
+                    if (current == matches[i])
+                    {
+                        matches[matchedIdx++] = current;
+                        i++;
+                    }
+
+                    // We look into the next.
+                    if (term._set.MoveNext() == false)
+                        goto End;
+
+                    current = term._set.Current;                    
+                }
+
+                End:
+                term._current = current;
                 return matchedIdx;
             }
 

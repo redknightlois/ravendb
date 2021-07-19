@@ -484,6 +484,55 @@ namespace FastTests.Corax
             }
         }
 
+
+        [Theory]
+        [InlineData(new object[] { 100000, 128})]
+        [InlineData(new object[] { 100000, 18 })]
+        [InlineData(new object[] { 1000, 8 })]
+        public void SimpleAndOrForBiggerSet(int setSize, int stackSize)
+        {            
+            setSize = setSize - (setSize % 3);
+
+            var entriesToIndex = new IndexEntry[setSize];
+            for ( int i = 0; i < setSize; i++)
+            {
+                var entry = new IndexEntry
+                {
+                    Id = $"entry/{i}",
+                    Content = (i % 3) switch
+                    {
+                        0 => new string[] { "road", "lake", "mountain" },
+                        1 => new string[] { "road", "mountain" },
+                        2 => new string[] { "sky", "space", "lake" },
+                    }
+                };
+
+                entriesToIndex[i] = entry;
+            }
+
+            IndexEntries(entriesToIndex);
+
+            {
+                using var searcher = new IndexSearcher(Env);
+                var match1 = searcher.TermQuery("Content", "lake");
+                var match2 = searcher.TermQuery("Content", "mountain");
+                var andMatch = searcher.And(in match1, in match2);
+                var match3 = searcher.TermQuery("Content", "space");
+                var orMatch = searcher.Or(in andMatch, in match3);
+
+                Span<long> ids = stackalloc long[stackSize];
+                int read;
+                int count = 0;
+                do
+                {
+                    read = orMatch.Fill(ids);
+                    count += read;                        
+                }
+                while (read != 0);
+                Assert.Equal((setSize  / 3) * 2, count);
+            }
+        }
+
         // TODO: Add small and big set operations test. 
     }
 }
