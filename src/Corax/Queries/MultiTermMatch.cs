@@ -118,8 +118,9 @@ namespace Corax.Queries
             return matches;
         }
 
+        [SkipLocalsInit]
         private int AndWithSmall(Span<long> buffer)
-        {
+        {            
             Span<long> tmp = stackalloc long[buffer.Length];
             Span<long> tmp2 = stackalloc long[buffer.Length];
             Span<long> results = stackalloc long[buffer.Length];

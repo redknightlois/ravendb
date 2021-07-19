@@ -87,6 +87,7 @@ namespace Corax.Queries
                 return MergeHelper.And(matches, matches, orMatches.Slice(0, count));
             }
 
+            [SkipLocalsInit]
             static int FillFunc(ref BinaryMatch<TInner, TOuter> match, Span<long> matches)
             {
                 ref var inner = ref match._inner;
