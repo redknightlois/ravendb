@@ -118,9 +118,13 @@ namespace Corax.Queries
 
                 //Debug.Assert(matches.Length > 4);
 
+                var bufferHolder = QueryContext.MatchesPool.Rent(sizeof(long) * matches.Length);
+                var longBuffer = MemoryMarshal.Cast<byte, long>(bufferHolder);
+
                 // need to be ready to put both outputs to the matches
-                Span<long> innerMatches = stackalloc long[matches.Length / 2];
-                Span<long> outerMatches = stackalloc long[matches.Length / 2];
+                int length = matches.Length / 2;
+                Span<long> innerMatches = longBuffer.Slice(length);
+                Span<long> outerMatches = longBuffer.Slice(length, length);
 
                 var innerCount = inner.Fill(innerMatches);
                 var outerCount = outer.Fill(outerMatches);

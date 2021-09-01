@@ -111,9 +111,13 @@ namespace Corax.Queries
             // the statistics guarrant those approaches, etc. Currently we apply memoization but without any limit to 
             // size of the result and it's subsequent usage of memory. 
 
-            Span<long> results = stackalloc long[buffer.Length];
-            Span<long> tmp = stackalloc long[buffer.Length];
-            Span<long> tmp2 = stackalloc long[buffer.Length];
+            var bufferHolder = QueryContext.MatchesPool.Rent(3 * sizeof(long) * buffer.Length);
+            var longBuffer = MemoryMarshal.Cast<byte, long>(bufferHolder);
+
+            // PERF: We want to avoid to share cache lines, that's why the third array will move toward the end of the array. 
+            Span<long> results = longBuffer[0..buffer.Length];
+            Span<long> tmp = longBuffer.Slice(buffer.Length, buffer.Length);
+            Span<long> tmp2 = longBuffer[^buffer.Length..];
 
             _inner.Reset();
             
@@ -128,8 +132,8 @@ namespace Corax.Queries
                 if (read == 0)
                     continue;
 
-                results.Slice(0, totalSize).CopyTo(tmp2);
-                totalSize = MergeHelper.Or(results, tmp2.Slice(0, totalSize), tmp.Slice(0, read));
+                results[0..totalSize].CopyTo(tmp2);
+                totalSize = MergeHelper.Or(results, tmp2[0..totalSize], tmp[0..read]);
 
                 hasData = _inner.Next(out current);
                 totalRead += current.Count;
@@ -140,9 +144,11 @@ namespace Corax.Queries
             {
                 _totalResults = totalRead;
                 _confidence = QueryCountConfidence.High;
-            }                
+            }
+            
+            results[0..totalSize].CopyTo(buffer);
 
-            results.Slice(0, totalSize).CopyTo(buffer);
+            QueryContext.MatchesPool.Return(bufferHolder);
             return totalSize;
         }
     }
