@@ -41,7 +41,7 @@ namespace FastTests.Sparrow
 
         [Theory]
         [MemberData(nameof(Utf16Strings))]
-        public void TranscodingBackAndForth(string text)
+        public void TranscodingScalarBackAndForth(string text)
         {
             ReadOnlySpan<char> textSpan = text;
 
@@ -51,6 +51,27 @@ namespace FastTests.Sparrow
 
             Span<char> outputSpan = new char[text.Length * 2];
             UtfTranscoder.ScalarToUtf16(byteSpan, ref outputSpan);
+
+            Assert.True(textSpan.SequenceEqual(outputSpan));
+        }
+
+        [Theory]
+        [MemberData(nameof(Utf16Strings))]
+        public void TranscodingSseBackAndForth(string text)
+        {
+            ReadOnlySpan<char> textSpan = text;
+
+            Span<byte> byteSpan = new byte[text.Length * 4];
+            Span<byte> scalarByteSpan = new byte[text.Length * 4];
+            UtfTranscoder.SseFromUtf16(textSpan, ref byteSpan);
+            UtfTranscoder.ScalarFromUtf16(textSpan, ref scalarByteSpan);
+
+            Assert.Equal(text, Encoding.UTF8.GetString(scalarByteSpan));
+            Assert.Equal(text, Encoding.UTF8.GetString(byteSpan));
+            Assert.Equal(0, byteSpan.SequenceCompareTo(scalarByteSpan));
+
+            Span<char> outputSpan = new char[text.Length * 2];
+            UtfTranscoder.SseToUtf16(byteSpan, ref outputSpan);
 
             Assert.True(textSpan.SequenceEqual(outputSpan));
         }

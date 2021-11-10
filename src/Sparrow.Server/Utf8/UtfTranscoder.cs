@@ -2,20 +2,29 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics.X86;
 using System.Text;
 using System.Threading.Tasks;
 
 namespace Sparrow.Server.Utf8
 {
-    public unsafe static partial class UtfTranscoder
+    public static unsafe partial class UtfTranscoder
     {
         private static delegate*<ReadOnlySpan<byte>, ref Span<char>, bool> _convertUtf8ToUtf16;
         private static delegate*<ReadOnlySpan<char>, ref Span<byte>, bool> _convertUtf16ToUtf8;
 
         static UtfTranscoder()
         {
-            _convertUtf8ToUtf16 = &ScalarToUtf16;
-            _convertUtf16ToUtf8 = &ScalarFromUtf16;
+            if (Sse42.IsSupported)
+            {
+                _convertUtf8ToUtf16 = &SseToUtf16;
+                _convertUtf16ToUtf8 = &SseFromUtf16;
+            }
+            else
+            {
+                _convertUtf8ToUtf16 = &ScalarToUtf16;
+                _convertUtf16ToUtf8 = &ScalarFromUtf16;
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
