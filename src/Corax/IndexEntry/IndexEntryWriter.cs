@@ -378,9 +378,10 @@ public unsafe ref partial struct IndexEntryWriter
         doubleValues.CopyTo(doubleValuesList);
         dataLocation += doubleValuesList.Length * sizeof(double);
 
+        int[] stringLengths = ArrayPool<int>.Shared.Rent(values.Length);
+
         // We start to write the strings in a place we know where it is from implicit positioning...
         // 4b + 4b + len(values) * 8b
-        int[] stringLengths = ArrayPool<int>.Shared.Rent(values.Length);
         for (int i = 0; i < values.Length; i++)
         {
             var value = values[i];
@@ -399,7 +400,9 @@ public unsafe ref partial struct IndexEntryWriter
         longPtrLocation = dataLocation;
         dataLocation += VariableSizeEncoding.WriteMany(_buffer, longValues, pos: dataLocation);
 
-        Done:
+        ArrayPool<int>.Shared.Return(stringLengths);
+        
+        Done:        
         _dataIndex = dataLocation;
     }
 
