@@ -593,14 +593,14 @@ namespace Corax
         {
             if (newBufferSize > buffer.Length)
             {
-                Analyzer.BufferPool.Return(_encodingBufferHandler);
+                //Analyzer.BufferPool.Return(_encodingBufferHandler);
                 _encodingBufferHandler = Analyzer.BufferPool.Rent(newBufferSize);
                 buffer = _encodingBufferHandler.AsSpan();
             }
 
             if (newTokenSize > tokens.Length)
             {
-                Analyzer.TokensPool.Return(_tokensBufferHandler);
+                //Analyzer.TokensPool.Return(_tokensBufferHandler);
                 _tokensBufferHandler = Analyzer.TokensPool.Rent(newTokenSize);
                 tokens = _tokensBufferHandler.AsSpan();
             }
@@ -769,10 +769,10 @@ namespace Corax
                 Transaction?.Dispose();
 
 
-            if (_encodingBufferHandler != null)
-                Analyzer.BufferPool.Return(_encodingBufferHandler);
-            if (_tokensBufferHandler != null)
-                Analyzer.TokensPool.Return(_tokensBufferHandler);
+            //if (_encodingBufferHandler != null)
+            //    Analyzer.BufferPool.Return(_encodingBufferHandler);
+            //if (_tokensBufferHandler != null)
+            //    Analyzer.TokensPool.Return(_tokensBufferHandler);
         }
     }
 }
