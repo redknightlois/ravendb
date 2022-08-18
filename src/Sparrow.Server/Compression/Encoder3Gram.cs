@@ -5,6 +5,7 @@ using System.Diagnostics.SymbolStore;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Sparrow.Binary;
 using Sparrow.Collections;
 using Sparrow.Server.Binary;
 using Sparrow.Server.Collections.Persistent;
@@ -34,11 +35,12 @@ namespace Sparrow.Server.Compression
         }
     }
 
-    public struct Encoder3Gram<TEncoderState> : IEncoderAlgorithm
+    public unsafe struct Encoder3Gram<TEncoderState> : IEncoderAlgorithm
         where TEncoderState : struct, IEncoderState
     {
         private readonly TEncoderState _state;
         private int _entries;
+        private fixed int _buffer[2];
 
         public Encoder3Gram(TEncoderState state)
         {
@@ -433,24 +435,28 @@ namespace Sparrow.Server.Compression
                 {
                     if (i >= s1.Length)
                     {
-                        if (s2[i] == 0)
-                            return 0;
-                        return -1;
+                        //s2[i] == 0 ? 0 : 1
+                        return -(s2[i] != 0).ToInt32();
                     }
 
-                    if (s1[i] < s2[i])
-                        return -1;
-                    if (s1[i] > s2[i])
-                        return 1;
+                    if (s1[i] != s2[i])
+                    {
+                        // s1[i] < s2[i] ? -1 : s1[i] > s2[i] ? 1 : <can't happen>
+                        return -(s1[i] < s2[i]).ToInt32() + (s1[i] > s2[i]).ToInt32();
+                    }
                 }
 
-                if (s1.Length > 3)
-                    return 1;
-                return 0;
+                // s1.Length > 3 ? 1 : 0
+                return (s1.Length > 3).ToInt32();
             }
 
-            int l = 0;
-            int r = numberOfEntries;
+            // PERF: We create aliases l and r to make the algorithm more readable. At the assembler level,
+            // the mov operations work exactly the same as a value assignment.
+            ref int l = ref _buffer[0];
+            ref int r = ref _buffer[1];
+
+            l = 0;
+            r = numberOfEntries;
             while (r - l > 1)
             {
                 int m = (l + r) >> 1;
@@ -460,19 +466,17 @@ namespace Sparrow.Server.Compression
                 {
                     cmp = CompareDictionaryEntry(symbol, new ReadOnlySpan<byte>(p,3));
                 }
-                if (cmp < 0)
-                {
-                    r = m;
-                }
-                else if (cmp == 0)
-                {
-                    l = m;
+
+                // PERF: since we want to avoid unpredictable branches as much as possible but we need
+                // to track both r and l values. What we do is store that in sequence on a buffer and
+                // then perform a memory access through converting the binary value of the 'Cmp < 0'
+                // operation into an index without using a branching instruction. 
+
+                // Cmp < 0 = 1 -> value[1] = r
+                // This is the branchless statement: cmp < 0 ? r = m : l = m
+                _buffer[(cmp < 0).ToInt32()] = m;
+                if (cmp == 0)
                     break;
-                }
-                else
-                {
-                    l = m;
-                }
             }
 
             code = table[l].Code;
