@@ -426,28 +426,39 @@ namespace Sparrow.Server.Compression
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private unsafe int Lookup(ReadOnlySpan<byte> symbol, ReadOnlySpan<Interval3Gram> table, int numberOfEntries, out Code code)
+        private int Lookup(ReadOnlySpan<byte> symbol, ReadOnlySpan<Interval3Gram> table, int numberOfEntries, out Code code)
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            static int CompareDictionaryEntry(ReadOnlySpan<byte> s1, ReadOnlySpan<byte> s2)
+            static int CompareDictionaryEntry(byte* s1, int size, byte* s2)
             {
-                for (int i = 0; i < 3; i++)
+                // PERF: This is probably the oldest trick in the book. When 2 pointers are going to be accessed in the
+                // same pattern. We can avoid incrementing them by referencing the second pointer as an offset from the 
+                // first pointer. Given this causes less registers writes we can iterate faster avoiding data hazards at
+                // the CPU pipeline level. Furthermore, the access are done through relative addressing and 'lea' operations
+                // which are faster as most CPUs are able to compute those addresses directly at the front-end of the
+                // processor. 
+                long offset = s2 - s1;
+                byte* s1End = s1 + size;
+                byte* s1LoopEnd = s1 + 3;
+                while(s1 < s1LoopEnd)
                 {
-                    if (i >= s1.Length)
+                    if (s1 >= s1End)
                     {
                         //s2[i] == 0 ? 0 : 1
-                        return -(s2[i] != 0).ToInt32();
+                        return -(*(s1 + offset) != 0).ToInt32();
                     }
 
-                    if (s1[i] != s2[i])
+                    if (*s1 != *(s1 + offset))
                     {
                         // s1[i] < s2[i] ? -1 : s1[i] > s2[i] ? 1 : <can't happen>
-                        return -(s1[i] < s2[i]).ToInt32() + (s1[i] > s2[i]).ToInt32();
+                        return -(*s1 < *(s1 + offset)).ToInt32() + (*s1 > *(s1 + offset)).ToInt32();
                     }
+
+                    s1++;
                 }
 
                 // s1.Length > 3 ? 1 : 0
-                return (s1.Length > 3).ToInt32();
+                return (size > 3).ToInt32();
             }
 
             // PERF: We create aliases l and r to make the algorithm more readable. At the assembler level,
@@ -455,35 +466,38 @@ namespace Sparrow.Server.Compression
             ref int l = ref _buffer[0];
             ref int r = ref _buffer[1];
 
-            l = 0;
-            r = numberOfEntries;
-            while (r - l > 1)
+            fixed (byte* symbolPtr = &MemoryMarshal.GetReference(symbol))
             {
-                int m = (l + r) >> 1;
-
-                int cmp;
-                fixed (byte* p = table[m].KeyBuffer)
+                l = 0;
+                r = numberOfEntries;
+                while (r - l > 1)
                 {
-                    cmp = CompareDictionaryEntry(symbol, new ReadOnlySpan<byte>(p,3));
+                    int m = (l + r) >> 1;
+
+                    int cmp;
+                    fixed (byte* p = table[m].KeyBuffer)
+                    {
+                        cmp = CompareDictionaryEntry(symbolPtr, symbol.Length, p);
+                    }
+
+                    // PERF: since we want to avoid unpredictable branches as much as possible but we need
+                    // to track both r and l values. What we do is store that in sequence on a buffer and
+                    // then perform a memory access through converting the binary value of the 'Cmp < 0'
+                    // operation into an index without using a branching instruction. 
+
+                    // Cmp < 0 = 1 -> value[1] = r
+                    // This is the branchless statement: cmp < 0 ? r = m : l = m
+                    _buffer[(cmp < 0).ToInt32()] = m;
+                    if (cmp == 0)
+                        break;
                 }
-
-                // PERF: since we want to avoid unpredictable branches as much as possible but we need
-                // to track both r and l values. What we do is store that in sequence on a buffer and
-                // then perform a memory access through converting the binary value of the 'Cmp < 0'
-                // operation into an index without using a branching instruction. 
-
-                // Cmp < 0 = 1 -> value[1] = r
-                // This is the branchless statement: cmp < 0 ? r = m : l = m
-                _buffer[(cmp < 0).ToInt32()] = m;
-                if (cmp == 0)
-                    break;
             }
-
+            
             code = table[l].Code;
             return table[l].PrefixLength;
         }
 
-        private unsafe int Lookup(in BitReader reader, ref Span<byte> symbol, Interval3Gram* table, in BinaryTree<short> tree, out bool endsWithNull)
+        private int Lookup(in BitReader reader, ref Span<byte> symbol, Interval3Gram* table, in BinaryTree<short> tree, out bool endsWithNull)
         {
             BitReader localReader = reader;
             if (tree.FindCommonPrefix(ref localReader, out var idx))
