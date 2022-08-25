@@ -962,14 +962,14 @@ namespace Sparrow.Json
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void AcquirePathCache(out Dictionary<StringSegment, object> pathCache, out Dictionary<int, object> pathCacheByIndex)
+        public void AcquirePathCache(out ObjectPathCache pathCache)
         {
-            _activeAllocatePathCaches.AcquirePathCache(out pathCache, out pathCacheByIndex);
+            _activeAllocatePathCaches.AcquirePathCache(out pathCache);
         }
 
-        public void ReleasePathCache(Dictionary<StringSegment, object> pathCache, Dictionary<int, object> pathCacheByIndex)
+        public void ReleasePathCache(ObjectPathCache pathCache)
         {
-            _activeAllocatePathCaches.ReleasePathCache(pathCache, pathCacheByIndex);
+            _activeAllocatePathCaches.ReleasePathCache(pathCache);
         }
 
         public async ValueTask WriteAsync(Stream stream, BlittableJsonReaderObject json, CancellationToken token = default)

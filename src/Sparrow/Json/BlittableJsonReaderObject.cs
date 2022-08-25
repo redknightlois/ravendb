@@ -6,12 +6,151 @@ using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Sparrow.Binary;
 using Sparrow.Json.Parsing;
 
 namespace Sparrow.Json
 {
+    public class ObjectPathCache
+    {
+        private struct ObjectPathItem
+        {
+            public long Version;
+            public int Index;
+            public uint ValueHash;
+            public uint IndexHash;
+            public StringSegment Path;
+
+            public ObjectPathItem(int version, int index, uint valueHash, uint indexHash, StringSegment path)
+            {
+                Version = version;
+                Index = index;
+                ValueHash = valueHash;
+                IndexHash = indexHash;
+                Path = path;
+            }
+        }
+        
+        private readonly uint _mask;
+
+        private int _internalIndex;
+        private readonly ObjectPathItem[] _hashBuckets;
+        private readonly object[] _valueBuckets;
+        
+        private readonly int[] _byIndex;
+        private readonly int[] _byPathHash;
+
+        private long _version;
+
+        public ObjectPathCache(int size)
+        {
+            _version = 1;
+
+            size = Bits.PowerOf2(size);
+            _byIndex = new int[size];
+            _byPathHash = new int[size];
+            _hashBuckets = new ObjectPathItem[size];
+            _valueBuckets = new object[size];
+            _mask = (uint)( size - 1 );
+            _internalIndex = 0;
+        }
+
+        public bool TryGetValue(in StringSegment name, out object value)
+        {
+            StringSegmentEqualityStructComparer comparer;
+            uint hash = (uint)comparer.GetHashCode(name);
+            uint bucket = hash & _mask;
+
+            int position = _byPathHash[bucket];
+            if (position < 0)
+            {
+                value = null;
+                return false;
+            }
+
+            ref ObjectPathItem item = ref _hashBuckets[position];
+            if (item.ValueHash == hash && item.Version == _version && name.Length == item.Path.Length)
+            {
+                if (comparer.Equals(item.Path, name))
+                {
+                    value = _valueBuckets[position];
+                    return true;
+                }
+            }
+
+            value = null;
+            return false;
+        }
+
+        public bool TryGetValueByIndex(int index, out object value)
+        {
+            uint hash = (uint)Hashing.Mix(index);
+            uint bucket = hash & _mask;
+
+            int position = _byPathHash[bucket];
+            if (position < 0)
+            {
+                value = null;
+                return false;
+            }
+
+            ref ObjectPathItem item = ref _hashBuckets[position];
+            if (item.IndexHash == hash && item.Version == _version && item.Index == index)
+            {
+                value = _valueBuckets[position];
+                return true;
+            }
+
+            value = null;
+            return false;
+        }
+
+        public void AddValue(in StringSegment name, int index, object value)
+        {
+            // We are calculating the new position
+            int position = _internalIndex & (int)_mask;
+
+            // We are storing the translation table at the index hash. 
+            uint indexHash = (uint)Hashing.Mix(index);
+            _byIndex[indexHash & _mask] = position;
+
+            // We are storing the translation table at the name hash. 
+            StringSegmentEqualityStructComparer comparer;
+            uint valueHash = (uint)comparer.GetHashCode(name);
+            _byPathHash[valueHash & _mask] = position;
+
+            ref var item = ref _hashBuckets[position];
+            item.Index = index;
+            item.Path = name;
+            item.IndexHash = indexHash;
+            item.ValueHash = valueHash;
+            item.Version = _version;
+
+            _valueBuckets[position] = value;
+            _internalIndex++;
+        }
+
+        public void Reset()
+        {
+            _version++;
+            _internalIndex = 0;
+
+            _valueBuckets.AsSpan().Fill(null);
+        }
+
+        public void DisposeContent()
+        {
+            int items = Math.Min(_valueBuckets.Length, _internalIndex);
+            for (int i = 0; i < items; i++)
+                (_valueBuckets[i] as IDisposable)?.Dispose();
+
+            Reset();
+        }
+    }
+
     public sealed unsafe class BlittableJsonReaderObject : BlittableJsonReaderBase, IDisposable
     {
         private AllocatedMemoryData _allocatedMemory;
@@ -26,8 +165,7 @@ namespace Sparrow.Json
 
         public DynamicJsonValue Modifications;
 
-        private Dictionary<StringSegment, object> _objectsPathCache;
-        private Dictionary<int, object> _objectsPathCacheByIndex;
+        private ObjectPathCache _objectsPathCache;
 
         public override string ToString()
         {
@@ -660,7 +798,7 @@ namespace Sparrow.Json
             var index = GetPropertyIndex(name);
             if (index == -1)
             {
-                Unsafe.SkipInit(out result);
+                result = null;
                 return false;
             }
 
@@ -688,11 +826,9 @@ namespace Sparrow.Json
             AssertContextNotDisposed();
 
             if (_objectsPathCache == null)
-            {
-                _context.AcquirePathCache(out _objectsPathCache, out _objectsPathCacheByIndex);
-            }
-            _objectsPathCache[name] = result;
-            _objectsPathCacheByIndex[index] = result;
+                _context.AcquirePathCache(out _objectsPathCache);
+
+            _objectsPathCache.AddValue(name, index, result);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -734,7 +870,7 @@ namespace Sparrow.Json
 
             prop.Token = token;
             prop.Name = stringValue;
-            if (_objectsPathCacheByIndex != null && _objectsPathCacheByIndex.TryGetValue(index, out var result))
+            if (_objectsPathCache != null && _objectsPathCache.TryGetValueByIndex(index, out var result))
             {
                 prop.Value = result;
                 return;
@@ -1022,13 +1158,8 @@ namespace Sparrow.Json
 
             if (_objectsPathCache != null)
             {
-                foreach (var property in _objectsPathCache)
-                {
-                    var disposable = property.Value as IDisposable;
-                    disposable?.Dispose();
-                }
-
-                _context.ReleasePathCache(_objectsPathCache, _objectsPathCacheByIndex);
+                _objectsPathCache.DisposeContent();
+                _context.ReleasePathCache(_objectsPathCache);
             }
 
             _buffer.Dispose();
