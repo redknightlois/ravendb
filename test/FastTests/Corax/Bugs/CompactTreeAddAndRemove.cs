@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using FastTests.Voron;
@@ -59,7 +59,54 @@ public class CompactTreeAddAndRemove : StorageTest
             }
         }
     }
-    
+
+    [Fact]
+    public unsafe void DoubleSplitOnAdditionAtLastPage()
+    {
+        using (var wtx = Env.WriteTransaction())
+        {
+            CompactTree tree = wtx.CompactTreeFor("Field");
+            foreach (var terms in ReadTermsFromResource("repro-3.log.gz"))
+            {
+                for (var index = 0; index < terms.Count; index++)
+                {
+                    if (index == 246968)
+                    {
+                        tree.VerifyOrderOfElements();
+                    }
+
+                    var term = terms[index];
+                    var parts = term.Split(' ');
+                    var key = Encoding.UTF8.GetBytes(parts[1]);
+                    switch (parts[0])
+                    {
+                        case "+":
+                            tree.Add(key, long.Parse(parts[2]));
+                            break;
+                        case "-":
+                            tree.TryRemove(key, out var old);
+                            Assert.Equal(long.Parse(parts[2]), old);
+                            break;
+                    }
+
+                    if (index == 246968)
+                    {
+                        tree.VerifyOrderOfElements();
+                    }
+                        
+                }
+            }
+
+            tree.Verify();
+            tree.VerifyOrderOfElements();
+            foreach (long page in tree.AllPages())
+            {
+                var state = new CompactTree.CursorState { Page = wtx.LowLevelTransaction.GetPage(page), };
+                Assert.Equal(state.ComputeFreeSpace(), state.Header->FreeSpace);
+            }
+        }
+    }
+
     private static IEnumerable<List<string>> ReadTermsFromResource(string file)
     {
         var reader = new StreamReader(new GZipStream(typeof(SetAddRemoval).Assembly.GetManifestResourceStream("FastTests.Corax.Bugs." + file), CompressionMode.Decompress));
