@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using FastTests.Voron;
@@ -70,11 +70,6 @@ public class CompactTreeAddAndRemove : StorageTest
             {
                 for (var index = 0; index < terms.Count; index++)
                 {
-                    if (index == 246968)
-                    {
-                        tree.VerifyOrderOfElements();
-                    }
-
                     var term = terms[index];
                     var parts = term.Split(' ');
                     var key = Encoding.UTF8.GetBytes(parts[1]);
@@ -88,12 +83,6 @@ public class CompactTreeAddAndRemove : StorageTest
                             Assert.Equal(long.Parse(parts[2]), old);
                             break;
                     }
-
-                    if (index == 246968)
-                    {
-                        tree.VerifyOrderOfElements();
-                    }
-                        
                 }
             }
 

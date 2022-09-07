@@ -944,8 +944,7 @@ namespace Voron.Data.CompactTrees
             AddToPage(splitKey, page.PageNumber);
 
             // now actually add the value to the location
-            causeForSplit = EncodedKey.Get(causeForSplit, this, _internalCursor._stk[_internalCursor._pos].Header->DictionaryId);
-            causeForSplit = SearchPageAndPushNext(causeForSplit, ref _internalCursor);
+            causeForSplit = FindPageFor(causeForSplit.Key, ref _internalCursor, stopOnEmptyBranchPage: true);
 
             SearchInCurrentPage(causeForSplit, ref _internalCursor._stk[_internalCursor._pos]);
             causeForSplit = AddToPage(causeForSplit, value);
@@ -1236,7 +1235,7 @@ namespace Voron.Data.CompactTrees
             }
         }
 
-        private EncodedKey FindPageFor(ReadOnlySpan<byte> key, ref IteratorCursorState cstate)
+        private EncodedKey FindPageFor(ReadOnlySpan<byte> key, ref IteratorCursorState cstate, bool stopOnEmptyBranchPage = false)
         {
             cstate._pos = -1;
             cstate._len = 0;
@@ -1245,13 +1244,17 @@ namespace Voron.Data.CompactTrees
             ref var state = ref cstate._stk[cstate._pos];
             var encodedKey = EncodedKey.Get(key, this, state.Header->DictionaryId);
 
-            return FindPageFor(ref cstate, ref state, encodedKey);
+            return FindPageFor(ref cstate, ref state, encodedKey, stopOnEmptyBranchPage);
         }
 
-        private EncodedKey FindPageFor(ref IteratorCursorState cstate, ref CursorState state, EncodedKey encodedKey)
+        private EncodedKey FindPageFor(ref IteratorCursorState cstate, ref CursorState state, EncodedKey encodedKey, bool stopOnEmptyBranchPage = false)
         {
             while (state.Header->PageFlags.HasFlag(CompactPageFlags.Branch))
             {
+                if (stopOnEmptyBranchPage && state.Header->NumberOfEntries == 0)
+                {
+                    return EncodedKey.Get(encodedKey, this, state.Header->DictionaryId);
+                }
                 encodedKey = SearchPageAndPushNext(encodedKey, ref cstate);
                 state = ref cstate._stk[cstate._pos];
             }
