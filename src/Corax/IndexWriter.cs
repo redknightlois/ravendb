@@ -24,6 +24,7 @@ using Voron.Data.CompactTrees;
 using Voron.Data.Containers;
 using Voron.Data.Fixed;
 using Voron.Data.Sets;
+using Voron.Exceptions;
 using Voron.Impl;
 
 namespace Corax
@@ -148,8 +149,10 @@ namespace Corax
 
                 if (_sortingNeeded)
                 {
-                    MemoryExtensions.Sort(new Span<long>(_start, _additions));
-                    MemoryExtensions.Sort(new Span<long>(_end - _removals + 1, _removals));
+                    if (_additions > 1)
+                        MemoryExtensions.Sort(new Span<long>(_start, _additions));
+                    if (_removals > 1)
+                        MemoryExtensions.Sort(new Span<long>(_end - _removals + 1, _removals));
                     _sortingNeeded = false;
                 }
                 
@@ -167,10 +170,10 @@ namespace Corax
                         throw new InvalidOperationException("Found duplicate addition & removal item during indexing: " + add);
                 }
 
-                foreach (var reomval in removals)
+                foreach (var removal in removals)
                 {
-                    if (additions.BinarySearch(reomval) >= 0)
-                        throw new InvalidOperationException("Found duplicate addition & removal item during indexing: " + reomval);
+                    if (additions.BinarySearch(removal) >= 0)
+                        throw new InvalidOperationException("Found duplicate addition & removal item during indexing: " + removal);
                 }
             }
 

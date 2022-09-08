@@ -97,15 +97,17 @@ namespace Voron.Data.Containers
 
         public Container(Page page)
         {
-            Debug.Assert(page.IsOverflow == false);
-            Debug.Assert(((ContainerPageHeader*)page.Pointer)->ContainerFlags == ExtendedPageType.Container);
+            Debug.Assert(page.IsOverflow == false, "Container pages cannot be Overflow pages.");
+            if (((ContainerPageHeader*)page.Pointer)->ContainerFlags != ExtendedPageType.Container)
+                throw new VoronErrorException($"The page '{page.PageNumber}' is not a container.");
 
-            _page = page;            
+            _page = page;
         }
 
         public static long Create(LowLevelTransaction llt)
         {
             var page = AllocateContainerPage(llt);
+            Debug.Assert(((ContainerPageHeader*)page.Pointer)->ContainerFlags == ExtendedPageType.Container);
 
             var root = new Container(page);
             root.Header.NumberOfPages = 1;
@@ -624,7 +626,9 @@ namespace Voron.Data.Containers
         private Span<byte> Get(int offset)
         {
             ItemMetadata* metadata = (ItemMetadata*)(_page.Pointer + offset);
-            Debug.Assert(metadata->Size != 0);
+            if (metadata->Size == 0)
+                throw new VoronErrorException($"The metadata found at the offset '{offset}' is empty");
+
             return _page.AsSpan(metadata->Offset, metadata->Size);
         }
 
