@@ -23,6 +23,7 @@
     <EmbeddedResource Include="Blittable\BlittableJsonWriterTests\Jsons\*.json" />
     <None Remove="Corax\Bugs\Corax.Set.Adds.txt" />
     <None Remove="Corax\Bugs\repro-3.log.gz" />
+    <None Remove="Corax\Bugs\repro-4.log.gz" />
     <EmbeddedResource Include="Corax\Bugs\Corax.Set.Adds.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </EmbeddedResource>
@@ -32,6 +33,7 @@
     </EmbeddedResource>
     <None Remove="Corax\Bugs\Terms.log.gz" />
     <EmbeddedResource Include="Corax\Bugs\repro-3.log.gz" />
+    <EmbeddedResource Include="Corax\Bugs\repro-4.log.gz" />
     <EmbeddedResource Include="Corax\Bugs\Terms.log.gz" />
     <None Remove="Corax\Bugs\repro-2.log.gz" />
     <EmbeddedResource Include="Corax\Bugs\repro-2.log.gz" />

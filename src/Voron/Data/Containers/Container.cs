@@ -97,9 +97,16 @@ namespace Voron.Data.Containers
 
         public Container(Page page)
         {
+            if (page.PageNumber == 11 || page.PageNumber == 12)
+                Debugger.Launch();
+
             Debug.Assert(page.IsOverflow == false, "Container pages cannot be Overflow pages.");
             if (((ContainerPageHeader*)page.Pointer)->ContainerFlags != ExtendedPageType.Container)
+            {
+                Debugger.Launch();
                 throw new VoronErrorException($"The page '{page.PageNumber}' is not a container.");
+            }
+                
 
             _page = page;
         }

@@ -1079,6 +1079,8 @@ namespace Corax
         }
 
 
+        private static long _debugTermId;
+
         private void InsertTextualField(Tree fieldsTree, int fieldId, Span<byte> tmpBuf, ref Slice[] sortedTermsBuffer)
         {
             var fieldTree = fieldsTree.CompactTreeFor(_fieldsMapping.GetByFieldId(fieldId).FieldName);
@@ -1107,7 +1109,7 @@ namespace Corax
                 ref var entries = ref CollectionsMarshal.GetValueRefOrNullRef(currentFieldTerms, term);
                 Debug.Assert(Unsafe.IsNullRef(ref entries) == false);
 
-                long termId;
+                long termId = -1;
                 ReadOnlySpan<byte> termsSpan = term.AsSpan();
                 if (fieldTree.TryGetNextValue(termsSpan, out var existing, out var encodedKey) == false)
                 {
@@ -1118,25 +1120,54 @@ namespace Corax
 
                     AddNewTerm(entries, tmpBuf, out termId);
 
+                    if (term.ToString() == "shtml")
+                    {
+                        _debugTermId = termId;
+                        Console.WriteLine($"TermId initialized: {termId}");
+                    }
+
                     dumper.WriteAddition(term, termId);
                     fieldTree.Add(termsSpan, termId, encodedKey);
                     continue;
                 }
 
-                switch (AddEntriesToTerm(tmpBuf, existing, ref entries, out termId))
+                try
                 {
-                    case AddEntriesToTermResult.UpdateTermId:
-                        dumper.WriteAddition(term, termId);
-                        fieldTree.Add(termsSpan, termId, encodedKey);
-                        break;
-                    case AddEntriesToTermResult.RemoveTermId:
-                        if (fieldTree.TryRemove(termsSpan, out var ttt) == false)
-                        {
-                            dumper.WriteRemoval(term, termId);
-                            throw new InvalidOperationException($"Attempt to remove term: '{term}' for field {fieldId}, but it does not exists! This is a bug.");
-                        }
-                        dumper.WriteRemoval(term, ttt);
-                        break;
+                    switch (AddEntriesToTerm(tmpBuf, existing, ref entries, out termId))
+                    {
+                        case AddEntriesToTermResult.UpdateTermId:
+                            dumper.WriteAddition(term, termId);
+                            fieldTree.Add(termsSpan, termId, encodedKey);
+                            if (term.ToString() == "shtml")
+                            {
+                                _debugTermId = termId;
+                                Console.WriteLine($"TermId Updated: {termId}");
+                            }
+                            break;
+                        case AddEntriesToTermResult.RemoveTermId:
+                            if (fieldTree.TryRemove(termsSpan, out var ttt) == false)
+                            {
+                                dumper.WriteRemoval(term, termId);
+                                throw new InvalidOperationException($"Attempt to remove term: '{term}' for field {fieldId}, but it does not exists! This is a bug.");
+                            }
+                            if (term.ToString() == "shtml")
+                            {
+                                _debugTermId = 0;
+                                Console.WriteLine($"TermId Removed: {termId}");
+                            }
+
+                            dumper.WriteRemoval(term, ttt);
+                            break;
+                    }
+                }
+                catch (Exception e)
+                {
+                    fieldTree.Verify();
+                    fieldTree.VerifyOrderOfElements();
+                    fieldTree.Render();
+                    Console.WriteLine($"[{term}]-[{termId}]");
+                    //Debugger.Launch();
+                    throw;
                 }
             }
         }
@@ -1150,15 +1181,42 @@ namespace Corax
 
         private AddEntriesToTermResult AddEntriesToTerm(Span<byte> tmpBuf, long existing, ref EntriesModifications entries, out long termId)
         {
+            AddEntriesToTermResult result;
+
             if ((existing & (long)TermIdMask.Set) != 0)
             {
-                return AddEntriesToTermResultViaLargeSet(ref entries, out termId, existing & Constants.StorageMask.ContainerType);
+                result = AddEntriesToTermResultViaLargeSet(ref entries, out termId, existing & Constants.StorageMask.ContainerType);
+                if (existing == _debugTermId)
+                {
+                    if (result != AddEntriesToTermResult.NothingToDo)
+                        Console.WriteLine($"TermId action: {result} | {termId}");
+                    Console.WriteLine($"Adding To Set: {entries.TotalAdditions}|{entries.TotalRemovals}");
+                }
+
+                return result;
             }
             if ((existing & (long)TermIdMask.Small) != 0)
             {
-                return AddEntriesToTermResultViaSmallSet(tmpBuf, ref entries, out termId, existing & Constants.StorageMask.ContainerType);
+                result = AddEntriesToTermResultViaSmallSet(tmpBuf, ref entries, out termId, existing & Constants.StorageMask.ContainerType);
+                if (existing == _debugTermId)
+                {
+                    if (result != AddEntriesToTermResult.NothingToDo)
+                        Console.WriteLine($"TermId action: {result} | {termId}");
+                    Console.WriteLine($"Adding To Small: {entries.TotalAdditions}|{entries.TotalRemovals}");
+                }
+
+                return result;
             }
-            return AddEntriesToTermResultSingleValue(tmpBuf, existing, ref entries, out termId);
+
+            result = AddEntriesToTermResultSingleValue(tmpBuf, existing, ref entries, out termId);
+            if (existing == _debugTermId)
+            {
+                if (result != AddEntriesToTermResult.NothingToDo)
+                    Console.WriteLine($"TermId action: {result} | {termId}");
+                Console.WriteLine($"Adding To Single: {entries.TotalAdditions}|{entries.TotalRemovals}");
+            }
+
+            return result;
         }
 
         private AddEntriesToTermResult AddEntriesToTermResultViaSmallSet(Span<byte> tmpBuf, ref EntriesModifications entries, out long termId, long id)
@@ -1279,9 +1337,18 @@ namespace Corax
             var llt = Transaction.LowLevelTransaction;
 
             var setSpace = Container.GetMutable(llt, id);
+            if (setSpace.Length < Unsafe.SizeOf<SetState>())
+            {
+                Debugger.Launch();
+                throw new VoronErrorException($"The container with id '{id}' is corrupted.");
+
+            }
+                
+
             ref var setState = ref MemoryMarshal.AsRef<SetState>(setSpace);
             var set = new Set(llt, Slices.Empty, setState);
             entries.Sort();
+
 
             set.Remove(entries.Removals);
             set.Add(entries.Additions);

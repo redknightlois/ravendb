@@ -96,6 +96,86 @@ public class CompactTreeAddAndRemove : StorageTest
         }
     }
 
+    [Fact]
+    public unsafe void AddAndRemoveCheckContainers()
+    {
+        using (var wtx = Env.WriteTransaction())
+        {
+            CompactTree tree = wtx.CompactTreeFor("Field");
+            foreach (var terms in ReadTermsFromResource("repro-4.log.gz"))
+            {
+                for (var index = 0; index < terms.Count; index++)
+                {
+                    var term = terms[index];
+                    var parts = term.Split(' ');
+                    var key = Encoding.UTF8.GetBytes(parts[1]);
+                    switch (parts[0])
+                    {
+                        case "+":
+                            tree.Add(key, long.Parse(parts[2]));
+                            break;
+                        case "-":
+                            tree.TryRemove(key, out var old);
+                            Assert.Equal(long.Parse(parts[2]), old);
+                            break;
+                    }
+
+                    if (parts[1] == "shtml")
+                        Console.WriteLine($"{parts[1]}: {parts[2]}");
+                }
+            }
+            tree.Render();
+
+            tree.TryGetValue("shtml", out var termId);
+            Assert.Equal(21299321, termId);
+
+            tree.Verify();
+            tree.VerifyOrderOfElements();
+            foreach (long page in tree.AllPages())
+            {
+                var state = new CompactTree.CursorState { Page = wtx.LowLevelTransaction.GetPage(page), };
+                Assert.Equal(state.ComputeFreeSpace(), state.Header->FreeSpace);
+            }
+        }
+    }
+
+
+    [Fact]
+    public unsafe void LargeSetArgumentOutOfRange()
+    {
+        using (var wtx = Env.WriteTransaction())
+        {
+            CompactTree tree = wtx.CompactTreeFor("Field");
+            foreach (var terms in ReadTermsFromResource("repro-4.log.gz"))
+            {
+                for (var index = 0; index < terms.Count; index++)
+                {
+                    var term = terms[index];
+                    var parts = term.Split(' ');
+                    var key = Encoding.UTF8.GetBytes(parts[1]);
+                    switch (parts[0])
+                    {
+                        case "+":
+                            tree.Add(key, long.Parse(parts[2]));
+                            break;
+                        case "-":
+                            tree.TryRemove(key, out var old);
+                            Assert.Equal(long.Parse(parts[2]), old);
+                            break;
+                    }
+                }
+            }
+
+            tree.Verify();
+            tree.VerifyOrderOfElements();
+            foreach (long page in tree.AllPages())
+            {
+                var state = new CompactTree.CursorState { Page = wtx.LowLevelTransaction.GetPage(page), };
+                Assert.Equal(state.ComputeFreeSpace(), state.Header->FreeSpace);
+            }
+        }
+    }
+
     private static IEnumerable<List<string>> ReadTermsFromResource(string file)
     {
         var reader = new StreamReader(new GZipStream(typeof(SetAddRemoval).Assembly.GetManifestResourceStream("FastTests.Corax.Bugs." + file), CompressionMode.Decompress));
