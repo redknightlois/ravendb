@@ -1,9 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using Sparrow.Collections;
+﻿using Sparrow.Server.Collections;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -44,7 +39,6 @@ namespace FastTests.Sparrow
                 Assert.Equal(i, iv);
             }
 
-
             var llSet = new WeakSmallSet<long, long>(128);
             for (int i = 0; i < 4; i++)
                 llSet.Add(i, i);
@@ -65,5 +59,67 @@ namespace FastTests.Sparrow
             Assert.Equal(10, v);
         }
 
+        [Fact]
+        public void WeakSetDuplicateItems()
+        {
+            var ilSet = new WeakSmallSet<int, long>();
+            for (int i = 0; i < 8; i++)
+                ilSet.Add(i, i);
+
+            Assert.True(ilSet.TryGetValue(7, out var iv));
+            Assert.Equal(7, iv);
+
+            for (int i = 0; i < 8; i++)
+                ilSet.Add(7, -1);
+
+            for (int i = 0; i < 7; i++)
+            {
+                Assert.True(ilSet.TryGetValue(i, out iv));
+                Assert.Equal(i, iv);
+            }
+
+            Assert.True(ilSet.TryGetValue(7, out iv));
+            Assert.Equal(-1, iv);
+        }
+
+        [Fact]
+        public void WeakSetEviction()
+        {
+            var ilSet = new WeakSmallSet<int, long>();
+            for (int i = 0; i < 8; i++)
+                ilSet.Add(i, i);
+
+            for (int i = 0; i < 7; i++)
+            {
+                Assert.True(ilSet.TryGetValue(i, out var iv));
+                Assert.True(iv >= 0);
+            }
+
+            for (int i = 0; i < 8; i++)
+                ilSet.Add(i + 8, -i);
+
+            for (int i = 0; i < 7; i++)
+            {
+                Assert.True(ilSet.TryGetValue(i + 8, out var iv));
+                Assert.True(iv <= 0);
+            }
+        }
+
+        [Fact]
+        public void WeakMultipleChunks()
+        {
+            var ilSet = new WeakSmallSet<int, long>(16);
+            for (int i = 0; i < 16; i++)
+                ilSet.Add(i, i);
+
+            Assert.True(ilSet.TryGetValue(15, out var iv));
+            Assert.Equal(15, iv);
+
+            for (int i = 0; i < 16; i++)
+            {
+                Assert.True(ilSet.TryGetValue(i, out iv));
+                Assert.Equal(i, iv);
+            }
+        }
     }
 }
