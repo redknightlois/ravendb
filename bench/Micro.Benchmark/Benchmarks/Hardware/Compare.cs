@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Linq;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -34,7 +34,7 @@ namespace Micro.Benchmark.Benchmarks.Hardware
                     {
                         Runtime = CoreRuntime.Core60,
                         Platform = Platform.X64,
-                        Jit = Jit.RyuJit
+                        Jit = Jit.Default
                     }
                 });
 
@@ -55,7 +55,8 @@ namespace Micro.Benchmark.Benchmarks.Hardware
         //[Params(7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256, 1024, 2048, 4096)]
         //[Params(15, 31, 39, 48, 50, 63, 90, 117, 127, 190, 255, 256)]
         //[Params(7, 8, 16, 31, 32, 64, 127, 128, 255, 256, 1024, 2048, 4096, 4096 * 64, 4096 * 256, 4096 * 1024)]
-        [Params(16, 32, 256, 1024, 2048, 4096, 4096 * 64, 4096 * 256, 4096 * 1024)]
+        //[Params(16, 32, 256, 1024, 2048, 4096, 4096 * 64, 4096 * 256, 4096 * 1024)]
+        [Params( 2047, 4095, 4096 * 2 - 1, 4096 * 4 - 1, 4096 * 8 - 1)]
         //[Params(4096 * 256, 4096 * 1024)]
         public int Length { get; set; }
 
