@@ -17,7 +17,7 @@ namespace Corax.Queries
         where TComparer : struct, IMatchComparer
     {
         private readonly IndexSearcher _searcher;
-        private readonly IQueryMatch _inner;        
+        private IQueryMatch _inner;        
         private readonly TComparer _comparer;
         private readonly int _take;
         private readonly bool _isScoreComparer;
@@ -220,8 +220,10 @@ namespace Corax.Queries
             return totalMatches;
         }
 
-        [SkipLocalsInit]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static int counter = 0;
+
+        //[SkipLocalsInit]
+        [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         private static int Fill<TOut>(ref SortingMatch<TInner, TComparer> match, Span<long> matches) 
             where TOut : struct
         {
@@ -231,12 +233,27 @@ namespace Corax.Queries
             //            correct. 
             Debug.Assert(match._take <= matches.Length);
 
+            if (match._inner == null || match._searcher == null || match._searcher.Allocator == null)
+            {
+                throw new ArgumentException();
+            }
+            Console.WriteLine($"{counter++}");
+
             int totalMatches = match._inner.Fill(matches);
+
+            if (match._inner == null || match._searcher == null || match._searcher.Allocator == null)
+            {
+                throw new ArgumentException("This cannot happen. We tested it already.");
+            }
+
             if (totalMatches == 0)
                 return 0;
-            
+
+
+
             int matchesArraySize = sizeof(long) * matches.Length;
             int itemArraySize = 2 * Unsafe.SizeOf<MatchComparer<TComparer, TOut>.Item>() * matches.Length;
+
             using var _ = match._searcher.Allocator.Allocate(itemArraySize + matchesArraySize, out var bufferHolder);
 
             var itemKeys = MemoryMarshal.Cast<byte, MatchComparer<TComparer, TOut>.Item>(bufferHolder.ToSpan().Slice(0, itemArraySize));

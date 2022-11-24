@@ -74,12 +74,12 @@ namespace VxSort
             {                
                 int* il = (int*)left;
                 int* ir = (int*)right;
-                uint length = (uint)(ir - il);
+                uint length = (uint)(ir - il) + 1;
 
                 var config = default(Avx2VectorizedSort.Int32Config);
                 if (length < config.SmallSortThresholdElements)
                 {
-                    BitonicSort.Sort(il, (int)length + 1);
+                    BitonicSort.Sort(il, (int)length);
                     return;
                 }
 
@@ -92,12 +92,12 @@ namespace VxSort
             {
                 long* il = (long*)left;
                 long* ir = (long*)right;
-                int length = (int)(ir - il);
+                int length = (int)(ir - il) + 1;
 
                 var config = default(Avx2VectorizedSort.Int64Config);
                 if (length < config.SmallSortThresholdElements)
                 {
-                    BitonicSort.Sort(il, (int)length + 1);
+                    BitonicSort.Sort(il, (int)length);
                     return;
                 }
 
