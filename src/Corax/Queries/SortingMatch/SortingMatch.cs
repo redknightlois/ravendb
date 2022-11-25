@@ -1,12 +1,13 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using Corax.Utils;
 using Corax.Utils.Spatial;
 using Sparrow;
+using Sparrow.Server.Utils;
 using static Corax.Queries.SortingMatch;
 
 namespace Corax.Queries
@@ -220,10 +221,8 @@ namespace Corax.Queries
             return totalMatches;
         }
 
-        private static int counter = 0;
-
-        //[SkipLocalsInit]
-        [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
+        [SkipLocalsInit]
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static int Fill<TOut>(ref SortingMatch<TInner, TComparer> match, Span<long> matches) 
             where TOut : struct
         {
@@ -233,28 +232,14 @@ namespace Corax.Queries
             //            correct. 
             Debug.Assert(match._take <= matches.Length);
 
-            if (match._inner == null || match._searcher == null || match._searcher.Allocator == null)
-            {
-                throw new ArgumentException();
-            }
-            Console.WriteLine($"{counter++}");
-
             int totalMatches = match._inner.Fill(matches);
-
-            if (match._inner == null || match._searcher == null || match._searcher.Allocator == null)
-            {
-                throw new ArgumentException("This cannot happen. We tested it already.");
-            }
-
             if (totalMatches == 0)
                 return 0;
-
-
 
             int matchesArraySize = sizeof(long) * matches.Length;
             int itemArraySize = 2 * Unsafe.SizeOf<MatchComparer<TComparer, TOut>.Item>() * matches.Length;
 
-            using var _ = match._searcher.Allocator.Allocate(itemArraySize + matchesArraySize, out var bufferHolder);
+            using var _ = match._searcher.Allocator.AllocateDirect(itemArraySize + matchesArraySize, out var bufferHolder);
 
             var itemKeys = MemoryMarshal.Cast<byte, MatchComparer<TComparer, TOut>.Item>(bufferHolder.ToSpan().Slice(0, itemArraySize));
             Debug.Assert(itemKeys.Length == 2 * matches.Length);
@@ -265,7 +250,7 @@ namespace Corax.Queries
             var bKeys = itemKeys.Slice(matches.Length, matches.Length);
             Debug.Assert(bKeys.Length == matches.Length);
 
-            int take = match._take <= 0 ? matches.Length : Math.Min(matches.Length, match._take);
+            int take = match._take <= 0 ? totalMatches : Math.Min(totalMatches, match._take);
 
             match.TotalResults += totalMatches;
 

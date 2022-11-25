@@ -74,36 +74,38 @@ namespace VxSort
             {                
                 int* il = (int*)left;
                 int* ir = (int*)right;
-                uint length = (uint)(ir - il) + 1;
+                uint length = (uint)(ir - il);
 
                 var config = default(Avx2VectorizedSort.Int32Config);
+                Debug.Assert(config.Unroll >= 1);
+                Debug.Assert(config.Unroll <= 12);
+
                 if (length < config.SmallSortThresholdElements)
-                {
                     BitonicSort.Sort(il, (int)length);
-                    return;
-                }
 
                 var depthLimit = 2 * FloorLog2PlusOne(length);
-                var sorter = new Avx2VectorizedSort(il, ir);
-                sorter.sort(il, ir, 0, 0, REALIGN_BOTH, depthLimit);
+                var buffer = stackalloc byte[config.PartitionTempSizeInBytes];
+                var sorter = new Avx2VectorizedSort(il, ir, buffer, config.PartitionTempSizeInBytes);
+                sorter.sort(il, ir, int.MinValue, int.MaxValue, REALIGN_BOTH, depthLimit);
                 return;
             }
             if (typeof(T) == typeof(long))
             {
                 long* il = (long*)left;
                 long* ir = (long*)right;
-                int length = (int)(ir - il) + 1;
+                int length = (int)(ir - il);
 
                 var config = default(Avx2VectorizedSort.Int64Config);
+                Debug.Assert(config.Unroll >= 1);
+                Debug.Assert(config.Unroll <= 12);
+
                 if (length < config.SmallSortThresholdElements)
-                {
                     BitonicSort.Sort(il, (int)length);
-                    return;
-                }
 
                 var depthLimit = 2 * FloorLog2PlusOne((uint)length);
-                var sorter = new Avx2VectorizedSort(il, ir);
-                sorter.sort(il, ir, int.MinValue, int.MaxValue, REALIGN_BOTH, depthLimit);
+                var buffer = stackalloc byte[config.PartitionTempSizeInBytes];
+                var sorter = new Avx2VectorizedSort(il, ir, buffer, config.PartitionTempSizeInBytes);
+                sorter.sort(il, ir, long.MinValue, long.MaxValue, REALIGN_BOTH, depthLimit);
                 return;
             }
             throw new NotSupportedException();

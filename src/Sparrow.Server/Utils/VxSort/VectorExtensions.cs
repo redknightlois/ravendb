@@ -13,13 +13,13 @@ namespace VxSort
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         public static Vector256<double> i2d<W>(Vector256<W> v) where W : unmanaged
         {
-            return Vector256.AsDouble(v);
+            return v.AsDouble();
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         public static Vector256<float> i2s<W>(Vector256<W> v) where W : unmanaged
         {
-            return Vector256.AsSingle(v);
+            return v.AsSingle();
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
@@ -27,19 +27,19 @@ namespace VxSort
         {
             if (typeof(W) == typeof(int))
             {
-                return (Vector256<W>)(object)Vector256.AsInt32(v);
+                return (Vector256<W>)(object)v.AsInt32();
             }
             else if (typeof(W) == typeof(long))
             {
-                return (Vector256<W>)(object)Vector256.AsInt64(v);
+                return (Vector256<W>)(object)v.AsInt64();
             }
             else if (typeof(W) == typeof(uint))
             {
-                return (Vector256<W>)(object)Vector256.AsUInt32(v);
+                return (Vector256<W>)(object)v.AsUInt32();
             }
             else if (typeof(W) == typeof(ulong))
             {
-                return (Vector256<W>)(object)Vector256.AsUInt64(v);
+                return (Vector256<W>)(object)v.AsUInt64();
             }
 
             throw new NotSupportedException();
@@ -50,19 +50,19 @@ namespace VxSort
         {
             if (typeof(W) == typeof(int))
             {
-                return (Vector256<W>)(object)Vector256.AsInt32(v);
+                return (Vector256<W>)(object)v.AsInt32();
             }
             else if (typeof(W) == typeof(long))
             {
-                return (Vector256<W>)(object)Vector256.AsInt64(v);
+                return (Vector256<W>)(object)v.AsInt64();
             }
             else if (typeof(W) == typeof(uint))
             {
-                return (Vector256<W>)(object)Vector256.AsUInt32(v);
+                return (Vector256<W>)(object)v.AsUInt32();
             }
             else if (typeof(W) == typeof(ulong))
             {
-                return (Vector256<W>)(object)Vector256.AsUInt64(v);
+                return (Vector256<W>)(object)v.AsUInt64();
             }
 
             throw new NotSupportedException();
@@ -71,13 +71,13 @@ namespace VxSort
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         public static Vector256<double> s2d(Vector256<float> v)
         {
-            return Vector256.AsDouble(v);
+            return v.AsDouble();
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         public static Vector256<float> d2s(Vector256<double> v)
         {
-            return Vector256.AsSingle(v);
+            return v.AsSingle();
         }
     }
 }

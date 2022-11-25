@@ -1,16 +1,16 @@
 ﻿using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
-using Sparrow;
+using VxSort;
 
-namespace Corax.Utils
+namespace Sparrow.Server.Utils
 {
     internal static class Sorting
     {
         public static int SortAndRemoveDuplicates<T, W>(Span<T> values, Span<W> items)
             where T : unmanaged, IBinaryNumber<T>
         {
-            MemoryExtensions.Sort(values, items);
+            values.Sort(items);
 
             // We need to fill in the gaps left by removing deduplication process.
             // If there are no duplicated the writes at the architecture level will execute
@@ -49,7 +49,7 @@ namespace Corax.Utils
             where T : unmanaged, IBinaryNumber<T>
             where W : unmanaged
         {
-            MemoryExtensions.Sort(new Span<T>(bufferBasePtr, count), new Span<W>(itemsBasePtr, count));
+            new Span<T>(bufferBasePtr, count).Sort(new Span<W>(itemsBasePtr, count));
 
             // We need to fill in the gaps left by removing deduplication process.
             // If there are no duplicated the writes at the architecture level will execute
@@ -75,7 +75,7 @@ namespace Corax.Utils
         public static unsafe int SortAndRemoveDuplicates<T>(T* bufferBasePtr, int count)
             where T : unmanaged, IBinaryNumber<T>
         {
-            VxSort.Sort.Run(bufferBasePtr, count);
+            Sort.Run(bufferBasePtr, count);
 
             // We need to fill in the gaps left by removing deduplication process.
             // If there are no duplicated the writes at the architecture level will execute
