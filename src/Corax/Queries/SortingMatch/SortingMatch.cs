@@ -127,7 +127,7 @@ namespace Corax.Queries
 
 
         [SkipLocalsInit]
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         private static int FillScore(ref SortingMatch<TInner, TComparer> match, Span<long> matches)
         {
             // Important: If you are going to request a massive take like 20K you need to pass at least a 20K size buffer to work with.
@@ -239,7 +239,7 @@ namespace Corax.Queries
             int matchesArraySize = sizeof(long) * matches.Length;
             int itemArraySize = 2 * Unsafe.SizeOf<MatchComparer<TComparer, TOut>.Item>() * matches.Length;
 
-            using var _ = match._searcher.Allocator.AllocateDirect(itemArraySize + matchesArraySize, out var bufferHolder);
+            using var _ = match._searcher.Allocator.Allocate(itemArraySize + matchesArraySize, out var bufferHolder);
 
             var itemKeys = MemoryMarshal.Cast<byte, MatchComparer<TComparer, TOut>.Item>(bufferHolder.ToSpan().Slice(0, itemArraySize));
             Debug.Assert(itemKeys.Length == 2 * matches.Length);

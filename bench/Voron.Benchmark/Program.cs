@@ -21,6 +21,8 @@ namespace Voron.Benchmark
             var benchmark = new OrderByBenchmark();
             {
                 benchmark.BufferSize = 1024;
+
+                Console.WriteLine("Starting data creation.");
                 benchmark.Setup();
 
                 using var bsc = new ByteStringContext(SharedMultipleUseFlag.None);
@@ -32,7 +34,8 @@ namespace Voron.Benchmark
                 var _ids = new long[benchmark.BufferSize];
                 var indexSearcher = new IndexSearcher(benchmark.Env);
 
-                for (int i = 0; i < 10000000; i++)
+                Console.WriteLine("Starting querying.");
+                for (int i = 0; i < 1000; i++)
                 {
                     var typeTerm = indexSearcher.TermQuery(typeSlice, "Dog");
                     var ageTerm = indexSearcher.StartWithQuery(ageSlice, ageValueSlice);

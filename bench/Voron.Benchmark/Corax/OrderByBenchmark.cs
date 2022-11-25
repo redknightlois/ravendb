@@ -155,7 +155,7 @@ namespace Voron.Benchmark.Corax
                     }
                 }
 
-                for (int i = 0; i < 100; i++)
+                for (int i = 0; i < 100_000; i++)
                 {
                     var entryWriter = new IndexEntryWriter(bsc, fields);
                     entryWriter.Write(0, Encoding.UTF8.GetBytes("Dog #" + i));

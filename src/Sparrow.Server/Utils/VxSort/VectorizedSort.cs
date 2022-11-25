@@ -74,18 +74,21 @@ namespace VxSort
             {                
                 int* il = (int*)left;
                 int* ir = (int*)right;
-                uint length = (uint)(ir - il);
+                uint length = (uint)(ir - il) + 1;
 
-                var config = default(Avx2VectorizedSort.Int32Config);
-                Debug.Assert(config.Unroll >= 1);
-                Debug.Assert(config.Unroll <= 12);
+                Debug.Assert(Avx2VectorizedSort.Int32Config.Unroll >= 1);
+                Debug.Assert(Avx2VectorizedSort.Int32Config.Unroll <= 12);
 
-                if (length < config.SmallSortThresholdElements)
+                if (length < Avx2VectorizedSort.Int32Config.SmallSortThresholdElements) 
+                {
                     BitonicSort.Sort(il, (int)length);
+                    return;
+                }
+                    
 
                 var depthLimit = 2 * FloorLog2PlusOne(length);
-                var buffer = stackalloc byte[config.PartitionTempSizeInBytes];
-                var sorter = new Avx2VectorizedSort(il, ir, buffer, config.PartitionTempSizeInBytes);
+                var buffer = stackalloc byte[Avx2VectorizedSort.Int32Config.PartitionTempSizeInBytes];
+                var sorter = new Avx2VectorizedSort(il, ir, buffer, Avx2VectorizedSort.Int32Config.PartitionTempSizeInBytes);
                 sorter.sort(il, ir, int.MinValue, int.MaxValue, REALIGN_BOTH, depthLimit);
                 return;
             }
@@ -93,18 +96,20 @@ namespace VxSort
             {
                 long* il = (long*)left;
                 long* ir = (long*)right;
-                int length = (int)(ir - il);
+                int length = (int)(ir - il) + 1;
 
-                var config = default(Avx2VectorizedSort.Int64Config);
-                Debug.Assert(config.Unroll >= 1);
-                Debug.Assert(config.Unroll <= 12);
+                Debug.Assert(Avx2VectorizedSort.Int64Config.Unroll >= 1);
+                Debug.Assert(Avx2VectorizedSort.Int64Config.Unroll <= 12);
 
-                if (length < config.SmallSortThresholdElements)
+                if (length < Avx2VectorizedSort.Int64Config.SmallSortThresholdElements) 
+                {
                     BitonicSort.Sort(il, (int)length);
+                    return;
+                }
 
                 var depthLimit = 2 * FloorLog2PlusOne((uint)length);
-                var buffer = stackalloc byte[config.PartitionTempSizeInBytes];
-                var sorter = new Avx2VectorizedSort(il, ir, buffer, config.PartitionTempSizeInBytes);
+                var buffer = stackalloc byte[Avx2VectorizedSort.Int64Config.PartitionTempSizeInBytes];
+                var sorter = new Avx2VectorizedSort(il, ir, buffer, Avx2VectorizedSort.Int64Config.PartitionTempSizeInBytes);
                 sorter.sort(il, ir, long.MinValue, long.MaxValue, REALIGN_BOTH, depthLimit);
                 return;
             }
