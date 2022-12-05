@@ -41,7 +41,7 @@ public sealed unsafe partial class IndexSearcher : IDisposable
 
     public long NumberOfEntries => _numberOfEntries ??= _metadataTree?.ReadInt64(Constants.IndexWriter.NumberOfEntriesSlice) ?? 0;
 
-    internal ByteStringContext Allocator => _transaction.Allocator;
+    public ByteStringContext Allocator => _transaction.Allocator;
 
     internal Transaction Transaction => _transaction;
 
@@ -186,7 +186,7 @@ public sealed unsafe partial class IndexSearcher : IDisposable
         }
 
         analyzer ??= binding.FieldIndexingMode is FieldIndexingMode.Search 
-            ? Analyzer.DefaultLowercaseAnalyzer // lowercase only when search is used in non-full-text-search match 
+            ? Analyzer.CreateLowercaseAnalyzer(_transaction.Allocator) // lowercase only when search is used in non-full-text-search match 
             : binding.Analyzer!;
         
         return AnalyzeTerm(analyzer, originalTerm, fieldId, out value);

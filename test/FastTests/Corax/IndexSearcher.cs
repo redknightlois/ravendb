@@ -1388,7 +1388,7 @@ namespace FastTests.Corax
             Slice.From(ctx, "Id", ByteStringType.Immutable, out Slice idSlice);
             Slice.From(ctx, "Content", ByteStringType.Immutable, out Slice contentSlice);
 
-            var analyzer = Analyzer.Create<KeywordTokenizer, LowerCaseTransformer>();
+            var analyzer = Analyzer.Create<KeywordTokenizer, LowerCaseTransformer>(ctx);
 
             using var bsc = new ByteStringContext(SharedMultipleUseFlag.None);
             IndexEntries(bsc, entriesToIndex, CreateKnownFields(bsc, analyzer));
@@ -1465,7 +1465,7 @@ namespace FastTests.Corax
             Slice.From(ctx, "Id", ByteStringType.Immutable, out Slice idSlice);
             Slice.From(ctx, "Content", ByteStringType.Immutable, out Slice contentSlice);
 
-            var analyzer = Analyzer.Create<WhitespaceTokenizer, LowerCaseTransformer>();
+            var analyzer = Analyzer.Create<WhitespaceTokenizer, LowerCaseTransformer>(ctx);
             using var builder = IndexFieldsMappingBuilder.CreateForWriter(false)
                 .AddBinding(IdIndex, idSlice, analyzer)
                 .AddBinding(ContentIndex, contentSlice, analyzer);
@@ -1523,7 +1523,7 @@ namespace FastTests.Corax
             Slice.From(ctx, "Id", ByteStringType.Immutable, out Slice idSlice);
             Slice.From(ctx, "Content", ByteStringType.Immutable, out Slice contentSlice);
 
-            var analyzer = Analyzer.Create<WhitespaceTokenizer, LowerCaseTransformer>();
+            var analyzer = Analyzer.Create<WhitespaceTokenizer, LowerCaseTransformer>(ctx);
             using var builder = IndexFieldsMappingBuilder.CreateForWriter(false)
                 .AddBinding(IdIndex, idSlice, analyzer)
                 .AddBinding(ContentIndex, contentSlice, analyzer);

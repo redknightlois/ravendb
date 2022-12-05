@@ -43,7 +43,7 @@ public partial class IndexSearcher
             ? _fieldMapping.SearchAnalyzer(field) 
             : indexFieldBinding?.Analyzer;
         
-        var wildcardAnalyzer = Analyzer.Create<WhitespaceTokenizer, ExactTransformer>();
+        var wildcardAnalyzer = Analyzer.Create<WhitespaceTokenizer, ExactTransformer>(this.Allocator);
 
         searchAnalyzer.GetOutputBuffersSize(term.Length, out var outputSize, out var tokenSize);
         wildcardAnalyzer.GetOutputBuffersSize(term.Length, out var wildcardSize, out var wildcardTokenSize);
