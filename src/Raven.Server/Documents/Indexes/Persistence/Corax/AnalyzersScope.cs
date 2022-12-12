@@ -8,8 +8,6 @@ using Corax.Pipeline;
 using Sparrow.Server;
 using Voron;
 
-namespace Raven.Server.Documents.Indexes.Persistence.Corax;
-
 internal unsafe class AnalyzersScope : IDisposable
 {
     private readonly IndexFieldsMapping _knownFields;
@@ -96,6 +94,7 @@ internal unsafe class AnalyzersScope : IDisposable
         {
             if (_hasDynamics is false)
                 ThrowWhenDynamicFieldNotFound(fieldName);
+
             var mode = _indexSearcher.GetFieldIndexingModeForDynamic(fieldName);
             
             analyzer = mode switch
