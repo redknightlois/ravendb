@@ -294,14 +294,13 @@ public class CoraxIndexFacetedReadOperation : IndexFacetReadOperationBase
          void InsertTerm(ReadOnlySpan<byte> source, ref IndexEntryReader entryReader)
          {
              var nameAsSlice = GetFieldNameAsSlice(result.Value.AggregateBy);
-             analyzersScope.Execute(nameAsSlice, source, out var buffer, out var tokens);
+             using var _ = analyzersScope.Execute(nameAsSlice, source, out var buffer, out var tokens);
 
              foreach (var tokenOutput in tokens)
              {
                  token.ThrowIfCancellationRequested();
                  var term = buffer.Slice(tokenOutput.Offset, (int)tokenOutput.Length);
                  var encodedTerm = Encodings.Utf8.GetString(term);
-
 
                  if (facetValues.TryGetValue(encodedTerm, out var collectionOfFacetValues) == false)
                  {
