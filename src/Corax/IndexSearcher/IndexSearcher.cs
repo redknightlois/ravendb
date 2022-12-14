@@ -1,23 +1,21 @@
 using System;
-using System.Buffers;
-using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
-using System.Text;
-using Sparrow.Server.Compression;
-using Voron;
-using Voron.Impl;
-using Voron.Data.Containers;
-using Sparrow;
 using System.Runtime.Intrinsics.X86;
+using System.Text;
+using Corax.Analyzers;
 using Corax.Mappings;
 using Corax.Pipeline;
 using Corax.Queries;
+using Sparrow;
 using Sparrow.Compression;
 using Sparrow.Server;
+using Voron;
 using Voron.Data.BTrees;
+using Voron.Data.Containers;
 using Voron.Data.Fixed;
+using Voron.Impl;
 
 namespace Corax;
 
@@ -164,32 +162,41 @@ public sealed unsafe partial class IndexSearcher : IDisposable
             return ApplyAnalyzer(originalTermSliced, fieldId, out value);
         }
     }
-    
+
+    private readonly Dictionary<int, AnalyzerScope> _analyzerScopes = new Dictionary<int, AnalyzerScope>();
+
     internal ByteStringContext<ByteStringMemoryCache>.InternalScope ApplyAnalyzer(ReadOnlySpan<byte> originalTerm, int fieldId, out Slice value)
     {
-        Analyzer analyzer = null;
-        IndexFieldBinding binding = null;
-        
-        if (fieldId == Constants.IndexWriter.DynamicField)
+        if (!_analyzerScopes.TryGetValue(fieldId, out var scope))
         {
-            analyzer = _fieldMapping.DefaultAnalyzer;
-        }
-        else if (_fieldMapping.TryGetByFieldId(fieldId, out binding) == false
-            || binding.FieldIndexingMode is FieldIndexingMode.Exact
-            || binding.Analyzer is null)
-        {
-            var disposable = Allocator.AllocateDirect(originalTerm.Length, ByteStringType.Immutable, out var originalTermSliced);
-            originalTerm.CopyTo(new Span<byte>(originalTermSliced._pointer->Ptr, originalTerm.Length));
+            Analyzer analyzer = null;
+            IndexFieldBinding binding = null;
 
-            value = new Slice(originalTermSliced);
-            return disposable;
+            if (fieldId == Constants.IndexWriter.DynamicField)
+            {
+                analyzer = _fieldMapping.DefaultAnalyzer;
+            }
+            else if (_fieldMapping.TryGetByFieldId(fieldId, out binding) == false
+                     || binding.FieldIndexingMode is FieldIndexingMode.Exact
+                     || binding.Analyzer is null)
+            {
+                var disposable = Allocator.AllocateDirect(originalTerm.Length, ByteStringType.Immutable, out var originalTermSliced);
+                originalTerm.CopyTo(new Span<byte>(originalTermSliced._pointer->Ptr, originalTerm.Length));
+
+                value = new Slice(originalTermSliced);
+                return disposable;
+            }
+
+            analyzer ??= binding.FieldIndexingMode is FieldIndexingMode.Search
+                ? Analyzer.CreateLowercaseAnalyzer(_transaction.Allocator) // lowercase only when search is used in non-full-text-search match 
+                : binding.Analyzer!;
+
+            scope = new AnalyzerScope(this, analyzer);
+            _analyzerScopes[fieldId] = scope;
         }
 
-        analyzer ??= binding.FieldIndexingMode is FieldIndexingMode.Search 
-            ? Analyzer.CreateLowercaseAnalyzer(_transaction.Allocator) // lowercase only when search is used in non-full-text-search match 
-            : binding.Analyzer!;
-        
-        return AnalyzeTerm(analyzer, originalTerm, fieldId, out value);
+        scope.Execute(originalTerm, out var buffer, out var tokens);
+        return Slice.From(this.Allocator, buffer, out value);
     }
 
     [SkipLocalsInit]
@@ -198,28 +205,7 @@ public sealed unsafe partial class IndexSearcher : IDisposable
         return ApplyAnalyzer(originalTerm.AsSpan(), fieldId, out value);
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private ByteStringContext<ByteStringMemoryCache>.InternalScope AnalyzeTerm(Analyzer analyzer, ReadOnlySpan<byte> originalTerm, int fieldId, out Slice value)
-    {
-        analyzer.GetOutputBuffersSize(originalTerm.Length, out int outputSize, out int tokenSize);
 
-        Debug.Assert(outputSize < 1024 * 1024, "Term size is too big for analyzer.");
-        Debug.Assert(Unsafe.SizeOf<Token>() * tokenSize < 1024 * 1024, "Analyzer wants to create too much tokens.");
-
-        var buffer = Analyzer.BufferPool.Rent(outputSize);
-        var tokens = Analyzer.TokensPool.Rent(tokenSize);
-
-        Span<byte> bufferSpan = buffer.AsSpan();
-        Span<Token> tokensSpan = tokens.AsSpan();
-        analyzer.Execute(originalTerm, ref bufferSpan, ref tokensSpan);
-        Debug.Assert(tokensSpan.Length == 1, $"{nameof(ApplyAnalyzer)} should create only 1 token as a result.");
-        var disposable = Slice.From(Allocator, bufferSpan, ByteStringType.Immutable, out value);
-
-        Analyzer.TokensPool.Return(tokens);
-        Analyzer.BufferPool.Return(buffer);
-
-        return disposable;
-    }
 
     public AllEntriesMatch AllEntries()
     {

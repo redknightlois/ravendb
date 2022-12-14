@@ -96,7 +96,7 @@ namespace Corax.Analyzers
             var scope = _indexSearcher.Allocator.AllocateDirect(tokenSpace.Length * sizeof(Token) + wordSpace.Length, out var outputMemory);
 
             var outputBuffer = new Span<byte>(outputMemory.Ptr, wordSpace.Length);
-            var outputTokens = new Span<Token>(outputMemory.Ptr + outputBuffer.Length, tokenSpace.Length);
+            var outputTokens = new Span<Token>(outputMemory.Ptr + wordSpace.Length, tokenSpace.Length);
 
             wordSpace.CopyTo(outputBuffer);
             tokenSpace.CopyTo(outputTokens);
