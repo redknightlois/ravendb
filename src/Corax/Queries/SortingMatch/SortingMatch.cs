@@ -6,7 +6,9 @@ using System.Runtime.InteropServices;
 using Corax.Mappings;
 using Corax.Utils;
 using Corax.Utils.Spatial;
+using Newtonsoft.Json.Linq;
 using Sparrow;
+using Sparrow.Server;
 using static Corax.Queries.SortingMatch;
 
 namespace Corax.Queries
@@ -22,6 +24,14 @@ namespace Corax.Queries
         private readonly int _take;
         private readonly bool _isScoreComparer;
         private readonly delegate*<ref SortingMatch<TInner, TComparer>, Span<long>, int> _fillFunc;
+
+        private const int NotStarted = -1;
+        private int _currentIdx;
+
+        internal long* _buffer;
+        internal int _bufferSize;
+        internal IDisposable _bufferHandler;
+
         public long TotalResults;
 
         public SortingMatch(IndexSearcher searcher, in TInner inner, in TComparer comparer, int take = -1)
@@ -31,11 +41,13 @@ namespace Corax.Queries
             _take = take;
             _comparer = comparer;
             _isScoreComparer = typeof(TComparer) == typeof(BoostingComparer);
+            _currentIdx = NotStarted;
+
             TotalResults = 0;
 
             if (typeof(TComparer) == typeof(BoostingComparer))
             {
-                _fillFunc = &FillScore;
+                _fillFunc = &FillNoPagingScore;
             }
             else
             {
@@ -45,7 +57,7 @@ namespace Corax.Queries
                     MatchCompareFieldType.Integer => &Fill<NumericalItem<long>>,
                     MatchCompareFieldType.Floating => &Fill<NumericalItem<double>>,
                     MatchCompareFieldType.Spatial => &Fill<NumericalItem<double>>,
-                    MatchCompareFieldType.Score => &FillScore,
+                    MatchCompareFieldType.Score => &FillNoPagingScore,
                     _ => throw new ArgumentOutOfRangeException(_comparer.FieldType.ToString())
                 };
             }
@@ -124,10 +136,32 @@ namespace Corax.Queries
             return false;
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void UnlikelyGrowBuffer(int currentlyUsed)
+        {
+            // Calculate the new size. 
+            int size = (int)(currentlyUsed * (currentlyUsed > 16 * Voron.Global.Constants.Size.Megabyte ? 1.5 : 2));
+
+            // Allocate the new buffer
+            var bufferHandler = _searcher.Allocator.Allocate(size * sizeof(long), out var buffer);
+
+            // In case there exist already buffers in place, we copy the content.
+            if (_buffer != null)
+            {
+                // Ensure we copy the content and then switch the buffers. 
+                new Span<long>(_buffer, currentlyUsed).CopyTo(new Span<long>(buffer.Ptr, size));
+                _bufferHandler.Dispose();
+            }
+
+            _bufferSize = size;
+            _buffer = (long*)buffer.Ptr;
+            _bufferHandler = bufferHandler;
+        }
+
 
         [SkipLocalsInit]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static int FillScore(ref SortingMatch<TInner, TComparer> match, Span<long> matches)
+        private static int FillNoPagingScore(ref SortingMatch<TInner, TComparer> match, Span<long> matches)
         {
             // Important: If you are going to request a massive take like 20K you need to pass at least a 20K size buffer to work with.
             //            The rationale for such behavior is that sorting has to find among the candidates the order between elements,
@@ -247,9 +281,169 @@ namespace Corax.Queries
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static int ExecuteSorting<TOut>(ref SortingMatch<TInner, TComparer> match, Span<long> matches)
+            where TOut : struct
+        {
+            // PERF: This method assumes that we need to perform sorting of the whole set (even if we have a take statement).
+            // However, there is space to improve this further doing iterative sorting with element discarding in cases where
+            // take statements requires us to remove lots of elements. While we are not going to perform this optimization yet
+            // sorting is a costly primitive that if we can avoid it, would provide us a great opportunity for improvement. 
+
+            int totalMatches = (int)match.TotalResults;
+
+            int itemArraySize = Unsafe.SizeOf<MatchComparer<TComparer, TOut>.Item>() * totalMatches;
+            using var _ = match._searcher.Allocator.Allocate(itemArraySize, out var bufferHolder);
+
+            var itemKeys = MemoryMarshal.Cast<byte, MatchComparer<TComparer, TOut>.Item>(bufferHolder.ToSpan().Slice(0, itemArraySize));
+            Debug.Assert(itemKeys.Length == totalMatches);
+
+            var searcher = match._searcher;
+            var field = match._comparer.Field;
+            var comparer = new MatchComparer<TComparer, TOut>(match._comparer);
+            for (int i = 0; i < totalMatches; i++)
+            {
+                var read = Get(searcher, field, matches[i], out itemKeys[i].Value, match._comparer);
+                itemKeys[i].Key = read ? matches[i] : -matches[i];
+            }
+
+            // We sort the the set
+            var sorter = new Sorter<MatchComparer<TComparer, TOut>.Item, long, MatchComparer<TComparer, TOut>>(comparer);
+            sorter.Sort(itemKeys, matches[0..totalMatches]);
+
+            // We have a take statement so we are only going to care about the highest priority elements. 
+            if (match._take > 0)
+                totalMatches = Math.Min(totalMatches, match._take);
+
+            return totalMatches;
+        }
+
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static int Fill<TOut>(ref SortingMatch<TInner, TComparer> match, Span<long> matches)
+            where TOut : struct
+        {
+            // We will try to use the matches buffer for as long as we can, if it is not enough we will switch to a more complex 
+            // behavior. This method should also be re-entrant for the case where we have already pre-sorted everything and 
+            // we will just need to acquire via pages the totality of the results. 
+
+            if (match._currentIdx != NotStarted)
+                goto ReturnMatches;
+
+            // If there is nothing or just 1 element to return, we are done as there is no need to sort anything.
+            int totalMatches = match._inner.Fill(matches);
+            if (totalMatches is 0 or 1)
+            {
+                match.TotalResults = totalMatches;
+                match._currentIdx = totalMatches;
+                return totalMatches;
+            }
+
+            // Here comes the most important part on why https://issues.hibernatingrhinos.com/issue/RavenDB-19718 
+            // requires special handling of the situation of returning multiple pages. Sorting requires that we
+            // guarantee a global ordering, which cannot be done unless we have the whole set available already.
+            // Therefore, if the results are smaller than the buffer we were given to work with, everything
+            // would be fine. However, there might exist the case where the total amount of hits is bigger than
+            // the buffer we were given to work with. In those cases we have to recruit external memory to be able
+            // to execute multiple `.Fill()` calls. 
+
+            // To start with, we will try to get all the hits to sort and assume that the whole result-set will be
+            // able to be stored in the matches buffer until we figure out that is not the case.
+
+            bool isNotDone = true;
+            if (totalMatches < matches.Length)
+            {
+                while (isNotDone)
+                {
+                    // We get a new batch
+                    int bTotalMatches = match._inner.Fill(matches.Slice(totalMatches));
+                    totalMatches += bTotalMatches;
+
+                    // When we don't have any new batch, we are done.
+                    if (bTotalMatches == 0)
+                        isNotDone = false;
+
+                    if (totalMatches < matches.Length / 8)
+                        break; // We are not done, therefore we will go to get extra temporary buffers.
+                }
+            }
+
+            if (isNotDone == false)
+            {
+                // If we are done (the expected outcome), we know that we can do this on a single call. Therefore,
+                // we will sort and return the whole buffer.
+                match.TotalResults = totalMatches;
+                match._currentIdx = totalMatches;
+                totalMatches = SortingMatch<TInner, TComparer>.ExecuteSorting<TOut>(ref match, matches);
+                return totalMatches;
+            }
+
+            // However, it might happen that we are not actually done which means that we will need to recruit
+            // an external buffer memory to temporarily store the sorted data and for that we need to estimate 
+            // how much memory to recruit for doing so. 
+
+            if (match._inner.Confidence >= QueryCountConfidence.Normal && match._inner.Count < Constants.Primitives.DefaultBufferSize)
+            {
+                // Since we expect to find less than the default buffer size, we just ask for that much. We divide by 2 because
+                // the grow buffer function will adjust the used size to double the size. 
+                match.UnlikelyGrowBuffer(Constants.Primitives.DefaultBufferSize / 2);
+            }
+            else
+            {
+                // Since confidence is not good recruiting four times the size of the current matches in external memory is a sensible
+                // tradeoff, and we will just hit other grow sequences over time if needed. 
+                match.UnlikelyGrowBuffer(Math.Max(128, 4 * matches.Length));
+            }
+
+            // Copy to the buffer the matches that we already have.
+            matches[..totalMatches].CopyTo(new Span<long>(match._buffer, totalMatches));
+
+            long* buffer = match._buffer;
+            while (true)
+            {
+                // We will ensure we have enough space to fill matches.
+                int excessSpace = match._bufferSize - totalMatches;
+                if (excessSpace < 128)
+                {
+                    match.UnlikelyGrowBuffer(match._bufferSize);
+                    excessSpace = match._bufferSize - totalMatches;
+                }
+
+                // We will get more batches until we are done getting matches.
+                int bTotalMatches = match._inner.Fill(new Span<long>(buffer + totalMatches, excessSpace));
+                if (bTotalMatches == 0)
+                {
+                    match.TotalResults = totalMatches;
+                    totalMatches = SortingMatch<TInner, TComparer>.ExecuteSorting<TOut>(ref match, new Span<long>(match._buffer, totalMatches));
+
+                    match._currentIdx = 0;
+                    goto ReturnMatches;
+                }
+
+                totalMatches += bTotalMatches;
+            }
+
+            ReturnMatches:
+
+            if (match._currentIdx < match.TotalResults)
+            {
+                Debug.Assert(match._currentIdx != NotStarted);
+
+                // We will just copy as many already sorted elements into the output buffer.
+                int leftovers = Math.Min((int)(match.TotalResults - match._currentIdx), matches.Length);
+                new Span<long>(match._buffer + match._currentIdx, leftovers).CopyTo(matches);
+                match._currentIdx += leftovers;
+                return leftovers;
+            }
+
+            // There are no more matches to return.
+            return 0;
+        }
+
+
         [SkipLocalsInit]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static int Fill<TOut>(ref SortingMatch<TInner, TComparer> match, Span<long> matches) 
+        private static int FillNoPaging<TOut>(ref SortingMatch<TInner, TComparer> match, Span<long> matches)
             where TOut : struct
         {
             // Important: If you are going to request a massive take like 20K you need to pass at least a 20K size buffer to work with.
@@ -261,7 +455,7 @@ namespace Corax.Queries
             int totalMatches = match._inner.Fill(matches);
             if (totalMatches == 0)
                 return 0;
-            
+
             int matchesArraySize = sizeof(long) * matches.Length;
             int itemArraySize = 2 * Unsafe.SizeOf<MatchComparer<TComparer, TOut>.Item>() * matches.Length;
             using var _ = match._searcher.Allocator.Allocate(itemArraySize + matchesArraySize, out var bufferHolder);
