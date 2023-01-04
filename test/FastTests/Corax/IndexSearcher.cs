@@ -856,7 +856,7 @@ namespace FastTests.Corax
             OrderMetadata orderMetadata = new OrderMetadata(contentMetadata, true, MatchCompareFieldType.Sequence);
             {
                 var match1 = searcher.StartWithQuery("Id", "e");
-                var match = searcher.OrderByAscending(match1, orderMetadata, take: 2);
+                var match = searcher.OrderByAscending(match1, orderMetadata);
 
                 Span<long> ids = stackalloc long[2];
                 Assert.Equal(2, match.Fill(ids));
