@@ -64,17 +64,6 @@ namespace Raven.Server.Documents.Indexes.Persistence.Corax
             Reference<int> scannedDocuments, IQueryResultRetriever retriever, DocumentsOperationContext documentsContext, Func<string, SpatialField> getSpatialField,
             CancellationToken token)
         {
-            var pageSize = query.PageSize;
-            var isDistinctCount = pageSize == 0 && query.Metadata.IsDistinct;
-            if (isDistinctCount)
-                pageSize = int.MaxValue;
-
-            var position = query.Start;
-
-            var take = pageSize + position;
-            if (take > _indexSearcher.NumberOfEntries || fieldsToFetch.IsDistinct)
-                take = CoraxConstants.IndexSearcher.TakeAll;
-
             QueryTimingsScope coraxScope = null;
             QueryTimingsScope highlightingScope = null;
             if (queryTimings != null)
@@ -84,6 +73,10 @@ namespace Raven.Server.Documents.Indexes.Persistence.Corax
                     ? queryTimings.For(nameof(QueryTimingsScope.Names.Highlightings), start: false)
                     : null;
             }
+
+            var take = CoraxConstants.IndexSearcher.TakeAll;
+            if (fieldsToFetch.IsDistinct == false && query.Metadata.OrderBy is null)
+                take = query.PageSize + query.Start;
 
             IQueryMatch queryMatch;
             Dictionary<string, CoraxHighlightingTermIndex> highlightingTerms = query.Metadata.HasHighlightings ? new() : null;
@@ -96,10 +89,9 @@ namespace Raven.Server.Documents.Indexes.Persistence.Corax
                     yield break;
             }
 
-
             int coraxPageSize = CoraxGetPageSize(_indexSearcher, take, query, isBinary);
             var ids = QueryPool.Rent(coraxPageSize);
-            int docsToLoad = pageSize;
+            int docsToLoad = query.PageSize;
             int queryStart = query.Start;
             bool hasHighlights = query.Metadata.HasHighlightings;
             if (hasHighlights)
@@ -108,6 +100,10 @@ namespace Raven.Server.Documents.Indexes.Persistence.Corax
                     SetupHighlighter(query, documentsContext, highlightingTerms);
             }
 
+            var pageSize = query.PageSize;
+            var isDistinctCount = pageSize == 0 && query.Metadata.IsDistinct;
+            if (isDistinctCount)
+                pageSize = int.MaxValue;
 
             using var queryScope = new CoraxIndexQueryingScope(_index.Type, query, fieldsToFetch, retriever, _indexSearcher, _fieldMappings);
             using var queryFilter = GetQueryFilter(_index, query, documentsContext, skippedResults, scannedDocuments, retriever, queryTimings);
