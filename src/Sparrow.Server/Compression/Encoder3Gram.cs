@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.CompilerServices;
@@ -539,6 +540,8 @@ namespace Sparrow.Server.Compression
                 top -= mid;
             }
 
+            // To guarantee that encoding always makes progress, we must ensure that every dictionary lookup is successful.
+            // https://db.cs.cmu.edu/papers/2020/zhang-sigmod2020.pdf [Page 1603]
             code = table[bot].Code;
             return table[bot].PrefixLength;
         }
