@@ -63,7 +63,7 @@ namespace FastTests.Corax.Bugs
             Assert.Equal(data.Length, idx);
         }
 
-        [Fact]
+        [NonMacFact] // ElectricFencedMemory is not supported on Mac
         public void CanEncodeAndDecodeSafely()
         {
             using var stream = typeof(PForTests).Assembly.GetManifestResourceStream("FastTests.Corax.Bugs.access_violation.json.gz");
