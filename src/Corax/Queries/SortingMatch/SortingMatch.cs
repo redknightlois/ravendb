@@ -8,6 +8,7 @@ using Corax.Utils;
 using Corax.Utils.Spatial;
 using Sparrow;
 using Sparrow.Server.Utils;
+using Sparrow.Server.Utils.VxSort;
 using Voron.Data.Fixed;
 using static Corax.Queries.SortingMatch;
 
@@ -49,7 +50,7 @@ namespace Corax.Queries
 
             if (typeof(TComparer) == typeof(BoostingComparer))
             {
-                _fillFunc = &Fill<BoostingSorting>;
+                _fillFunc = &FillAdv<Fetcher, BoostingSorting>;
             }
             else
             {
@@ -202,23 +203,21 @@ namespace Corax.Queries
                 if (read == 0)
                     break;
 
+                // PERF: We perform this at the end to avoid this check if we are not really adding elements. 
+                if (match._take == -1 && index + read + 16 > items.Length)
+                {
+                    // we don't have a limit to the number of results returned
+                    // so we have to ensure that we keep *all* the results in memory, as such,
+                    // we cannot limit the size of the sorting heap and need to grow it
+                    match.UnlikelyGrowBuffer(match._bufferSize);
+                    items = MemoryMarshal.Cast<byte, MatchComparer<TComparer, TOut>.Item>(new Span<byte>(match._buffer, match._bufferSize));
+                }
+
                 for (int i = 0; i < read; i++)
                 {
                     var cur = new MatchComparer<TComparer, TOut>.Item { Key = matches[i], };
                     if (fetcher.Get(match._searcher, match._comparer.Field, cur.Key, out cur.Value, match._comparer) == false)
-                    {
-                        //TODO: What happens when there aren't any values for the field? 
-                        continue;
-                    }
-
-                    if (match._take == -1 && index + 64 > items.Length)
-                    {
-                        // we don't have a limit to the number of results returned
-                        // so we have to ensure that we keep *all* the results in memory, as such,
-                        // we cannot limit the size of the sorting heap and need to grow it
-                        match.UnlikelyGrowBuffer(match._bufferSize);
-                        items = MemoryMarshal.Cast<byte, MatchComparer<TComparer, TOut>.Item>(new Span<byte>(match._buffer, match._bufferSize));
-                    }
+                        cur.Key = -cur.Key;
 
                     if (index < items.Length)
                     {
@@ -244,10 +243,13 @@ namespace Corax.Queries
             int matchesToReturn = Math.Min(match._bufferUsedCount, matches.Length);
             for (int i = 0; i < matchesToReturn; i++)
             {
+                // We are getting the top element because this is a heap and the top element is the one that is
+                // going to be removed. Then the rest of the element will be pushed up to find the new top.
                 matches[i] = items[0].Key;
                 HeapDown(items, match._bufferUsedCount - i - 1);
             }
             match._bufferUsedCount -= matchesToReturn;
+            
             return matchesToReturn;
             
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
