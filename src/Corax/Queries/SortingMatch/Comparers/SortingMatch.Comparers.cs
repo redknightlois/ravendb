@@ -82,6 +82,10 @@ unsafe partial struct SortingMatch
                 {
                     return _comparer.CompareNumerical(((NumericalItem<double>)(object)ix.Value).Value, ((NumericalItem<double>)(object)iy.Value).Value);
                 }
+                else if (typeof(TW) == typeof(NumericalItem<float>))
+                {
+                    return _comparer.CompareNumerical(((NumericalItem<float>)(object)ix.Value).Value, ((NumericalItem<float>)(object)iy.Value).Value);
+                }
             }
             else if (ix.Key > 0)
             {

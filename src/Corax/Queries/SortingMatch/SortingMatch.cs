@@ -7,8 +7,8 @@ using Corax.Mappings;
 using Corax.Utils;
 using Corax.Utils.Spatial;
 using Sparrow;
+using Sparrow.Server;
 using Sparrow.Server.Utils;
-using Sparrow.Server.Utils.VxSort;
 using Voron.Data.Fixed;
 using static Corax.Queries.SortingMatch;
 
@@ -50,7 +50,9 @@ namespace Corax.Queries
 
             if (typeof(TComparer) == typeof(BoostingComparer))
             {
-                _fillFunc = &FillAdv<Fetcher, BoostingSorting>;
+                // TODO: Maciej the old Fill would just return the values in inserting order and the tests are checking that. 
+                _fillFunc = &FillAdv<Fetcher, NumericalItem<float>>;
+                //_fillFunc = &Fill<BoostingSorting>;
             }
             else
             {
@@ -75,13 +77,14 @@ namespace Corax.Queries
 
         private struct Fetcher : IFetcher
         {
-            private FixedSizeTree _tree;
-
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public bool Get<TOut, TIn>(IndexSearcher searcher, FieldMetadata binding, long entryId, out TOut storedValue, in TIn comparer)
                 where TIn : IMatchComparer
                 where TOut : struct
             {
+                if (typeof(TIn) == typeof(BoostingComparer))
+                    throw new NotSupportedException($"Boosting fetching is done by the main {nameof(FillAdv)} method.");
+
                 var reader = searcher.GetEntryReaderFor(entryId);
 
                 if (typeof(TIn) == typeof(SpatialAscendingMatchComparer))
@@ -110,16 +113,6 @@ namespace Corax.Queries
                     var distance = SpatialUtils.GetGeoDistance(in coordinates, in spatialDescendingMatchComparer);
 
                     storedValue = (TOut)(object)new NumericalItem<double>(distance);
-                    return true;
-                }
-                else if (typeof(TIn) == typeof(BoostingComparer))
-                {
-                    _tree ??= searcher.GetDocumentBoostTree();
-                    var ptr = (float*)_tree.ReadPtr(entryId, out _);
-                    if (ptr == null)
-                        goto Failed;
-                    
-                    storedValue = (TOut)(object)new NumericalItem<double>(*ptr);
                     return true;
                 }
                 else if (typeof(TOut) == typeof(SequenceItem))
@@ -174,6 +167,8 @@ namespace Corax.Queries
         {
             var comparer = new MatchComparer<TComparer, TOut>(match._comparer);
 
+            ByteStringContext<ByteStringMemoryCache>.InternalScope bufferHandler = default;
+
             // This method should also be re-entrant for the case where we have already pre-sorted everything and 
             // we will just need to acquire via pages the totality of the results. 
             if (match._bufferUsedCount != NotStarted)
@@ -193,6 +188,18 @@ namespace Corax.Queries
 
             var items = new Span<MatchComparer<TComparer, TOut>.Item>(match._buffer, totalMatches);
 
+            Span<float> scores;
+            if (typeof(TComparer) == typeof(BoostingComparer))
+            {
+                // Allocate the new buffer
+                bufferHandler = match._searcher.Allocator.Allocate(matches.Length * sizeof(float), out var buffer);
+                scores = new Span<float>(buffer.Ptr, matches.Length);
+            }
+            else
+            {
+                scores = Span<float>.Empty;
+            }
+
             // Initialize the important infrastructure for the sorting.
             TFetcher fetcher = default;
             var index = 0;
@@ -202,6 +209,35 @@ namespace Corax.Queries
                 match.TotalResults += read;
                 if (read == 0)
                     break;
+
+                // Since we are doing boosting, we need to score the matches so we can use them later. 
+                if (typeof(TComparer) == typeof(BoostingComparer))
+                {
+                    Debug.Assert(scores.Length == totalMatches);
+                    scores[..read].Fill(Bm25Relevance.InitialScoreValue);
+
+                    // We perform the scoring process. 
+                    match._inner.Score(matches[..read], scores[..read], 1f);
+
+                    // If we need to do documents boosting then we need to modify the based on documents stored score. 
+                    if (match._searcher.DocumentsAreBoosted)
+                    {
+                        // We get the boosting tree and go to check every document. 
+                        var tree = match._searcher.GetDocumentBoostTree();
+                        if (tree is { NumberOfEntries: > 0 })
+                        {
+                            // We are going to read from the boosting tree all the boosting values and apply that to the scores array.
+                            for (int idx = 0; idx < totalMatches; idx++)
+                            {
+                                var ptr = (float*)tree.ReadPtr(matches[idx], out var _);
+                                if (ptr == null)
+                                    continue;
+
+                                scores[idx] *= *ptr;
+                            }
+                        }
+                    }
+                }
 
                 // PERF: We perform this at the end to avoid this check if we are not really adding elements. 
                 if (match._take == -1 && index + read + 16 > items.Length)
@@ -216,8 +252,16 @@ namespace Corax.Queries
                 for (int i = 0; i < read; i++)
                 {
                     var cur = new MatchComparer<TComparer, TOut>.Item { Key = matches[i], };
-                    if (fetcher.Get(match._searcher, match._comparer.Field, cur.Key, out cur.Value, match._comparer) == false)
-                        cur.Key = -cur.Key;
+                    if (typeof(TComparer) == typeof(BoostingComparer))
+                    {
+                        // Since we are boosting, we can get the value straight from the scores array.
+                        cur.Value = (TOut)(object)new NumericalItem<float>(scores[i]);
+                    }
+                    else
+                    {
+                        if (fetcher.Get(match._searcher, match._comparer.Field, cur.Key, out cur.Value, match._comparer) == false)
+                            cur.Key = -cur.Key;
+                    }
 
                     if (index < items.Length)
                     {
@@ -249,7 +293,9 @@ namespace Corax.Queries
                 HeapDown(items, match._bufferUsedCount - i - 1);
             }
             match._bufferUsedCount -= matchesToReturn;
-            
+
+            bufferHandler.Dispose();
+
             return matchesToReturn;
             
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -291,7 +337,6 @@ namespace Corax.Queries
                     (items[current], items[childIdx]) = (items[childIdx], items[current]);
                     current = childIdx;
                 }
-
             }
         }
 
@@ -338,6 +383,8 @@ namespace Corax.Queries
         {
             int Execute(ref SortingMatch<TInner, TComparer> match, Span<long> matches);
         }
+
+
 
         private struct ItemSorting<TOut> : IItemSorter
             where TOut : struct
