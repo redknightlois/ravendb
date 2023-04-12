@@ -213,7 +213,7 @@ namespace Corax.Queries
                 // Since we are doing boosting, we need to score the matches so we can use them later. 
                 if (typeof(TComparer) == typeof(BoostingComparer))
                 {
-                    Debug.Assert(scores.Length == totalMatches);
+                    Debug.Assert(scores.Length == matches.Length);
                     
                     // We have to initialize the score buffer with a positive number to ensure that multiplication (document-boosting) is taken into account when BM25 relevance returns 0 (for example, with AllEntriesMatch).
                     scores[..read].Fill(Bm25Relevance.InitialScoreValue);
