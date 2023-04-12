@@ -9,7 +9,6 @@ using Corax.Utils.Spatial;
 using Sparrow;
 using Sparrow.Server;
 using Sparrow.Server.Utils;
-using Voron.Data.Fixed;
 using static Corax.Queries.SortingMatch;
 
 namespace Corax.Queries
@@ -168,6 +167,8 @@ namespace Corax.Queries
             var comparer = new MatchComparer<TComparer, TOut>(match._comparer);
 
             ByteStringContext<ByteStringMemoryCache>.InternalScope bufferHandler = default;
+            
+            ref var matchesRef = ref MemoryMarshal.GetReference(matches);
 
             // This method should also be re-entrant for the case where we have already pre-sorted everything and 
             // we will just need to acquire via pages the totality of the results. 
@@ -203,6 +204,7 @@ namespace Corax.Queries
             // Initialize the important infrastructure for the sorting.
             TFetcher fetcher = default;
             var index = 0;
+
             while (true)
             {
                 var read = match._inner.Fill(matches);
@@ -214,12 +216,14 @@ namespace Corax.Queries
                 if (typeof(TComparer) == typeof(BoostingComparer))
                 {
                     Debug.Assert(scores.Length == matches.Length);
-                    
+
+                    var readScores = scores[..read];
+
                     // We have to initialize the score buffer with a positive number to ensure that multiplication (document-boosting) is taken into account when BM25 relevance returns 0 (for example, with AllEntriesMatch).
-                    scores[..read].Fill(Bm25Relevance.InitialScoreValue);
+                    readScores.Fill(Bm25Relevance.InitialScoreValue);
 
                     // We perform the scoring process. 
-                    match._inner.Score(matches[..read], scores[..read], 1f);
+                    match._inner.Score(matches[..read], readScores, 1f);
 
                     // If we need to do documents boosting then we need to modify the based on documents stored score. 
                     if (match._searcher.DocumentsAreBoosted)
@@ -229,13 +233,15 @@ namespace Corax.Queries
                         if (tree is { NumberOfEntries: > 0 })
                         {
                             // We are going to read from the boosting tree all the boosting values and apply that to the scores array.
+                            ref var scoresRef = ref MemoryMarshal.GetReference(scores);
                             for (int idx = 0; idx < totalMatches; idx++)
                             {
-                                var ptr = (float*)tree.ReadPtr(matches[idx], out var _);
+                                var ptr = (float*)tree.ReadPtr(Unsafe.Add(ref matchesRef, idx), out var _);
                                 if (ptr == null)
                                     continue;
 
-                                scores[idx] *= *ptr;
+                                ref var scoresIdx = ref Unsafe.Add(ref scoresRef, idx);
+                                scoresIdx *= *ptr;
                             }
                         }
                     }
@@ -251,9 +257,13 @@ namespace Corax.Queries
                     items = MemoryMarshal.Cast<byte, MatchComparer<TComparer, TOut>.Item>(new Span<byte>(match._buffer, match._bufferSize));
                 }
 
+                ref var itemsRef = ref MemoryMarshal.GetReference(items);
+                ref var itemsLast = ref items[^1];
+
+                MatchComparer<TComparer, TOut>.Item cur = default;
                 for (int i = 0; i < read; i++)
                 {
-                    var cur = new MatchComparer<TComparer, TOut>.Item { Key = matches[i], };
+                    cur.Key = matches[i];
                     if (typeof(TComparer) == typeof(BoostingComparer))
                     {
                         // Since we are boosting, we can get the value straight from the scores array.
@@ -267,18 +277,20 @@ namespace Corax.Queries
 
                     if (index < items.Length)
                     {
-                        items[index++] = cur;
+                        ref var itemPtr = ref Unsafe.Add(ref itemsRef, index);
+                        itemPtr = cur;
+                        index++;
                     }
-                    else if (comparer.Compare(items[^1], cur) > 0)
+                    else if (comparer.Compare(itemsLast, cur) > 0)
                     {
-                        items[^1] = cur;
+                        itemsLast = cur;
                     }
                     else
                     {
                         continue;
                     }
 
-                    HeapUp(items, index - 1);
+                    HeapUp(ref itemsRef, index - 1);
                 }
             }
             match._bufferUsedCount = index;
@@ -287,12 +299,15 @@ namespace Corax.Queries
             items = new Span<MatchComparer<TComparer, TOut>.Item>(match._buffer, match._bufferUsedCount);
 
             int matchesToReturn = Math.Min(match._bufferUsedCount, matches.Length);
+            
+            ref var itemsStart = ref MemoryMarshal.GetReference(items);
             for (int i = 0; i < matchesToReturn; i++)
             {
                 // We are getting the top element because this is a heap and the top element is the one that is
                 // going to be removed. Then the rest of the element will be pushed up to find the new top.
-                matches[i] = items[0].Key;
-                HeapDown(items, match._bufferUsedCount - i - 1);
+                ref var matchIdxPtr = ref Unsafe.Add(ref matchesRef, i);
+                matchIdxPtr = items[0].Key;
+                HeapDown(ref itemsStart, match._bufferUsedCount - i - 1);
             }
             match._bufferUsedCount -= matchesToReturn;
 
@@ -301,42 +316,45 @@ namespace Corax.Queries
             return matchesToReturn;
             
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            void HeapUp(Span<MatchComparer<TComparer, TOut>.Item> items, int current)
+            void HeapUp(ref MatchComparer<TComparer, TOut>.Item itemsStart, int current)
             {
                 while (current > 0)
                 {
                     var parent = (current - 1) / 2;
-                    if (comparer.Compare(items[parent], items[current]) <= 0)
+                    ref var parentItem = ref Unsafe.Add(ref itemsStart, parent);
+                    ref var currentItem = ref Unsafe.Add(ref itemsStart, current);
+                    if (comparer.Compare(ref parentItem, ref currentItem) <= 0)
                         break;
 
-                    (items[parent], items[current]) = (items[current], items[parent]);
+                    (parentItem, currentItem) = (currentItem, parentItem);
                     current = parent;
                 }
             }
             
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            void HeapDown(Span<MatchComparer<TComparer, TOut>.Item> items, int heapMaxIndex)
+            void HeapDown(ref MatchComparer<TComparer, TOut>.Item itemsPtr, int heapMaxIndex)
             {
-                items[0] = items[heapMaxIndex];
+                itemsPtr = Unsafe.Add(ref itemsPtr, heapMaxIndex);
                 var current = 0;
                 int childIdx;
                 
-                int GetChildIndex(int idx) => 2 * idx + 1;
-                
-                while ((childIdx = GetChildIndex(current)) < heapMaxIndex)
+                while ((childIdx = 2 * current + 1) < heapMaxIndex)
                 {
                     if (childIdx + 1 < heapMaxIndex)
                     {
-                        if (comparer.Compare(items[childIdx], items[childIdx + 1]) > 0)
+                        if (comparer.Compare(ref Unsafe.Add(ref itemsPtr, childIdx), ref Unsafe.Add(ref itemsPtr, childIdx+1)) > 0)
                         {
                             childIdx++;
                         }
                     }
-                    
-                    if (comparer.Compare(items[current], items[childIdx]) <= 0)
+
+                    ref var currentPtr = ref Unsafe.Add(ref itemsPtr, current);
+                    ref var childPtr = ref Unsafe.Add(ref itemsPtr, childIdx);
+                    if (comparer.Compare(ref currentPtr, ref childPtr) <= 0)
                         break;
-                
-                    (items[current], items[childIdx]) = (items[childIdx], items[current]);
+
+                    
+                    (currentPtr, childPtr) = (childPtr, currentPtr);
                     current = childIdx;
                 }
             }
