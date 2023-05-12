@@ -343,7 +343,10 @@ namespace {g.namespace}
         try:
             s = f"""        
             {method_name}
-            {{
+            {{                                
+                { self.generate_if_debug(f'var tempSpan = new Span<{t}>(tmpStartLeft, (int)(tmpStartRight - tmpStartLeft));') }
+                { self.generate_if_debug(f'tempSpan.Clear();') }
+            
                 // PERF: CompressWrite support is been treated as a constant because we make sure the caller
                 //       treats that parameter already as a constant @ JIT time causing a cascade.
         
@@ -581,7 +584,7 @@ namespace {g.namespace}
         method_name = f"""
         [SkipLocalsInit]
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        private {t}* vectorized_partition_{i}({t}* left, {t}* right, long hint)"""
+        private {t}* vectorized_partition_{i}({t}* left, {t}* right, long alignment)"""
 
         try:
             s = f"""
@@ -591,105 +594,111 @@ namespace {g.namespace}
             Debug.Assert(((long)left & {self.get_configuration_constant("ElementAlign")}) == 0);
             Debug.Assert(((long)right & {self.get_configuration_constant("ElementAlign")}) == 0);
 
+            // vectorized_partition - partition an array with vector operations
+            // \param left - pointer (inclusive) to the left edge of the partition
+            // \param right - pointer (inclusive) to the right edge of the partition.
+            //                Note: as part of the internal convention, this is a "dual" pointer
+            //                as it points to the pivot for this partition call, and is pointing just past
+            //                the last element to be partitioned during this call.
+            // \param alignment - a (partially) cache alignment used to communicate where the
+            //               the nearest vector-alignment left+right of the partition
+            //               is situated.
+            // \\return A pointer to the new location
+            
             // Vectorized double-pumped (dual-sided) partitioning:
-            // We start with picking a pivot using the media-of-3 "method"
-            // Once we have sensible pivot stored as the last element of the array
-            // We process the array from both ends.
+            // We start with reading the pivot value passed on to use at the position
+            // pointed to by the 'right' parameter. We process the array from both ends.
             //
-            // To get this rolling, we first read 2 Vector256 elements from the left and
-            // another 2 from the right, and store them in some temporary space in order
-            // to leave enough "space" inside the vector for storing partitioned values.
-            // Why 2 from each side? Because we need n+1 from each side where n is the
-            // number of Vector256 elements we process in each iteration... The
-            // reasoning behind the +1 is because of the way we decide from *which* side
-            // to read, we may end up reading up to one more vector from any given side
-            // and writing it in its entirety to the opposite side (this becomes
-            // slightly clearer when reading the code below...) Conceptually, the bulk
+            // To get this rolling, we first read <InnerUnroll> x vector-sized elements
+            // from the left and right, each. This data is partitioned and stored in a
+            // small temporary buffer to make some room for the main block where an
+            // inplace partitioning loop is performed.
+            // Conceptually, the bulk
             // of the processing looks like this after clearing out some initial space
             // as described above:
 
-            // [.............................................................................]
-            //  ^wl          ^rl                                               rr^ wr^
+            // |-- InnerUnroll x -|                                    |-- InnerUnroll x -|
+            //        vector-size                                             vector-size
+            //          bytes                                                   bytes
+            // [..........................................................................]
+            //  ^wl                ^rl                                rr^                wr^
             // Where:
-            // wl = writeLeft
-            // rl = readLeft
-            // rr = readRight
-            // wr = writeRight
+            // wl = write_left_v
+            // rl = read_left_v
+            // rr = read_right_v
+            // wr = write_right_v
 
             // In every iteration, we select what side to read from based on how much
             // space is left between head read/write pointer on each side...
             // We read from where there is a smaller gap, e.g. that side
             // that is closer to the unfortunate possibility of its write head
-            // overwriting its read head... By reading from THAT side, we're ensuring
-            // this does not happen
+            // overwriting its read head... By reading from THAT sides read "head",
+            // we're ensuring this does not happen.
+            
+            // Each partitioning operation ends up reading from one of the side "heads"
+            // and distributing the partitioned values to both write "heads" according
+            // to how the data ends up being divvied up.
+            
+            // A large chunk of code takes care of the issue of initially aligning
+            // the read pointers in such a way that all reads use pointers aligned to
+            // a vector unit, which greatly reduces the amount of execution resources
+            // required by a modern processor to read the required data.
 
             // An additional unfortunate complexity we need to deal with is that the
             // right pointer must be decremented by another Vector256<T>.Count elements
             // Since the Load/Store primitives obviously accept start addresses
             var pivot = *right;
 
-            // We do this here just in case we need to pre-align to the right
-            // We end up
-            *right = {t}.MaxValue;
-
             // Broadcast the selected pivot
             var P = {self.get_broadcast('pivot')};
 
-            var readLeft = left;
-            var readRight = right;
-
             {self.generate_if_debug(F'''Span<{t}> tempSpan = new Span<{t}>(({t}*)_tempPtr, {self.get_configuration_constant("PartitionTempSizeInElements")});''')}
 
-            var tmpStartLeft = ({t}*)_tempPtr;
-            var tmpLeft = tmpStartLeft;
-            var tmpStartRight = tmpStartLeft + {self.get_configuration_constant("PartitionTempSizeInElements")};
-            var tmpRight = tmpStartRight;
+            var spill_read_left = ({t}*)_tempPtr;
+            var spill_write_left = spill_read_left;
+            var spill_read_right = ({t}*)_tempPtr + {self.get_configuration_constant("PartitionTempSizeInElements")};
+            var spill_write_right = spill_read_right;
 
-            tmpRight -= {self.get_configuration_constant("N")};
+            // mutable pointer copies of the originals
+            var read_left = left;
+            var read_right = right;
+
+            spill_write_right -= {self.get_configuration_constant("N")};
 
             {self.generate_if_debug(f'''Console.WriteLine($"Values:[{{string.Join(',', new Span<{t}>(left, (int)(right - left)).ToArray())}}]");''')}
 
-            var leftAlign = unchecked((int)(hint & 0xFFFFFFFF));
-            var rightAlign = unchecked((int)(hint >> 32));
+            var left_masked_amount = unchecked((int)(alignment & 0xFFFFFFFF));
+            var right_unmasked_amount = unchecked((int)(alignment >> 32));
 
             var pBase = {self.get_permutation_table_ptr()};
 
-            // the read heads always advance by 8 elements, or 32 bytes,
-            // We can spend some extra time here to align the pointers
-            // so they start at a cache-line boundary
-            // Once that happens, we can read with Avx.LoadAlignedVector256
-            // And also know for sure that our reads will never cross cache-lines
-            // Otherwise, 50% of our AVX2 Loads will need to read from two cache-lines
+            // the read heads always advance by N elements towards te middle,
+            // It would be wise to spend some extra effort here to align the read
+            // pointers such that they align naturally to vector size;
+            // on vector-machines, where the ratio between vector/cache-line size
+            // is close, for example, assuming 64-byte cache-line:
+            // * unaligned 256-bit loads create split-line loads 50% of the time
+            // * unaligned 512-bit loads create a split-line loads 100% of the time
             align_vectorized(left, right,
-                leftAlign, rightAlign, P, pBase,
-                ref readLeft, ref readRight,
-                ref tmpStartLeft, ref tmpLeft, ref tmpStartRight, ref tmpRight);
+                left_masked_amount, right_unmasked_amount, P, pBase,
+                ref read_left, ref read_right,
+                ref spill_read_left, ref spill_write_left, ref spill_read_right, ref spill_write_right);
 
-            if (leftAlign > 0)
-            {{
-                tmpRight += {self.get_configuration_constant("N")};
-                readLeft = align_left_scalar_uncommon(readLeft, pivot, ref tmpLeft, ref tmpRight);
-                tmpRight -= {self.get_configuration_constant("N")};
-            }}
+            Debug.Assert(((right - left) == 
+               ((read_right + {self.get_configuration_constant("N")}) - read_left) + // Unpartitioned elements (+N for right-side vec reads)
+               (spill_write_left - spill_read_left) + // partitioned to left-spill
+               (spill_read_right - (spill_write_right + {self.get_configuration_constant("N")})))); // partitioned to right-spill (+N for right-side vec reads))
 
-            if (rightAlign < 0)
-            {{
-                tmpRight += {self.get_configuration_constant("N")};
-                readRight = align_right_scalar_uncommon(readRight, pivot, ref tmpLeft, ref tmpRight);
-                tmpRight -= {self.get_configuration_constant("N")};
-            }}
+            Debug.Assert(((ulong)read_left & {g.get_configuration_constant("ALIGN_MASK")}) == 0);
+            Debug.Assert(((ulong)read_right & {g.get_configuration_constant("ALIGN_MASK")}) == 0);
 
-            Debug.Assert(((ulong)readLeft & {g.get_configuration_constant("ALIGN_MASK")}) == 0);
-            Debug.Assert(((ulong)readRight & {g.get_configuration_constant("ALIGN_MASK")}) == 0);
-
-            Debug.Assert((((ulong)readRight - (ulong)readLeft) % {g.get_configuration_constant("ALIGN")}) == 0);
-            Debug.Assert((readRight - readLeft) >= {self.get_configuration_constant("Unroll")} * 2);
+            Debug.Assert((((ulong)read_right - (ulong)read_left) % {g.get_configuration_constant("ALIGN")}) == 0);
+            Debug.Assert((read_right - read_left) >= {self.get_configuration_constant("Unroll")} * 2);
 
             // From now on, we are fully aligned
             // and all reading is done in full vector units
-
-            var readLeftV = readLeft;
-            var readRightV = readRight;            
+            var readLeftV = read_left;
+            var readRightV = read_right;            
 
             // PERF: This diminished the size of the method and improves the performance. 
             var pointers = stackalloc {t}*[2];
@@ -700,15 +709,18 @@ namespace {g.namespace}
             { self.generate_if_prefetch("Sse.Prefetch0(pointers[1]);") }
             
             for ( int i = 0; i < 2; i++)
-                LoadAndPartition{i}Vectors(pointers[i], P, pBase, ref tmpLeft, ref tmpRight);
+                LoadAndPartition{i}Vectors(pointers[i], P, pBase, ref spill_write_left, ref spill_write_right);
 
-            tmpRight += {self.get_configuration_constant("N")};
+            // Fix-up spill_write_right after the last vector operation
+            // potentially *writing* through it is done
+            spill_write_right += {self.get_configuration_constant("N")};
 
-            {self.generate_if_debug(f'''Console.WriteLine($"TempL:[{{string.Join(',', new Span<{t}>(tmpStartLeft, (int)(tmpLeft - tmpStartLeft)).ToArray())}}]");''')}
-            {self.generate_if_debug(f'''Console.WriteLine($"TempR:[{{string.Join(',', new Span<{t}>(tmpRight, (int)(tmpStartRight - tmpRight)).ToArray())}}]");''')}
+            {self.generate_if_debug(f'''Console.WriteLine($"TempL:[{{string.Join(',', new Span<{t}>(spill_read_left, (int)(spill_write_left - spill_read_left)).ToArray())}}]");''')}
+            {self.generate_if_debug(f'''Console.WriteLine($"TempR:[{{string.Join(',', new Span<{t}>(spill_write_right, (int)(spill_read_right - spill_write_right)).ToArray())}}]");''')}
 
             // Adjust for the reading that was made above
             readLeftV += {self.get_configuration_constant("N")} * {self.get_configuration_constant("Unroll")};
+            readRightV += {self.get_configuration_constant("N")};
             readRightV -= {self.get_configuration_constant("N")} * {self.get_configuration_constant("Unroll")} * 2;
 
             {t}* nextPtr;
@@ -768,13 +780,13 @@ namespace {g.namespace}
 
             // 3. Copy-back the 4 registers + remainder we partitioned in the beginning
           
-            var leftTmpSize = tmpLeft - tmpStartLeft;
-            Unsafe.CopyBlockUnaligned(writeLeft, tmpStartLeft, (uint)(leftTmpSize * sizeof({t})));
+            var leftTmpSize = spill_write_left - spill_read_left;
+            Unsafe.CopyBlockUnaligned(writeLeft, spill_read_left, (uint)(leftTmpSize * sizeof({t})));
             writeLeft += leftTmpSize;
 
             {self.generate_if_debug(f'''Console.WriteLine($"WL:[{{string.Join(',', new Span<{t}>(left, (int)(writeLeft - left)).ToArray())}}]");''')}
-            var rightTmpSize = tmpStartRight - tmpRight;
-            Unsafe.CopyBlockUnaligned(writeLeft, tmpRight, (uint)(rightTmpSize * sizeof({t})));            
+            var rightTmpSize = spill_read_right - spill_write_right;
+            Unsafe.CopyBlockUnaligned(writeLeft, spill_write_right, (uint)(rightTmpSize * sizeof({t})));            
            
             {self.generate_if_debug(f'''Console.WriteLine($"W:[{{string.Join(',', new Span<{t}>(left, (int)(right - left)).ToArray())}}]");''')}
             // Shove to pivot back to the boundary
@@ -1194,7 +1206,12 @@ namespace {g.namespace}
             {{
                 {self.generate_if_debug(F'''var idx = left - ({t}*)_startPtr;''')}
                 {self.generate_if_debug('''Console.WriteLine($"B({depth_limit}):[{idx}|{idx + length}]");''')}
+                {self.generate_if_debug(F'''var bitonicValues = new Span<{t}>(({t}*)left, (int)length);''')}
+                { self.generate_if_debug('''Console.WriteLine($"Bitonic-Start({depth_limit})=[{string.Join(',', bitonicValues.ToArray())}]");''') }
+                
                 BitonicSort.Sort(left, length);
+                
+                { self.generate_if_debug('''Console.WriteLine($"Bitonic-End({depth_limit})=[{string.Join(',', bitonicValues.ToArray())}]");''') }                
                 return;
             }}
 
