@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 from datetime import datetime
 import random
@@ -140,7 +141,8 @@ namespace {g.namespace}
         print(s, file=f)
 
         self.generate_configuration_struct(f)
-        self.generate_scalar_alignments(f)
+        self.generate_primitives(f)
+
         self.generate_vectorized_alignments(f)
 
         self.generate_partition_block(f)
@@ -183,6 +185,17 @@ namespace {g.namespace}
 
     def get_store_vec(self, ptr, vector):
         return f"""Store({ptr}, {vector})"""
+
+    def get_suffix_mask(self, param):
+        t = self.type
+        if t == 'short' or t == 'ushort':
+            return f"""{param} ? -{self.get_configuration_constant('N')} + {param} : -{self.get_configuration_constant('N')}"""
+        elif t == 'int' or t == 'uint' or t == 'float':
+            return f"""ConvertToVector256Int32(Vector128.LoadUnsafe(ref Unsafe.AddByteOffset(ref MemoryMarshal.GetReference(suffix_mask_table_32b), N * {param})))"""
+        elif t == 'long' or t == 'ulong' or t == 'double':
+            return f"""ConvertToVector256Int64(Vector128.LoadUnsafe(ref Unsafe.AddByteOffset(ref MemoryMarshal.GetReference(suffix_mask_table_32b), N * {param})))"""
+
+        return "throw new NotImplementedException()"
 
     def get_broadcast(self, param):
         return f"""Vector256.Create({param})"""
@@ -228,7 +241,7 @@ namespace {g.namespace}
             if t == 'uint' or t == 'ulong':
                 s = f"""var additionConstant = Vector256.Create(unchecked(({t})-1));
                 var mask = (ulong){self.get_cmpgt_mask('Add(dataVec, additionConstant).AsInt64()', 'Add(p, additionConstant).AsInt64()')};"""
-            return s
+            return ""
 
         t = self.type
         method_name = f"""
@@ -309,23 +322,23 @@ namespace {g.namespace}
 
             return f"""
             RT0 = {self.get_partition_vector('RT0', 'pBase', 'rtMask')};  
-            {self.get_store_vec('tmpRight', 'RT0')};                     
+            {self.get_store_vec('spill_write_right', 'RT0')};                     
 
             LT0 = {self.get_partition_vector('LT0', 'pBase', 'ltMask')};            
-            {self.get_store_vec('tmpLeft', 'LT0')};
+            {self.get_store_vec('spill_write_left', 'LT0')};
 
-            tmpRight -= rtPopCountRightPart & rai;
-            readRight += (rightAlign - N) & rai;
+            spill_write_right -= rtPopCountRightPart & rai;
+            read_right += (right_masked_amount - N) & rai;
 
-            {self.get_store_vec('tmpRight', 'LT0')};
-            tmpRight -= ltPopCountRightPart & lai;
-            tmpLeft += ltPopCountLeftPart & lai;
-            tmpStartLeft += -leftAlign & lai;
-            readLeft += (leftAlign + N) & lai;
+            {self.get_store_vec('spill_write_right', 'LT0')};
+            spill_write_right -= ltPopCountRightPart & lai;
+            spill_write_left += ltPopCountLeftPart & lai;
+            spill_read_left += -left_masked_amount & lai;
+            read_left += (left_masked_amount + N) & lai;
 
-            {self.get_store_vec('tmpLeft', 'RT0')};
-            tmpLeft += rtPopCountLeftPart & rai;
-            tmpStartRight -= rightAlign & rai;"""
+            {self.get_store_vec('spill_write_left', 'RT0')};
+            spill_write_left += rtPopCountLeftPart & rai;
+            spill_read_right -= right_masked_amount & rai;"""
 
         def generate_permutations_with_compress():
             raise Exception('NotImplemented')
@@ -333,52 +346,66 @@ namespace {g.namespace}
         method_name = f"""
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         private static void align_vectorized(
-            {t}* left, {t}* right,
-            int leftAlign, int rightAlign,
+            int left_masked_amount, int right_masked_amount,
             in V p,
             byte* pBase,
-            ref {t}* readLeft, ref {t}* readRight,
-            ref {t}* tmpStartLeft, ref {t}* tmpLeft,
-            ref {t}* tmpStartRight, ref {t}* tmpRight)"""
+            ref {t}* read_left, ref {t}* read_right,
+            ref {t}* spill_read_left, ref {t}* spill_write_left,
+            ref {t}* spill_read_right, ref {t}* spill_write_right)"""
         try:
             s = f"""        
             {method_name}
-            {{                                
-                { self.generate_if_debug(f'var tempSpan = new Span<{t}>(tmpStartLeft, (int)(tmpStartRight - tmpStartLeft));') }
+            {{           
+            
+                // FIND-ME                     
+        
+                // Alignment with vectorization is tricky, so read carefully before changing code:
+                // 1. We load data, from both ends, while masking out-of-partition
+                //    (and potentially out of bounds!) elements with masked vector load operations
+                //    replacing masked out elements with:
+                //    * for the right-boundary read with numeric_limits<T>::max()
+                //    * for the left-boundary read with numeric_limits<T>::min()
+                // 2. We partition and store in the following order:
+                //    a) right-portion of right vector to the right-side
+                //    b) left-portion of left vector to the left side
+                //
+                //    -- at this point one-half of each partitioned vector has been committed
+                //       back to memory: we know that the out-of-bounds elements that we
+                //       NEVER read, and instead REPLACED with min/max values are *on* the edges
+                //       of the temp spill buffer, allowing us to mark how many such elements were
+                //       extraneously written to the spill buffer on both ends, to skip copying them
+                //       back at the end of the partition operation!
+                //
+                //    c) we advance the right write (spill_write_right) pointer by how many elements
+                //       were actually needed to be written to the right hand side
+                //    d) We write the right portion of the left vector to the right side
+                //       now that its write position has been updated
+            
+                { self.generate_if_debug(f'var tempSpan = new Span<{t}>(spill_read_left, (int)(spill_read_right - spill_read_left));') }
                 { self.generate_if_debug(f'tempSpan.Clear();') }
             
                 // PERF: CompressWrite support is been treated as a constant because we make sure the caller
-                //       treats that parameter already as a constant @ JIT time causing a cascade.
+                //       treats that parameter already as a constant @ JIT time causing a cascade.    
+                int N = {self.get_configuration_constant("N")};
         
-                int N = V.Count;
+                // adjust the read position for vector reads
+                read_left -= left_masked_amount;
+                read_right -= right_masked_amount;
         
-                var rai = ~((rightAlign - 1) >> 31);
-                var lai = leftAlign >> 31;
-                var preAlignedLeft = left + leftAlign;
-                var preAlignedRight = right + rightAlign - N;
+                // adjust write position for vector writes
+                spill_write_right -= N;
+                        
+                var max_base = {self.get_broadcast(f"{t}.MaxValue")}; // VMT::broadcast(numeric_limits<T>::max());
+                var min_base = {self.get_broadcast(f"{t}.MinValue")}; // VMT::broadcast(numeric_limits<T>::min());
         
-                // Alignment with vectorization is tricky, so read carefully before changing code:
-                // 1. We load data, which we might need to align, if the alignment hints
-                //    mean pre-alignment (or overlapping alignment)
-                // 2. We partition and store in the following order:
-                //    a) right-portion of right vector to the right-side
-                //    b) left-portion of left vector to the right side
-                //    c) at this point one-half of each partitioned vector has been committed
-                //       back to memory.
-                //    d) we advance the right write (tmpRight) pointer by how many elements
-                //       were actually needed to be written to the right hand side
-                //    e) We write the right portion of the left vector to the right side
-                //       now that its write position has been updated
-        
-                var RT0 = {self.get_load_vector('preAlignedRight')};
-                var LT0 = {self.get_load_vector('preAlignedLeft')};
-                {generate_comparison_operations(t)}
-                var rtPopCountRightPart = Math.Max({self.get_popcnt('rtMask', 'int32')}, (uint)rightAlign);       
-                var rtPopCountLeftPart = N - rtPopCountRightPart;
-                var ltPopCountRightPart = {self.get_popcnt('ltMask', 'int32')}; // default(MT).popcnt(ltMask);
-                var ltPopCountLeftPart = N - ltPopCountRightPart;
-        
-                { generate_permutations_with_compress() if compress_writes else generate_permutations_without_compress()}
+                var lt_vec = LoadPartialVector( read_left, min_base, { self.get_suffix_mask('left_masked_amount') } );
+                var rt_vec = LoadPartialVector( read_right, max_base, { self.get_suffix_mask('right_masked_amount') } );
+                
+                read_left += N;
+                read_right -= N; 
+                
+                var rt_mask = { self.get_cmpgt_mask('rt_vec', "p") };
+                var lt_mask = { self.get_cmpgt_mask('lt_vec', "p") };       
             }}      
         """
         except:
@@ -398,7 +425,7 @@ namespace {g.namespace}
             public const long REALIGN_RIGHT = 0x66600000000;
             public const long REALIGN_BOTH = REALIGN_LEFT | REALIGN_RIGHT;        
             
-            public const int N = {self.vector_size()};
+            public const int N = {self.vector_size()};            
             
             public const int Unroll = { self.unroll };
             public const int SlackPerSideInVectors = Unroll;
@@ -419,66 +446,6 @@ namespace {g.namespace}
         }}
         """
 
-        print(s, file=f)
-
-    def generate_scalar_alignments(self, f):
-        g = self
-        t = self.type
-        s = f"""
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static {t}* align_left_scalar_uncommon({t}* read_left, {t} pivot, ref {t}* tmp_left, ref {t}* tmp_right)
-        {{
-            /// Called when the left hand side of the entire array does not have enough elements
-            /// for us to align the memory with vectorized operations, so we do this uncommon slower alternative.
-            /// Generally speaking this is probably called for all the partitioning calls on the left edge of the array
-            
-            if (((ulong)read_left & {g.get_configuration_constant("ALIGN_MASK")}) == 0)
-                return read_left;
-
-            var next_align = ({t}*)(((ulong)read_left + {g.get_configuration_constant("ALIGN")}) & ~{g.get_configuration_constant("ALIGN_MASK")});
-            while (read_left < next_align)
-            {{
-                var v = *(read_left++);
-                if (v <= pivot)
-                {{
-                    *(tmp_left++) = v;
-                }}
-                else
-                {{
-                    *(--tmp_right) = v;
-                }}
-            }}
-
-            return read_left;
-        }}
-        
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static {t}* align_right_scalar_uncommon({t}* readRight, {t} pivot, ref {t}* tmpLeft, ref {t}* tmpRight)
-        {{        
-            /// Called when the right hand side of the entire array does not have enough elements
-            /// for us to align the memory with vectorized operations, so we do this uncommon slower alternative.
-            /// Generally speaking this is probably called for all the partitioning calls on the right edge of the array
-            
-            if (((ulong)readRight & {g.get_configuration_constant("ALIGN_MASK")}) == 0)
-                return readRight;
-
-            var nextAlign = ({t}*)((ulong)readRight & ~{g.get_configuration_constant("ALIGN_MASK")});
-            while (readRight > nextAlign)
-            {{
-                var v = *(--readRight);
-                if (v <= pivot)
-                {{
-                    *(tmpLeft++) = v;
-                }}
-                else
-                {{
-                    *(--tmpRight) = v;
-                }}
-            }}
-
-            return readRight;
-        }}         
-"""
         print(s, file=f)
 
     def generate_load_and_partition_vectors(self, f, i):
@@ -679,10 +646,11 @@ namespace {g.namespace}
             // is close, for example, assuming 64-byte cache-line:
             // * unaligned 256-bit loads create split-line loads 50% of the time
             // * unaligned 512-bit loads create a split-line loads 100% of the time
-            align_vectorized(left, right,
-                left_masked_amount, right_unmasked_amount, P, pBase,
-                ref read_left, ref read_right,
-                ref spill_read_left, ref spill_write_left, ref spill_read_right, ref spill_write_right);
+            align_vectorized(left_masked_amount, right_unmasked_amount, 
+                        P, pBase,
+                        ref read_left, ref read_right,
+                        ref spill_read_left, ref spill_write_left, 
+                        ref spill_read_right, ref spill_write_right);
 
             Debug.Assert(((right - left) == 
                ((read_right + {self.get_configuration_constant("N")}) - read_left) + // Unpartitioned elements (+N for right-side vec reads)
@@ -1611,7 +1579,37 @@ namespace {g.namespace}
             0, 1, 2, 3, 4, 5, 6, 7, // 0b11111110 (254)
             0, 1, 2, 3, 4, 5, 6, 7, // 0b11111111 (255)
             0, 0, 0, 0, 0, 0, 0, 0, // Ensuring we cannot overrun the buffer.
-        }};                
+        }};      
+        
+        internal static ReadOnlySpan<byte> prefix_mask_table_32b => new byte[]
+        {{
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0b00000000 (  0)
+            0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0b00000001 (  1)
+            0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0b00000011 (  3)
+            0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, // 0b00000111 (  7)
+            0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, // 0b00001111 ( 15)
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, // 0b00011111 ( 31)
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, // 0b00111111 ( 63)
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, // 0b01111111 (127)
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0b00000000 (  0)
+            ////////////////////////////////////////////////// 
+            0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, // Garbage to make ASAN happy
+        }};
+
+        internal static ReadOnlySpan<byte> suffix_mask_table_32b => new byte[]
+        {{
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0b00000000 (  0)
+            0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0b11111110 (127)
+            0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0b11111100 ( 63)
+            0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0b11111000 ( 31)
+            0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, // 0b11110000 ( 15)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, // 0b11100000 (  7)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, // 0b11000000 (  3)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, // 0b10000000 (  1)
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 0b00000000 (  0)
+            ////////////////////////////////////////////////// 
+            0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, // Garbage to make ASAN happy
+        }};          
     }}"""
         print(s, file=f)
 
@@ -1630,6 +1628,18 @@ namespace {g.namespace}
 
     def get_configuration_constant(self, param):
         return F"{capital_type_map[self.type]}Config.{param}"
+
+    def generate_primitives(self, f):
+        t = self.type
+        s = F"""
+        private static V LoadPartialVector( {t}* ptr, V fill, Vector256<int> mask )
+        {{
+            throw new NotImplementedException();
+        }}
+"""
+        print(s, file=f)
+
+
 
 
 

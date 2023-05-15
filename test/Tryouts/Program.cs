@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using Tests.Infrastructure;
 using FastTests.Voron.Sets;
 using FastTests.Corax.Bugs;
+using FastTests.Sparrow.VxSort;
 using RachisTests.DatabaseCluster;
 using Raven.Server.Utils;
 using SlowTests.Cluster;
@@ -30,10 +31,10 @@ public static class Program
             try
             {
                 using (var testOutputHelper = new ConsoleTestOutputHelper())
-                using (var test = new ReshardingTests(testOutputHelper))
+                using (var test = new CorruptionBugs(testOutputHelper))
                 {
                     DebuggerAttachedTimeout.DisableLongTimespan = true;
-                    await test.RestoreShardedDatabaseFromIncrementalBackupAfterBucketMigration();
+                    test.UnsignedUlongCorruption();
                 }
             }
             catch (Exception e)
@@ -41,7 +42,6 @@ public static class Program
                 Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine(e);
                 Console.ForegroundColor = ConsoleColor.White;
-                return;
             }
         }
     }
