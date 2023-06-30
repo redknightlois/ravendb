@@ -378,11 +378,10 @@ namespace Raven.Server.Documents.Indexes.Persistence.Corax
                     Page page = default;
                     foreach (var id in distinctIds)
                     {
-                        var coraxEntry = _searcher.GetEntryReaderFor(id);
                         var reader = _searcher.GetEntryTermsReader(id, ref page);
 
                         var key = _documentIdReader.GetTermFor(id);
-                        var retrieverInput = new RetrieverInput(_searcher, _fieldsMapping, coraxEntry, reader, key, _index.IndexFieldsPersistence);
+                        var retrieverInput = new RetrieverInput(_searcher, _fieldsMapping, reader, key);
                         var result = retriever.Get(ref retrieverInput, token);
 
                         if (result.Document != null)
@@ -641,11 +640,10 @@ namespace Raven.Server.Documents.Indexes.Persistence.Corax
                         // Now we know this is a new candidate document to be return therefore, we are going to be getting the
                         // actual data and apply the rest of the filters. 
                     Include:
-                        IndexEntryReader indexEntryReader = _indexSearcher.GetEntryReaderFor(ids[i]);
                         EntryTermsReader entryTermsReader = _indexSearcher.GetEntryTermsReader(ids[i], ref page);
                         var key = _documentIdReader.GetTermFor(ids[i]);
                         float? documentScore = scores.Length > 0 ? scores[i] : null;
-                        var retrieverInput = new RetrieverInput(IndexSearcher, _fieldMappings, indexEntryReader, entryTermsReader, key, _index.IndexFieldsPersistence, documentScore);
+                        var retrieverInput = new RetrieverInput(_indexSearcher, _fieldMappings,  entryTermsReader, key, documentScore);
 
                         var filterResult = queryFilter.Apply(ref retrieverInput, key);
                         if (filterResult is not FilterResult.Accepted)
@@ -1271,14 +1269,13 @@ namespace Raven.Server.Documents.Indexes.Persistence.Corax
                     if (hit == baseDocId)
                         continue;
 
-                    var reader = _indexSearcher.GetEntryReaderFor(hit);
                     var termsReader = _indexSearcher.GetEntryTermsReader(hit, ref page);
                     var id = _documentIdReader.GetTermFor(hit);
 
                     if (ravenIds.Add(id) == false)
                         continue;
 
-                    var retrieverInput = new RetrieverInput(_indexSearcher, _fieldMappings, reader,termsReader, id, _index.IndexFieldsPersistence);
+                    var retrieverInput = new RetrieverInput(_indexSearcher, _fieldMappings, termsReader, id);
                     var result = retriever.Get(ref retrieverInput, token);
                     if (result.Document != null)
                     {
