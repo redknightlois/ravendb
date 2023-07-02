@@ -148,7 +148,7 @@ namespace Sparrow.Server
             }
         }
 
-        public byte* Ptr
+        public readonly byte* Ptr
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
@@ -201,7 +201,7 @@ namespace Sparrow.Server
             }
         }
 
-        public int Length
+        public readonly int Length
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
@@ -229,7 +229,7 @@ namespace Sparrow.Server
             }
         }
 
-        public bool HasValue
+        public readonly bool HasValue
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
@@ -285,7 +285,7 @@ namespace Sparrow.Server
 #if VALIDATE
 
         [Conditional("VALIDATE")]
-        internal void EnsureIsNotBadPointer()
+        internal readonly void EnsureIsNotBadPointer()
         {
             if (_pointer->Ptr == null)
                 throw new InvalidOperationException("The inner storage pointer is not initialized. This is a defect on the implementation of the ByteStringContext class");
@@ -305,7 +305,7 @@ namespace Sparrow.Server
 
 #else
         [Conditional("VALIDATE")]
-        internal void EnsureIsNotBadPointer() { }
+        internal readonly void EnsureIsNotBadPointer() { }
 #endif
 
         public void Clear()
