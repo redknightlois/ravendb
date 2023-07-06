@@ -45,7 +45,7 @@ public abstract class CoraxJintDocumentConverterBase : CoraxDocumentConverterBas
     }
 
     public override void SetDocumentFields(LazyStringValue key, LazyStringValue sourceDocumentId, object doc, 
-        JsonOperationContext indexContext, CoraxLib.IndexWriter.IndexEntryBuilder builder, object sourceDocument, out LazyStringValue id,  out int fields)
+        JsonOperationContext indexContext, CoraxLib.IndexWriter.IndexEntryBuilder builder, object sourceDocument)
     {
         // We prepare for the next entry.
         var fieldMapping = GetKnownFieldsForWriter();
@@ -54,13 +54,10 @@ public abstract class CoraxJintDocumentConverterBase : CoraxDocumentConverterBas
             if (doc is not ObjectInstance documentToProcess)
             {
                 //nothing to index, finish the job
-                id = null;
-                fields = 0;
                 return ;
             }
 
             var singleEntryWriterScope = new SingleEntryWriterScope(Allocator);
-            id = key;
 
             if (key != null)
                 singleEntryWriterScope.Write(string.Empty, 0, key.AsReadOnlySpan(),  builder);
@@ -109,8 +106,6 @@ public abstract class CoraxJintDocumentConverterBase : CoraxDocumentConverterBas
                 //Write __stored_fields at the end of entry...
                 StoreValue(indexContext, builder, singleEntryWriterScope, documentToProcess);
             }
-
-            fields = builder.Fields;
         }
 
         //Helpers
