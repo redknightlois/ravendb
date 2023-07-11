@@ -38,6 +38,7 @@ using NativeMemory = Sparrow.Utils.NativeMemory;
 using Sparrow.Server.Collections;
 using Voron.Data.Fixed;
 using Voron.Data.Lookups;
+using Voron.Data.PostingLists;
 using Voron.Data.RawData;
 using Container = Voron.Data.Containers.Container;
 
@@ -1090,7 +1091,7 @@ namespace Voron
             return generator.Generate(detailedReportInput);
         }
 
-        public unsafe Dictionary<long, string> GetPageOwners(Transaction tx)
+        public unsafe Dictionary<long, string> GetPageOwners(Transaction tx, Func<PostingList, List<long>> onPostingList = null)
         {
             var r = new Dictionary<long, string>();
             r[tx.LowLevelTransaction.RootObjects.State.RootPageNumber] = "RootObjects";
@@ -1208,6 +1209,11 @@ namespace Voron
                             case RootObjectType.Set:
                                 var set = tx.OpenPostingList(currentKey);
                                 RegisterPages(set.AllPages(), name);
+                                var nestedPages = onPostingList?.Invoke(set);
+                                if (nestedPages != null)
+                                {
+                                    RegisterPages(nestedPages, name);
+                                }
                                 break;
                             case RootObjectType.Lookup:
                                  // Here is may be int64, double or compact key, we aren't sure
