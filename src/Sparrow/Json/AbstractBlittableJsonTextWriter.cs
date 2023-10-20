@@ -91,7 +91,6 @@ namespace Sparrow.Json
         private protected bool _started;
         private protected int _pos;
         private readonly JsonOperationContext.MemoryBuffer.ReturnBuffer _returnBuffer;
-        private readonly JsonOperationContext.MemoryBuffer.ReturnBuffer _returnAuxiliarBuffer;
 
         protected AbstractBlittableJsonTextWriter(JsonOperationContext context, Stream stream)
         {
@@ -226,12 +225,17 @@ namespace Sparrow.Json
             return WriteDateTime(value.Value, isUtc);
         }
 
+#if NET6_0_OR_GREATER
+        [SkipLocalsInit]
+#endif
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public int WriteDateTime(DateTime value, bool isUtc)
         {
-            int size = value.GetDefaultRavenFormat(_auxiliarBuffer, _auxiliarBufferLength, isUtc);
+            var auxBuffer = stackalloc byte[32];
 
-            WriteRawStringWhichMustBeWithoutEscapeChars(_auxiliarBuffer, size);
+            int size = value.GetDefaultRavenFormat(auxBuffer, 32, isUtc);
+
+            WriteRawStringWhichMustBeWithoutEscapeChars(auxBuffer, size);
 
             return size;
         }
@@ -692,6 +696,9 @@ namespace Sparrow.Json
             _pos++;
         }
 
+#if NET6_0_OR_GREATER
+        [SkipLocalsInit]
+#endif
         public void WriteInteger(long val)
         {
             if (val == 0)
@@ -703,7 +710,7 @@ namespace Sparrow.Json
                 return;
             }
 
-            var localBuffer = _auxiliarBuffer;
+            var localBuffer = stackalloc byte[32];
 
             int idx = 0;
             var negative = false;
@@ -773,11 +780,6 @@ namespace Sparrow.Json
             WriteRawString(lazyStringValue.Buffer, lazyStringValue.Size);
         }
 
-        public void WriteBufferFor(byte[] buffer)
-        {
-            WriteBufferFor(buffer.AsSpan());
-        }
-
         public void WriteBufferFor(ReadOnlySpan<byte> buffer)
         {
             EnsureBuffer(buffer.Length);
@@ -832,7 +834,6 @@ namespace Sparrow.Json
             finally
             {
                 _returnBuffer.Dispose();
-                _returnAuxiliarBuffer.Dispose();
             }
         }
 
