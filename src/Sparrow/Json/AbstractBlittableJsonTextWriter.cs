@@ -278,10 +278,11 @@ namespace Sparrow.Json
             EnsureBuffer(size + NumberOfQuotesChars);
             _buffer[_pos++] = Quote;
 
-            if (numberOfEscapeSequences == 0)
+            if (numberOfEscapeSequences == 0 && size < JsonOperationContext.MemoryBuffer.DefaultSize)
             {
                 // PERF: Fast Path.
-                WriteRawString(strBuffer, size);
+                Memory.Copy(_buffer + _pos, strBuffer, size);
+                _pos += size;
             }
             else
             {
@@ -313,7 +314,6 @@ namespace Sparrow.Json
                 }
 
                 var escapeCharacter = *strBuffer++;
-
                 WriteEscapeCharacter(buffer, escapeCharacter);
 
                 size--;
@@ -409,7 +409,9 @@ namespace Sparrow.Json
                 {
                     numberOfEscapeSequences--;
                     var bytesToSkip = BlittableJsonReaderBase.ReadVariableSizeInt(strSrcBuffer, ref escapeSequencePos);
+
                     WriteRawString(strBuffer, bytesToSkip);
+
                     strBuffer += bytesToSkip;
                     size -= bytesToSkip + 1 /*for the escaped char we skip*/;
                     var b = *(strBuffer++);
@@ -462,8 +464,18 @@ namespace Sparrow.Json
         {
             EnsureBuffer(size + 2);
             _buffer[_pos++] = Quote;
-            WriteRawString(buffer, size);
-            _buffer[_pos++] = Quote;
+
+            if (size + 2 < JsonOperationContext.MemoryBuffer.DefaultSize)
+            {
+                Memory.Copy(_buffer + _pos, buffer, size);
+                _pos += size;
+                _buffer[_pos++] = Quote;
+            }
+            else
+            {
+                UnlikelyWriteLargeRawString(buffer, size);
+                _buffer[_pos++] = Quote;
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -637,7 +649,6 @@ namespace Sparrow.Json
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void WritePropertyName(ReadOnlySpan<byte> prop)
         {
-            EnsureBuffer(prop.Length);
             WriteRawString(prop);
         }
 
