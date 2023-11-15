@@ -545,7 +545,7 @@ namespace FastTests.Sparrow
 
             int seed = 1337;
 
-            var processor = new AdvHashing.AvxHash3Processor(Vector256.Create<ulong>((ulong)seed));
+            var processor = new AdvHashing.AvxHash3ProcessorAvx2(Vector256.Create<ulong>((ulong)seed));
             processor.Process(bufferSize > 0 ? values.AsSpan(0, bufferSize) : ReadOnlySpan<byte>.Empty);
 
             var hash = processor.End();

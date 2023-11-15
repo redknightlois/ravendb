@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Runtime.Intrinsics;
 using BenchmarkDotNet.Analysers;
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Configs;
@@ -116,8 +117,18 @@ namespace Micro.Benchmark.Benchmarks
             var context = new Hashing.Streamed.XXHash64Context { Seed = 1337 };
             Hashing.Streamed.XXHash64.Begin(ref context);
             Hashing.Streamed.XXHash64.Process(ref context, _bufferPtr.Ptr, _bufferPtr.Length - 32);
-            Hashing.Streamed.XXHash64.Process(ref context, _bufferPtr.Ptr + _bufferPtr.Length - 32,32);
+            Hashing.Streamed.XXHash64.Process(ref context, _bufferPtr.Ptr + _bufferPtr.Length - 32, 32);
             return Hashing.Streamed.XXHash64.End(ref context);
+        }
+
+        [Benchmark]
+        public ulong AvxHash3_Reference()
+        {
+            var processor = new AdvHashing.AvxHash3ProcessorAvx2(Vector256.Create<ulong>(1337));
+            processor.Process(_buffer.AsSpan());
+
+            var hash = processor.End();
+            return hash[0];
         }
 
         [Benchmark(Baseline = true)]
