@@ -8,22 +8,27 @@ namespace Sparrow.Json
 {
     public sealed class AsyncBlittableJsonTextWriter : AbstractBlittableJsonTextWriter, IAsyncDisposable
     {
+        private readonly MemoryStream _inner;
         private readonly Stream _outputStream;
         private readonly CancellationToken _cancellationToken;
+
+        public long BufferCapacity => _inner.Capacity;
+        public long BufferUsed => _inner.Length;
 
         public AsyncBlittableJsonTextWriter(JsonOperationContext context, Stream stream, CancellationToken cancellationToken = default) : base(context, context.CheckoutMemoryStream())
         {
             _outputStream = stream ?? throw new ArgumentNullException(nameof(stream));
             _cancellationToken = cancellationToken;
+
+            if (_stream is not MemoryStream)
+                ThrowInvalidTypeException(_stream?.GetType());
+            _inner = (MemoryStream)_stream;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ValueTask<int> MaybeOuterFlushAsync()
         {
-            var innerStream = _stream as MemoryStream;
-            if (innerStream == null)
-                ThrowInvalidTypeException(_stream?.GetType());
-            if (innerStream.Length * 2 <= innerStream.Capacity)
+            if (_inner.Length * 2 <= _inner.Capacity)
                 return new ValueTask<int>(0);
 
             FlushInternal();
@@ -32,17 +37,13 @@ namespace Sparrow.Json
 
         public async Task<int> OuterFlushAsync()
         {
-            var innerStream = _stream as MemoryStream;
-            if (innerStream == null)
-                ThrowInvalidTypeException(_stream?.GetType());
-
             FlushInternal();
-            innerStream.TryGetBuffer(out var bytes);
+            _inner.TryGetBuffer(out var bytes);
             var bytesCount = bytes.Count;
             if (bytesCount == 0)
                 return 0;
             await _outputStream.WriteAsync(bytes.Array, bytes.Offset, bytesCount, _cancellationToken).ConfigureAwait(false);
-            innerStream.SetLength(0);
+            _inner.SetLength(0);
             return bytesCount;
         }
 
@@ -63,10 +64,7 @@ namespace Sparrow.Json
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ValueTask<int> MaybeFlushAsync(CancellationToken token = default)
         {
-            var innerStream = _stream as MemoryStream;
-            if (innerStream == null)
-                ThrowInvalidTypeException(_stream?.GetType());
-            if (innerStream.Length * 2 <= innerStream.Capacity)
+            if (_inner.Length * 2 <= _inner.Capacity)
                 return new ValueTask<int>(0);
 
             FlushInternal(); // this is OK, because inner stream is a MemoryStream
@@ -75,16 +73,17 @@ namespace Sparrow.Json
 
         public async ValueTask<int> FlushAsync(CancellationToken token = default)
         {
-            var innerStream = _stream as MemoryStream;
-            if (innerStream == null)
-                ThrowInvalidTypeException(_stream?.GetType());
             FlushInternal();
-            innerStream.TryGetBuffer(out var bytes);
+
+            _inner.TryGetBuffer(out var bytes);
+
             var bytesCount = bytes.Count;
             if (bytesCount == 0)
                 return 0;
+
             await _outputStream.WriteAsync(bytes.Array, bytes.Offset, bytesCount, token).ConfigureAwait(false);
-            innerStream.SetLength(0);
+
+            _inner.SetLength(0);
             return bytesCount;
         }
 
@@ -95,12 +94,12 @@ namespace Sparrow.Json
             if (await FlushAsync().ConfigureAwait(false) > 0)
                 await _outputStream.FlushAsync().ConfigureAwait(false);
 
-            _context.ReturnMemoryStream((MemoryStream)_stream);
+            _context.ReturnMemoryStream(_inner);
         }
 
         private void ThrowInvalidTypeException(Type typeOfStream)
         {
-            throw new ArgumentException($"Expected stream to be MemoryStream, but got {(typeOfStream == null ? "null" : typeOfStream.ToString())}.");
+            throw new ArgumentException($"Expected stream to be {nameof(MemoryStream)}, but got {(typeOfStream == null ? "null" : typeOfStream.ToString())}.");
         }
     }
 }

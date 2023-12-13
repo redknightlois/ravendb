@@ -15,8 +15,7 @@ public sealed class ShardIncludesCommandImpl : DatabaseIncludesCommandImpl
 
     }
 
-    protected override ValueTask<(long count, long sizeInBytes)> WriteIncludedDocumentsInternalAsync(AsyncBlittableJsonTextWriter writer, JsonOperationContext context,
-        CancellationToken token)
+    protected override ValueTask<(long count, long sizeInBytes)> WriteIncludedDocumentsInternalAsync(AsyncBlittableJsonTextWriter writer, JsonOperationContext context, CancellationToken token)
     {
         var includes = new List<Document>();
         IncludeDocumentsCommand.Fill(includes, includeMissingAsNull: true);

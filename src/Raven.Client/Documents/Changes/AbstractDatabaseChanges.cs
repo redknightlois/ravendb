@@ -13,6 +13,7 @@ using Raven.Client.Util;
 using Sparrow;
 using Sparrow.Json;
 using Sparrow.Json.Parsing;
+using Sparrow.Json.Sync;
 using Sparrow.Utils;
 
 namespace Raven.Client.Documents.Changes;
@@ -250,7 +251,7 @@ internal abstract class AbstractDatabaseChanges<TDatabaseConnectionState> : IDis
         {
             currentCommandId = ++_commandId;
             using (RequestExecutor.ContextPool.AllocateOperationContext(out var context))
-            await using (var writer = new AsyncBlittableJsonTextWriter(context, _ms))
+            using (var writer = new BlittableJsonTextWriter(context, _ms))
             {
                 writer.WriteStartObject();
                 writer.WritePropertyName("CommandId");

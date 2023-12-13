@@ -1833,6 +1833,8 @@ namespace Raven.Server.Json
 
         public static async ValueTask<(long Count, long SizeInBytes)> WriteIncludesAsync(this AsyncBlittableJsonTextWriter writer, JsonOperationContext context, IEnumerable<Document> includes, CancellationToken token = default)
         {
+            int flushAfter = 16 * Sparrow.Global.Constants.Size.Kilobyte;
+
             writer.WriteStartObject();
 
             long count = 0, sizeInBytes = 0;
@@ -1851,13 +1853,17 @@ namespace Raven.Server.Json
                 {
                     writer.WritePropertyName(conflict.Id);
                     WriteConflict(writer, conflict);
-                    await writer.MaybeFlushAsync(token);
+
+                    if (writer.BufferUsed > flushAfter)
+                        await writer.MaybeFlushAsync(token);
                     continue;
                 }
 
                 writer.WritePropertyName(document.Id);
                 WriteDocument(writer, context, metadataOnly: false, document: document);
-                await writer.MaybeFlushAsync(token);
+
+                if (writer.BufferUsed > flushAfter)
+                    await writer.MaybeFlushAsync(token);
             }
 
             writer.WriteEndObject();
@@ -1867,6 +1873,8 @@ namespace Raven.Server.Json
 
         public static async ValueTask<(long Count, long SizeInBytes)> WriteIncludesAsync(this AsyncBlittableJsonTextWriter writer, IEnumerable<BlittableJsonReaderObject> includes, CancellationToken token = default)
         {
+            int flushAfter = 16 * Sparrow.Global.Constants.Size.Kilobyte;
+
             writer.WriteStartObject();
 
             long count = 0, sizeInBytes = 0;
@@ -1884,7 +1892,8 @@ namespace Raven.Server.Json
                 writer.WritePropertyName(includeDoc.GetMetadata().GetId());
                 writer.WriteObject(includeDoc);
 
-                await writer.MaybeOuterFlushAsync();
+                if (writer.BufferUsed > flushAfter)
+                    await writer.MaybeOuterFlushAsync();
             }
 
             writer.WriteEndObject();
@@ -2059,6 +2068,8 @@ namespace Raven.Server.Json
 
         public static async Task WriteCountersForDocumentAsync(this AsyncBlittableJsonTextWriter writer, List<CounterDetail> counters, CancellationToken token)
         {
+            int flushAfter = 16 * Sparrow.Global.Constants.Size.Kilobyte;
+
             writer.WriteStartArray();
 
             var first = true;
@@ -2071,7 +2082,10 @@ namespace Raven.Server.Json
                 if (counter == null)
                 {
                     writer.WriteNull();
-                    await writer.MaybeFlushAsync(token);
+
+                    if (writer.BufferUsed > flushAfter)
+                        await writer.MaybeFlushAsync(token);
+
                     continue;
                 }
 
@@ -2090,7 +2104,8 @@ namespace Raven.Server.Json
 
                 writer.WriteEndObject();
 
-                await writer.MaybeFlushAsync(token);
+                if (writer.BufferUsed > flushAfter)
+                    await writer.MaybeFlushAsync(token);
             }
 
             writer.WriteEndArray();
@@ -2098,6 +2113,8 @@ namespace Raven.Server.Json
 
         public static async Task WriteCompareExchangeValuesAsync(this AsyncBlittableJsonTextWriter writer, Dictionary<string, CompareExchangeValue<BlittableJsonReaderObject>> compareExchangeValues, CancellationToken token)
         {
+            int flushAfter = 16 * Sparrow.Global.Constants.Size.Kilobyte;
+
             writer.WriteStartObject();
 
             var first = true;
@@ -2132,7 +2149,8 @@ namespace Raven.Server.Json
 
                 writer.WriteEndObject();
 
-                await writer.MaybeFlushAsync(token);
+                if (writer.BufferUsed > flushAfter)
+                    await writer.MaybeFlushAsync(token);
             }
 
             writer.WriteEndObject();
