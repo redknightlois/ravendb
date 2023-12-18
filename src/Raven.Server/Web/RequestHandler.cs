@@ -626,8 +626,8 @@ namespace Raven.Server.Web
             if (serverStore.Configuration.Security.EnableCsrfFilter == false)
                 return true;
             
-            var requestedOrigin = httpContext.Request.Headers[Constants.Headers.Origin];
-            
+            var requestHeaders = httpContext.Request.Headers;
+            var requestedOrigin = requestHeaders.Origin;
             if (requestedOrigin.Count == 0 || requestedOrigin[0] == null)
                 return true;
             
@@ -644,7 +644,7 @@ namespace Raven.Server.Web
             var uriOrigin = new Uri(origin);
             var originHost = uriOrigin.Host;
             var originAuthority = uriOrigin.Authority;
-            
+
             // for hostname matching we validate both hostname and port
             var hostMatches = host.ToString() == originAuthority;
             if (hostMatches)
@@ -659,8 +659,18 @@ namespace Raven.Server.Web
             var trustedOrigins = serverStore.Configuration.Security.CsrfTrustedOrigins ?? Array.Empty<string>();
             if (trustedOrigins.Length > 0)
             {
+                var originHostLength = originHost.Length;
                 foreach (var o in trustedOrigins)
                 {
+                    // PERF: Fast-path. If the length is different, we know they are not equal.
+                    if (o.Length != originHostLength)
+                        continue;
+
+                    // PERF: Fast-path. If the first or last letter are different, we know they are not equal.
+                    int lastIndex = o.Length - 1;
+                    if (o[0] != originHost[0] || o[lastIndex] != originHost[lastIndex])
+                        continue;
+
                     if (originHost == o)
                         return true;
                 }
@@ -670,12 +680,22 @@ namespace Raven.Server.Web
             var additionalHeaders = serverStore.Configuration.Security.CsrfAdditionalOriginHeaders ?? Array.Empty<string>();
             if (additionalHeaders.Length > 0)
             {
+                var originAuthorityLength = originAuthority.Length;
                 foreach (string additionalHeader in additionalHeaders)
                 {
-                    if (httpContext.Request.Headers.TryGetValue(additionalHeader, out var headerValue) == false)
+                    if (requestHeaders.TryGetValue(additionalHeader, out var headerValue) == false)
                         continue;
 
                     var stringHeader = headerValue.ToString();
+
+                    // PERF: Fast-path. If the length is different, we know they are not equal.
+                    if (stringHeader.Length != originAuthorityLength)
+                        continue;
+
+                    // PERF: Fast-path. If the first or last letter are different, we know they are not equal.
+                    int lastIndex = stringHeader.Length - 1;
+                    if (stringHeader[0] != originAuthority[0] || stringHeader[lastIndex] != originAuthority[lastIndex])
+                        continue;
 
                     if (stringHeader == originAuthority)
                         return true;
