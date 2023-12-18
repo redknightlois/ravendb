@@ -3,6 +3,7 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Sparrow.Binary;
 
 namespace Sparrow.Json
 {
@@ -81,7 +82,13 @@ namespace Sparrow.Json
             if (bytesCount == 0)
                 return 0;
 
-            await _outputStream.WriteAsync(bytes.Array, bytes.Offset, bytesCount, token).ConfigureAwait(false);
+            var flushTask = _outputStream.WriteAsync(bytes.Array, bytes.Offset, bytesCount, token);
+            if (flushTask.IsCompleted == false)
+                flushTask.RunSynchronously();
+
+            _outputStream.FlushAsync().ConfigureAwait(false);
+
+            _requiresFlushOnDispose = false;
 
             _inner.SetLength(0);
             return bytesCount;
@@ -89,11 +96,32 @@ namespace Sparrow.Json
 
         public async ValueTask DisposeAsync()
         {
+            bool needToFlushOutputStream = _pos != 0 && _requiresFlushOnDispose;
+
+            // Ensure we flush the internal auxiliary buffer.
             DisposeInternal();
 
-            if (await FlushAsync().ConfigureAwait(false) > 0)
-                await _outputStream.FlushAsync().ConfigureAwait(false);
+            // Now e will try to get the data. 
+            _inner.TryGetBuffer(out var bytes);
+            var bytesCount = bytes.Count;
+            if (bytesCount != 0)
+            {
+                var flushTask = _outputStream.WriteAsync(bytes.Array, bytes.Offset, bytesCount);
+                if (flushTask.IsCompleted == false)
+                    flushTask.RunSynchronously();
 
+                needToFlushOutputStream = true;
+            }
+
+            if (needToFlushOutputStream)
+            {
+                var flushTask = _outputStream.FlushAsync();
+                if (flushTask.IsCompleted == false)
+                    flushTask.RunSynchronously();
+
+                _requiresFlushOnDispose = false;
+            }
+            
             _context.ReturnMemoryStream(_inner);
         }
 

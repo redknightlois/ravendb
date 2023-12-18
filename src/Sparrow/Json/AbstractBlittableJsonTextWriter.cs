@@ -84,7 +84,9 @@ namespace Sparrow.Json
         private protected readonly JsonOperationContext.MemoryBuffer _pinnedBuffer;
         private readonly byte* _buffer;
 
+        private protected bool _requiresFlushOnDispose;
         private protected int _pos;
+
         private readonly JsonOperationContext.MemoryBuffer.ReturnBuffer _returnBuffer;
 
         protected AbstractBlittableJsonTextWriter(JsonOperationContext context, Stream stream)
@@ -94,6 +96,7 @@ namespace Sparrow.Json
 
             _returnBuffer = context.GetMemoryBuffer(out _pinnedBuffer);
             _buffer = _pinnedBuffer.Address;
+            _requiresFlushOnDispose = false;
         }
 
         public int Position => _pos;
@@ -591,11 +594,15 @@ namespace Sparrow.Json
             // If len is bigger than the default size, then we will fail this check either way.
             // therefore, we can remove a check from the fast-path even if highly predictable.
             if (_pos + len < JsonOperationContext.MemoryBuffer.DefaultSize)
+            {
+                _requiresFlushOnDispose = true;
                 return;
+            }
 
             if (len < JsonOperationContext.MemoryBuffer.DefaultSize)
             {
                 FlushInternal();
+                _requiresFlushOnDispose = true;
                 return;
             }
 
@@ -607,13 +614,15 @@ namespace Sparrow.Json
             if (_stream == null)
                 ThrowStreamClosed();
 
-            if (_pos == 0)
-                return false;
+            if (_pos != 0)
+            {
+                _stream.Write(_pinnedBuffer.Memory.Memory.Span.Slice(0, _pos));
+                _pos = 0;
+            }
 
-            _stream.Write(_pinnedBuffer.Memory.Memory.Span.Slice(0, _pos));
             _stream.Flush();
 
-            _pos = 0;
+            _requiresFlushOnDispose = false;
             return true;
         }
 
@@ -831,7 +840,6 @@ namespace Sparrow.Json
             try
             {
                 FlushInternal();
-                _stream.Flush();
             }
             catch (ObjectDisposedException)
             {
