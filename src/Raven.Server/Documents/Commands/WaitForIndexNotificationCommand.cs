@@ -32,7 +32,7 @@ internal sealed class WaitForIndexNotificationCommand : RavenCommand
             Method = HttpMethod.Post,
             Content = new BlittableJsonContent(async stream =>
             {
-                await using (var writer = new AsyncBlittableJsonTextWriter(ctx, stream))
+                using (var writer = new AsyncBlittableJsonTextWriter(ctx, stream))
                 {
                     writer.WriteStartObject();
                     writer.WriteArray(nameof(WaitForIndexNotificationRequest.RaftCommandIndexes), _indexes);

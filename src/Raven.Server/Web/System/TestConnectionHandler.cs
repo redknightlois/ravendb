@@ -35,7 +35,7 @@ namespace Raven.Server.Web.System
             var result = await ServerStore.TestConnectionToRemote(url, database);
 
             using (ServerStore.ContextPool.AllocateOperationContext(out JsonOperationContext context))
-            await using (var writer = new AsyncBlittableJsonTextWriter(context, ResponseBodyStream()))
+            using (var writer = new AsyncBlittableJsonTextWriter(context, ResponseBodyStream()))
             {
                 // test the connection from the remote node to this one
                 if (bidirectional == true && result.Success)
@@ -66,7 +66,7 @@ namespace Raven.Server.Web.System
 
             async Task<TcpConnectionHeaderMessage.SupportedFeatures> NegotiateWithRemote(string url, TcpConnectionInfo info, Stream stream, JsonOperationContext context, List<string> logs = null)
             {
-                await using (var writer = new AsyncBlittableJsonTextWriter(context, stream))
+                using (var writer = new AsyncBlittableJsonTextWriter(context, stream))
                 {
                     await WriteOperationHeaderToRemote(writer, TcpConnectionHeaderMessage.OperationTypes.TestConnection, database, info.ServerId);
                     using (var responseJson = await context.ReadForMemoryAsync(stream, $"TestConnectionHandler/{url}/Read-Handshake-Response"))

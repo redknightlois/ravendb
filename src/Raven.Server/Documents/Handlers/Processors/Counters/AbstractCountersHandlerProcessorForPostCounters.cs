@@ -31,7 +31,7 @@ namespace Raven.Server.Documents.Handlers.Processors.Counters
 
                 var result = await ApplyCountersOperationsAsync(context, counterBatch);
 
-                await using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
+                using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
                 {
                     context.Write(writer, result.ToJson());
                 }

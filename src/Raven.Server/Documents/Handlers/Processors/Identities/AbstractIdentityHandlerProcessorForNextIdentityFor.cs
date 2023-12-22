@@ -24,7 +24,7 @@ internal abstract class AbstractIdentityHandlerProcessorForNextIdentityFor<TRequ
         var (_, _, newIdentityValue) = await RequestHandler.ServerStore.GenerateClusterIdentityAsync(name, GetDatabaseIdentityPartsSeparator(), RequestHandler.DatabaseName, RequestHandler.GetRaftRequestIdFromQuery());
 
         using (ContextPool.AllocateOperationContext(out JsonOperationContext context))
-        await using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
+        using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
         {
             writer.WriteStartObject();
 

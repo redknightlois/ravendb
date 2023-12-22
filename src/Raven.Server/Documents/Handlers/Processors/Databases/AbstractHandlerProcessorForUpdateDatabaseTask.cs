@@ -19,7 +19,7 @@ internal abstract class AbstractHandlerProcessorForUpdateDatabaseTask<TRequestHa
         {
             await AssertCanExecuteAsync();
 
-            await using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
+            using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
             {
                 await UpdateConfigurationAsync(context, writer);
             }

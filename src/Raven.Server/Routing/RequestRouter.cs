@@ -414,7 +414,7 @@ namespace Raven.Server.Routing
         {
             context.Response.StatusCode = (int)HttpStatusCode.ServiceUnavailable;
             using (var ctx = JsonOperationContext.ShortTermSingleUse())
-            await using (var writer = new AsyncBlittableJsonTextWriter(ctx, context.Response.Body))
+            using (var writer = new AsyncBlittableJsonTextWriter(ctx, context.Response.Body))
             {
                 ctx.Write(writer,
                     new DynamicJsonValue
@@ -495,7 +495,7 @@ namespace Raven.Server.Routing
 
             context.Response.StatusCode = (int)HttpStatusCode.Forbidden;
             using (var ctx = JsonOperationContext.ShortTermSingleUse())
-            await using (var writer = new AsyncBlittableJsonTextWriter(ctx, context.Response.Body))
+            using (var writer = new AsyncBlittableJsonTextWriter(ctx, context.Response.Body))
             {
                 await DrainRequestAsync(ctx, context);
 

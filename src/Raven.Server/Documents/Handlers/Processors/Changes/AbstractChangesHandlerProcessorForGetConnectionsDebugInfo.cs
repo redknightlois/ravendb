@@ -20,7 +20,7 @@ internal abstract class AbstractChangesHandlerProcessorForGetConnectionsDebugInf
     public override async ValueTask ExecuteAsync()
     {
         using (ContextPool.AllocateOperationContext(out JsonOperationContext context))
-        await using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
+        using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
         {
             writer.WriteStartObject();
 

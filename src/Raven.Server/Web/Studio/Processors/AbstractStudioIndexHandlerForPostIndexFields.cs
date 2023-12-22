@@ -52,7 +52,7 @@ internal abstract class AbstractStudioIndexHandlerForPostIndexFields<TRequestHan
 
                     var outputFields = compiledIndex.OutputFields;
 
-                    await using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
+                    using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
                     {
                         writer.WriteStartObject();
                         writer.WriteArray(context, "Results", outputFields, (w, c, field) => w.WriteString(field));
@@ -62,7 +62,7 @@ internal abstract class AbstractStudioIndexHandlerForPostIndexFields<TRequestHan
                 catch (IndexCompilationException)
                 {
                     // swallow compilation exception and return empty array as response
-                    await using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
+                    using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
                     {
                         writer.WriteStartArray();
                         writer.WriteEndArray();

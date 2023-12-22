@@ -38,25 +38,23 @@ internal sealed class StorageHandlerProcessorForGetEnvironmentReport : AbstractS
         }
 
         using (ContextPool.AllocateOperationContext(out DocumentsOperationContext context))
+        using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
         {
-            await using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
-            {
-                writer.WriteStartObject();
+            writer.WriteStartObject();
 
-                writer.WritePropertyName("Name");
-                writer.WriteString(env.Name);
-                writer.WriteComma();
+            writer.WritePropertyName("Name");
+            writer.WriteString(env.Name);
+            writer.WriteComma();
 
-                writer.WritePropertyName("Type");
-                writer.WriteString(env.Type.ToString());
-                writer.WriteComma();
+            writer.WritePropertyName("Type");
+            writer.WriteString(env.Type.ToString());
+            writer.WriteComma();
 
-                var djv = (DynamicJsonValue)TypeConverter.ToBlittableSupportedType(GetDetailedReport(env, details));
-                writer.WritePropertyName("Report");
-                writer.WriteObject(context.ReadObject(djv, env.Name));
+            var djv = (DynamicJsonValue)TypeConverter.ToBlittableSupportedType(GetDetailedReport(env, details));
+            writer.WritePropertyName("Report");
+            writer.WriteObject(context.ReadObject(djv, env.Name));
 
-                writer.WriteEndObject();
-            }
+            writer.WriteEndObject();
         }
     }
 

@@ -25,7 +25,7 @@ namespace Raven.Server.Documents.Handlers.Processors.Expiration
             {
                 if (expirationConfig != null)
                 {
-                    await using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
+                    using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
                     {
                         context.Write(writer, expirationConfig.ToJson());
                     }

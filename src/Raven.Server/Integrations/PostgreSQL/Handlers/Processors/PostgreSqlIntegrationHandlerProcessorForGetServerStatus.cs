@@ -20,7 +20,7 @@ internal sealed class PostgreSqlIntegrationHandlerProcessorForGetServerStatus<TR
         AssertCanUsePostgreSqlIntegration(RequestHandler);
 
         using (ContextPool.AllocateOperationContext(out JsonOperationContext context))
-        await using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
+        using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
         {
             var dto = new PostgreSqlServerStatus { Active = RequestHandler.Server.PostgresServer.Active };
 

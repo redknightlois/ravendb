@@ -24,7 +24,7 @@ namespace Raven.Server.Documents.Handlers.Processors.DocumentsCompression
             if (compressionConfig != null)
             {
                 using (RequestHandler.Server.ServerStore.ContextPool.AllocateOperationContext(out TransactionOperationContext context))
-                await using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
+                using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
                 {
                     context.Write(writer, compressionConfig.ToJson());
                 }

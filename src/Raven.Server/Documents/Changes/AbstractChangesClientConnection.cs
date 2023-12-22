@@ -167,7 +167,7 @@ public abstract class AbstractChangesClientConnection<TOperationContext> : ILowM
                     context.Renew();
 
                     var messagesCount = 0;
-                    await using (var writer = new AsyncBlittableJsonTextWriter(context, ms))
+                    using (var writer = new AsyncBlittableJsonTextWriter(context, ms))
                     {
                         sp.Restart();
 

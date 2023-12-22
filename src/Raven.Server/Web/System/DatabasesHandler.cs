@@ -94,7 +94,7 @@ namespace Raven.Server.Web.System
                 var (newIndex, _) = await ServerStore.SendToLeaderAsync(update);
 
                 // Return Raft Index
-                await using (var writer = new AsyncBlittableJsonTextWriter(context, ResponseBodyStream()))
+                using (var writer = new AsyncBlittableJsonTextWriter(context, ResponseBodyStream()))
                 {
                     context.Write(writer, new DynamicJsonValue
                     {
@@ -131,7 +131,7 @@ namespace Raven.Server.Web.System
                         // if this is a newly created db that we haven't been notified about it yet
                         HttpContext.Response.StatusCode = (int)HttpStatusCode.ServiceUnavailable;
                         HttpContext.Response.Headers[Constants.Headers.DatabaseMissing] = name;
-                        await using (var writer = new AsyncBlittableJsonTextWriter(context, ResponseBodyStream()))
+                        using (var writer = new AsyncBlittableJsonTextWriter(context, ResponseBodyStream()))
                         {
                             context.Write(writer,
                                 new DynamicJsonValue { ["Type"] = "Error", ["Message"] = "Database " + name + " wasn't found" });
@@ -154,7 +154,7 @@ namespace Raven.Server.Web.System
                         // The database at deletion progress from all nodes
                         HttpContext.Response.StatusCode = (int)HttpStatusCode.ServiceUnavailable;
                         HttpContext.Response.Headers[Constants.Headers.DatabaseMissing] = name;
-                        await using (var writer = new AsyncBlittableJsonTextWriter(context, HttpContext.Response.Body))
+                        using (var writer = new AsyncBlittableJsonTextWriter(context, HttpContext.Response.Body))
                         {
                             context.Write(writer, new DynamicJsonValue { ["Type"] = "Error", ["Message"] = "Database " + name + " was deleted" });
                         }
@@ -165,7 +165,7 @@ namespace Raven.Server.Web.System
                     clusterTopology.ReplaceCurrentNodeUrlWithClientRequestedNodeUrlIfNecessary(ServerStore, HttpContext);
                     var license = ServerStore.LoadLicenseLimits();
 
-                    await using (var writer = new AsyncBlittableJsonTextWriter(context, ResponseBodyStream()))
+                    using (var writer = new AsyncBlittableJsonTextWriter(context, ResponseBodyStream()))
                     {
                         long stampIndex;
                         DatabaseTopology topology;
@@ -285,16 +285,15 @@ namespace Raven.Server.Web.System
                 return;
 
             var isLoaded = ServerStore.DatabasesLandlord.IsDatabaseLoaded(name);
+
             using (ServerStore.ContextPool.AllocateOperationContext(out TransactionOperationContext context))
+            using (var writer = new AsyncBlittableJsonTextWriter(context, ResponseBodyStream()))
             {
-                await using (var writer = new AsyncBlittableJsonTextWriter(context, ResponseBodyStream()))
+                context.Write(writer, new DynamicJsonValue
                 {
-                    context.Write(writer, new DynamicJsonValue
-                    {
-                        [nameof(IsDatabaseLoadedCommand.CommandResult.DatabaseName)] = name,
-                        [nameof(IsDatabaseLoadedCommand.CommandResult.IsLoaded)] = isLoaded
-                    });
-                }
+                    [nameof(IsDatabaseLoadedCommand.CommandResult.DatabaseName)] = name,
+                    [nameof(IsDatabaseLoadedCommand.CommandResult.IsLoaded)] = isLoaded
+                });
             }
         }
 
@@ -326,7 +325,7 @@ namespace Raven.Server.Web.System
             var fileSystemNames = await migrator.GetFileSystemNames(buildInfo.MajorVersion);
 
             using (ServerStore.ContextPool.AllocateOperationContext(out TransactionOperationContext context))
-            await using (var writer = new AsyncBlittableJsonTextWriter(context, ResponseBodyStream()))
+            using (var writer = new AsyncBlittableJsonTextWriter(context, ResponseBodyStream()))
             {
                 var json = new DynamicJsonValue
                 {

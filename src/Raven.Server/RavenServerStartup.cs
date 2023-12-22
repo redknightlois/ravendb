@@ -110,7 +110,7 @@ namespace Raven.Server
 
             context.Response.Headers[Constants.Headers.ContentType] = "application/json; charset=utf-8";
             using (_server.ServerStore.ContextPool.AllocateOperationContext(out JsonOperationContext ctx))
-            await using (var writer = new AsyncBlittableJsonTextWriter(ctx, context.Response.Body))
+            using (var writer = new AsyncBlittableJsonTextWriter(ctx, context.Response.Body))
             {
                 writer.WriteStartObject();
                 writer.WritePropertyName("Message");
@@ -209,7 +209,7 @@ namespace Raven.Server
 
                         MaybeAddAdditionalExceptionData(djv, e);
 
-                        await using (var writer = new AsyncBlittableJsonTextWriter(ctx, context.Response.Body))
+                        using (var writer = new AsyncBlittableJsonTextWriter(ctx, context.Response.Body))
                         {
                             var json = ctx.ReadObject(djv, "exception");
                             writer.WriteObject(json);

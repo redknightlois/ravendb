@@ -27,7 +27,7 @@ internal sealed class SqlEtlTestCommand : RavenCommand
             Method = HttpMethod.Post,
             Content = new BlittableJsonContent(async stream =>
             {
-                await using (var writer = new AsyncBlittableJsonTextWriter(ctx, stream))
+                using (var writer = new AsyncBlittableJsonTextWriter(ctx, stream))
                 {
                     writer.WriteObject(_testScript);
                 }

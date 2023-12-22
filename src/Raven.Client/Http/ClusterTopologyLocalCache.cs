@@ -77,7 +77,7 @@ namespace Raven.Client.Http
                 }
 
                 using (var stream = SafeFileStream.Create(path, FileMode.Create, FileAccess.Write, FileShare.Read))
-                await using (var writer = new AsyncBlittableJsonTextWriter(context, stream))
+                using (var writer = new AsyncBlittableJsonTextWriter(context, stream))
                 {
                     var json = new DynamicJsonValue
                     {
@@ -90,7 +90,6 @@ namespace Raven.Client.Http
                     };
 
                     context.Write(writer, json);
-                    await writer.FlushAsync(token).ConfigureAwait(false);
                 }
             }
             catch (Exception e)

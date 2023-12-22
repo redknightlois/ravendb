@@ -29,7 +29,7 @@ namespace Raven.Client.ServerWide.Tcp
                 Log.Info($"Start negotiation for {parameters.Operation} operation with {parameters.DestinationNodeTag ?? parameters.DestinationUrl}");
             }
 
-            await using (var writer = new AsyncBlittableJsonTextWriter(context, stream))
+            using (var writer = new AsyncBlittableJsonTextWriter(context, stream))
             {
                 var current = parameters.Version;
                 bool dataCompression;

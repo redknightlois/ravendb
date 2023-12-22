@@ -90,7 +90,7 @@ namespace Raven.Client.Http
                 }
 
                 using (var stream = SafeFileStream.Create(path, FileMode.Create, FileAccess.Write, FileShare.Read))
-                await using (var writer = new AsyncBlittableJsonTextWriter(context, stream))
+                using (var writer = new AsyncBlittableJsonTextWriter(context, stream))
                 {
                     writer.WriteStartObject();
 

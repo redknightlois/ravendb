@@ -61,7 +61,7 @@ namespace Raven.Client.ServerWide.Operations.Sorters
                     Method = HttpMethod.Put,
                     Content = new BlittableJsonContent(async stream =>
                     {
-                        await using (var writer = new AsyncBlittableJsonTextWriter(ctx, stream))
+                        using (var writer = new AsyncBlittableJsonTextWriter(ctx, stream))
                         {
                             writer.WriteStartObject();
                             writer.WriteArray("Sorters", _sortersToAdd);

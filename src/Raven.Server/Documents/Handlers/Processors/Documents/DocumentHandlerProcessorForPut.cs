@@ -25,7 +25,7 @@ internal sealed class DocumentHandlerProcessorForPut : AbstractDocumentHandlerPr
 
             HttpContext.Response.StatusCode = (int)HttpStatusCode.Created;
 
-            await using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
+            using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
             {
                 writer.WriteStartObject();
 

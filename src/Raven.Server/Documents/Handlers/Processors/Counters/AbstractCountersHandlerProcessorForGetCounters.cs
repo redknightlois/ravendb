@@ -26,7 +26,7 @@ namespace Raven.Server.Documents.Handlers.Processors.Counters
             {
                 var countersDetail = await GetCountersAsync(context, docId, counters, full);
 
-                await using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
+                using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
                 {
                     context.Write(writer, countersDetail.ToJson());
                 }
