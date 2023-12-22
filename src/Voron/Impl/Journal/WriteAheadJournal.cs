@@ -874,8 +874,8 @@ namespace Voron.Impl.Journal
                     _waitForJournalStateUpdateUnderTx.Reset();
                     _onWriteTransactionCompleted.Reset();
                     ExceptionDispatchInfo edi = null;
-                    var sp = Stopwatch.StartNew();
 
+                    var sp = Stopwatch.StartNew();
                     var singleUseFlag = new SingleUseFlag();
                     Action<LowLevelTransaction> currentAction = txw =>
                     {

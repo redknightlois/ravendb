@@ -66,7 +66,7 @@ namespace Raven.Client.Documents.Operations.Indexes
                     Method = HttpMethod.Put,
                     Content = new BlittableJsonContent(async stream =>
                     {
-                        await using (var writer = new AsyncBlittableJsonTextWriter(ctx, stream))
+                        using (var writer = new AsyncBlittableJsonTextWriter(ctx, stream))
                         {
                             writer.WriteStartObject();
                             writer.WriteArray("Indexes", _indexToAdd);

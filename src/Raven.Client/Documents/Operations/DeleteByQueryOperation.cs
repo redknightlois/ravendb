@@ -126,7 +126,7 @@ namespace Raven.Client.Documents.Operations
                     Method = HttpMethod.Delete,
                     Content = new BlittableJsonContent(async stream =>
                     {
-                        await using (var writer = new AsyncBlittableJsonTextWriter(ctx, stream))
+                        using (var writer = new AsyncBlittableJsonTextWriter(ctx, stream))
                         {
                             writer.WriteIndexQuery(_conventions, ctx, _queryToDelete);
                         }

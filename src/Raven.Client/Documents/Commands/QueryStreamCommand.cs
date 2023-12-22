@@ -30,7 +30,7 @@ namespace Raven.Client.Documents.Commands
                 Method = HttpMethod.Post,
                 Content = new BlittableJsonContent(async stream =>
                 {
-                    await using (var writer = new AsyncBlittableJsonTextWriter(ctx, stream))
+                    using (var writer = new AsyncBlittableJsonTextWriter(ctx, stream))
                     {
                         writer.WriteIndexQuery(_conventions, ctx, _indexQuery);
                     }

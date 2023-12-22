@@ -7,7 +7,7 @@ using Sparrow.Binary;
 
 namespace Sparrow.Json
 {
-    public sealed class AsyncBlittableJsonTextWriter : AbstractBlittableJsonTextWriter, IAsyncDisposable
+    public sealed class AsyncBlittableJsonTextWriter : AbstractBlittableJsonTextWriter, IDisposable, IAsyncDisposable
     {
         private readonly MemoryStream _inner;
         private readonly Stream _outputStream;
@@ -94,6 +94,11 @@ namespace Sparrow.Json
             return bytesCount;
         }
 
+        private void ThrowInvalidTypeException(Type typeOfStream)
+        {
+            throw new ArgumentException($"Expected stream to be {nameof(MemoryStream)}, but got {(typeOfStream == null ? "null" : typeOfStream.ToString())}.");
+        }
+
         public async ValueTask DisposeAsync()
         {
             bool needToFlushOutputStream = _pos != 0 && _requiresFlushOnDispose;
@@ -121,13 +126,39 @@ namespace Sparrow.Json
 
                 _requiresFlushOnDispose = false;
             }
-            
+
             _context.ReturnMemoryStream(_inner);
         }
 
-        private void ThrowInvalidTypeException(Type typeOfStream)
+        public void Dispose()
         {
-            throw new ArgumentException($"Expected stream to be {nameof(MemoryStream)}, but got {(typeOfStream == null ? "null" : typeOfStream.ToString())}.");
+            bool needToFlushOutputStream = _pos != 0 && _requiresFlushOnDispose;
+
+            // Ensure we flush the internal auxiliary buffer.
+            DisposeInternal();
+
+            // Now e will try to get the data. 
+            _inner.TryGetBuffer(out var bytes);
+            var bytesCount = bytes.Count;
+            if (bytesCount != 0)
+            {
+                var flushTask = _outputStream.WriteAsync(bytes.Array, bytes.Offset, bytesCount);
+                if (flushTask.IsCompleted == false)
+                    flushTask.RunSynchronously();
+
+                needToFlushOutputStream = true;
+            }
+
+            if (needToFlushOutputStream)
+            {
+                var flushTask = _outputStream.FlushAsync();
+                if (flushTask.IsCompleted == false)
+                    flushTask.RunSynchronously();
+
+                _requiresFlushOnDispose = false;
+            }
+
+            _context.ReturnMemoryStream(_inner);
         }
     }
 }

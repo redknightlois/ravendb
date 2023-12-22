@@ -116,7 +116,7 @@ namespace Raven.Client.Documents.Commands
                 {
                     // this is here to catch people closing the session before the ToListAsync() completes
                     _session.AssertNotDisposed();
-                    await using (var writer = new AsyncBlittableJsonTextWriter(ctx, stream))
+                    using (var writer = new AsyncBlittableJsonTextWriter(ctx, stream))
                     {
                         writer.WriteIndexQuery(_conventions, ctx, _indexQuery);
                     }

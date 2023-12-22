@@ -35,8 +35,8 @@ namespace Raven.Server.Documents.Handlers.Processors.Revisions
 
             ScheduleRevertRevisions(operationId, configuration, token);
 
-            using (ServerStore.ContextPool.AllocateOperationContext(out JsonOperationContext context))
-            await using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
+            using (ServerStore.ContextPool.AllocateOperationContext(out JsonOperationContext context)) 
+            using (var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream()))
             {
                 writer.WriteOperationIdAndNodeTag(context, operationId, ServerStore.NodeTag);
             }

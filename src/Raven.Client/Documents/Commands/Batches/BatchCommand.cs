@@ -98,7 +98,7 @@ namespace Raven.Client.Documents.Commands.Batches
                 Method = HttpMethod.Post,
                 Content = new BlittableJsonContent(async stream =>
                 {
-                    await using (var writer = new AsyncBlittableJsonTextWriter(ctx, stream))
+                    using (var writer = new AsyncBlittableJsonTextWriter(ctx, stream))
                     {
                         writer.WriteStartObject();
                         writer.WriteArray("Commands", _commandsAsJson);

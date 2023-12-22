@@ -48,20 +48,13 @@ namespace Sparrow.Json
             AssertContextNotDisposed();
 
             using (var memoryStream = new MemoryStream())
+            using (var tw = new AsyncBlittableJsonTextWriter(_context, memoryStream))
             {
-                var tw = new AsyncBlittableJsonTextWriter(_context, memoryStream);
-                try
-                {
-                    tw.WriteValue(BlittableJsonToken.StartArray, this);
-                    tw.FlushAsync().AsTask().ConfigureAwait(false).GetAwaiter().GetResult();
-                    memoryStream.Position = 0;
+                tw.WriteValue(BlittableJsonToken.StartArray, this);
+                tw.FlushAsync().AsTask().ConfigureAwait(false).GetAwaiter().GetResult();
+                memoryStream.Position = 0;
 
-                    return new StreamReader(memoryStream).ReadToEnd();
-                }
-                finally
-                {
-                    tw.DisposeAsync().AsTask().ConfigureAwait(false).GetAwaiter().GetResult();
-                }
+                return new StreamReader(memoryStream).ReadToEnd();
             }
         }
 

@@ -234,7 +234,7 @@ namespace Raven.Client.Documents.Commands
 
                 request.Content = new BlittableJsonContent(async stream =>
                 {
-                    await using (var writer = new AsyncBlittableJsonTextWriter(context, stream))
+                    using (var writer = new AsyncBlittableJsonTextWriter(context, stream))
                     {
                         writer.WriteStartObject();
                         writer.WriteArray("Ids", uniqueIds);

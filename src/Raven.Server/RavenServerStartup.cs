@@ -181,7 +181,7 @@ namespace Raven.Server
             {
                 try
                 {
-                    sp?.Stop();
+                    //sp?.Stop();
                     exception = e;
 
                     CheckVersionAndWrapException(context, ref e);

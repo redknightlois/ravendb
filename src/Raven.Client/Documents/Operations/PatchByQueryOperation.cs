@@ -92,7 +92,7 @@ namespace Raven.Client.Documents.Operations
                     Method = HttpMethods.Patch,
                     Content = new BlittableJsonContent(async stream =>
                     {
-                        await using (var writer = new AsyncBlittableJsonTextWriter(ctx, stream))
+                        using (var writer = new AsyncBlittableJsonTextWriter(ctx, stream))
                         {
                             writer.WriteStartObject();
 
