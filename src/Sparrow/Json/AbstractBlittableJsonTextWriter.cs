@@ -85,9 +85,6 @@ namespace Sparrow.Json
         private protected readonly JsonOperationContext.MemoryBuffer _pinnedBuffer;
         private readonly byte* _buffer;
 
-        private readonly byte* _auxiliarBuffer;
-        private readonly int _auxiliarBufferLength;
-
         private protected bool _started;
         private protected int _pos;
         private readonly JsonOperationContext.MemoryBuffer.ReturnBuffer _returnBuffer;
@@ -99,10 +96,6 @@ namespace Sparrow.Json
 
             _returnBuffer = context.GetMemoryBuffer(out _pinnedBuffer);
             _buffer = _pinnedBuffer.Address;
-
-            _returnAuxiliarBuffer = context.GetMemoryBuffer(32, out var buffer);
-            _auxiliarBuffer = buffer.Address;
-            _auxiliarBufferLength = buffer.Size;
             
             _started = false;
         }
