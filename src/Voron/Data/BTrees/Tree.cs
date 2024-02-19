@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -29,7 +29,9 @@ namespace Voron.Data.BTrees
 #endif
 
         private readonly TreeMutableState _state;
-        private readonly RecentlyFoundTreePages _recentlyFoundPages;
+
+        private static readonly ObjectPool<RecentlyFoundTreePages> _currentRecentlyFoundPagesPool = new(() => new RecentlyFoundTreePages(), 128);
+        private RecentlyFoundTreePages _recentlyFoundPages;
 
         private Dictionary<Slice, FixedSizeTree> _fixedSizeTrees;
         private Dictionary<Slice, FixedSizeTree<double>> _fixedSizeTreesForDouble;
@@ -63,7 +65,7 @@ namespace Voron.Data.BTrees
                 SetNewPageAllocator(newPageAllocator);
             }
 
-            _recentlyFoundPages = new RecentlyFoundTreePages(llt.Flags == TransactionFlags.Read ? 8 : 2); 
+            _recentlyFoundPages = _currentRecentlyFoundPagesPool.Allocate();
 
             _state = new TreeMutableState(llt)
             {
@@ -76,7 +78,9 @@ namespace Voron.Data.BTrees
             _llt = llt;
             _tx = tx;
             Name = name;
-            _recentlyFoundPages = new RecentlyFoundTreePages(llt.Flags == TransactionFlags.Read ? 8 : 2);
+            
+            _recentlyFoundPages = _currentRecentlyFoundPagesPool.Allocate();
+
             _state = new TreeMutableState(llt);
             _state = state;
         }
@@ -504,7 +508,7 @@ namespace Voron.Data.BTrees
         {
             var newPage = GetWriteableTreePage(pageNumber);
             newPage.Dirty = true;
-            _recentlyFoundPages.Reset(pageNumber);
+            _recentlyFoundPages?.Reset(pageNumber);
 
             if (IsLeafCompressionSupported && newPage.IsCompressed)
                 DecompressionsCache.Invalidate(pageNumber, DecompressionUsage.Read);
@@ -789,8 +793,7 @@ namespace Voron.Data.BTrees
 
                 var pageNode = p.GetNode(nodePos);
                 p = GetReadOnlyTreePage(pageNode->PageNumber);
-                Debug.Assert(pageNode->PageNumber == p.PageNumber,
-                    string.Format("Requested Page: #{0}. Got Page: #{1}", pageNode->PageNumber, p.PageNumber));
+                Debug.Assert(pageNode->PageNumber == p.PageNumber, $"Requested Page: #{pageNode->PageNumber}. Got Page: #{p.PageNumber}");
 
                 cursor.Push(p);
             }
@@ -819,75 +822,76 @@ namespace Voron.Data.BTrees
 
         private void AddToRecentlyFoundPages(FastList<long> c, TreePage p, bool leftmostPage, bool rightmostPage)
         {
+            if (_recentlyFoundPages == null)
+                return;
+
             Debug.Assert(p.IsCompressed == false);
 
-            ByteStringContext.Scope firstScope, lastScope;
-            Slice firstKey;
+            SliceOptions firstKeyOption, lastKeyOption;
+            ReadOnlySpan<byte> firstKey, lastKey;
+
             if (leftmostPage)
             {
-                firstScope = new ByteStringContext<ByteStringMemoryCache>.Scope();
-                firstKey = Slices.BeforeAllKeys;
+                firstKey = ReadOnlySpan<byte>.Empty;
+                firstKeyOption = Slices.BeforeAllKeys.Options;
             }
             else
             {
-                // We are going to store the slice, therefore we copy.
-                firstScope = p.GetNodeKey(_llt, 0, ByteStringType.Immutable, out firstKey);
+                p.GetNodeKey(0, out firstKey);
+                firstKeyOption = SliceOptions.Key;
             }
 
-            Slice lastKey;
             if (rightmostPage)
             {
-                lastScope = new ByteStringContext<ByteStringMemoryCache>.Scope();
-                lastKey = Slices.AfterAllKeys;
+                lastKey = ReadOnlySpan<byte>.Empty;
+                lastKeyOption = Slices.AfterAllKeys.Options;
             }
             else
             {
-                // We are going to store the slice, therefore we copy.
-                lastScope = p.GetNodeKey(_llt, p.NumberOfEntries - 1, ByteStringType.Immutable, out lastKey);
+                p.GetNodeKey(p.NumberOfEntries - 1, out lastKey);
+                lastKeyOption = SliceOptions.Key;
             }
 
-            var foundPage = new RecentlyFoundTreePages.FoundTreePage(p.PageNumber, p, firstKey, lastKey, c.ToArray(), firstScope, lastScope);
-
-            _recentlyFoundPages.Add(foundPage);
+            _recentlyFoundPages.Add(p, firstKeyOption, firstKey, lastKeyOption, lastKey, c.AsUnsafeSpan());
         }
 
+        [SkipLocalsInit]
         private void AddToRecentlyFoundPages(TreeCursor c, TreePage p, bool leftmostPage, bool rightmostPage)
         {
-            ByteStringContext.Scope firstScope, lastScope;
-            Slice firstKey;
+            if (_recentlyFoundPages == null)
+                return;
+
+            SliceOptions firstKeyOption, lastKeyOption;
+            ReadOnlySpan<byte> firstKey, lastKey;
+
             if (leftmostPage)
             {
-                firstScope = new ByteStringContext<ByteStringMemoryCache>.Scope();
-                firstKey = Slices.BeforeAllKeys;
+                firstKey = ReadOnlySpan<byte>.Empty;
+                firstKeyOption = Slices.BeforeAllKeys.Options;
             }
             else
             {
-                // We are going to store the slice, therefore we copy.
-                firstScope = p.GetNodeKey(_llt, 0, ByteStringType.Immutable, out firstKey);
+                p.GetNodeKey(0, out firstKey);
+                firstKeyOption = SliceOptions.Key;
             }
 
-            Slice lastKey;
             if (rightmostPage)
             {
-                lastScope = new ByteStringContext<ByteStringMemoryCache>.Scope();
-                lastKey = Slices.AfterAllKeys;
+                lastKey = ReadOnlySpan<byte>.Empty;
+                lastKeyOption = Slices.AfterAllKeys.Options;
             }
             else
             {
-                // We are going to store the slice, therefore we copy.
-                lastScope = p.GetNodeKey(_llt, p.NumberOfEntries - 1, ByteStringType.Immutable, out lastKey);
+                p.GetNodeKey(p.NumberOfEntries - 1, out lastKey);
+                lastKeyOption = SliceOptions.Key;
             }
 
-            var cursorPath = new long[c.Pages.Count];
+            Span<long> cursorPath = stackalloc long[c.Pages.Count];
             int pos = cursorPath.Length - 1;
             foreach (var page in c.Pages)
-            {
                 cursorPath[pos--] = page.PageNumber;
-            }
 
-            var foundPage = new RecentlyFoundTreePages.FoundTreePage(p.PageNumber, p, firstKey, lastKey, cursorPath, firstScope, lastScope);
-
-            _recentlyFoundPages.Add(foundPage);
+            _recentlyFoundPages.Add(p, firstKeyOption, firstKey, lastKeyOption, lastKey, cursorPath);
         }
 
         private bool TryUseRecentTransactionPage(Slice key, out TreePage page, out TreeNodeHeader* node)
@@ -895,8 +899,10 @@ namespace Voron.Data.BTrees
             node = null;
             page = null;
 
-            var foundPage = _recentlyFoundPages?.Find(key);
-            if (foundPage == null)
+            if (_recentlyFoundPages == null)
+                return false;
+
+            if (_recentlyFoundPages.TryFind(key, out var foundPage) == false)
                 return false;
 
             if (foundPage.Page != null)
@@ -920,12 +926,11 @@ namespace Voron.Data.BTrees
 
         private bool TryUseRecentTransactionPage(Slice key, out TreeCursorConstructor cursor, out TreePage page, out TreeNodeHeader* node)
         {
-            var foundPage = _recentlyFoundPages?.Find(key);
-            if (foundPage == null)
+            if (_recentlyFoundPages == null || _recentlyFoundPages.TryFind(key, out var foundPage) == false)
             {
                 page = null;
                 node = null;
-                cursor = default(TreeCursorConstructor);
+                cursor = default;
                 return false;
             }
 
@@ -947,7 +952,7 @@ namespace Voron.Data.BTrees
 
             node = page.Search(_llt, key); // will set the LastSearchPosition
 
-            cursor = new TreeCursorConstructor(_llt, this, page, foundPage.CursorPath, lastFoundPageNumber);
+            cursor = new TreeCursorConstructor(_llt, this, page, foundPage.Cursor.ToArray(), lastFoundPageNumber);
             return true;
         }
 
@@ -1033,10 +1038,8 @@ namespace Voron.Data.BTrees
             if (_llt.Flags == (TransactionFlags.ReadWrite) == false)
                 throw new ArgumentException("Cannot delete a value in a read only transaction");
 
-            State.IsModified = true;            
-            TreeNodeHeader* node;
-            TreeCursorConstructor cursorConstructor;
-            var page = FindPageFor(key, node: out node, cursor: out cursorConstructor, allowCompressed: true);
+            State.IsModified = true;
+            var page = FindPageFor(key, node: out TreeNodeHeader* _, cursor: out var cursorConstructor, allowCompressed: true);
 
             if (page.IsCompressed)
             {
@@ -1073,8 +1076,7 @@ namespace Voron.Data.BTrees
 
         public ReadResult Read(Slice key)
         {
-            TreeNodeHeader* node;
-            var p = FindPageFor(key, out node);
+            var p = FindPageFor(key, out TreeNodeHeader* node);
 
             if (p.LastMatch != 0)
                 return null;
@@ -1090,8 +1092,7 @@ namespace Voron.Data.BTrees
 
         public int GetDataSize(Slice key)
         {
-            TreeNodeHeader* node;
-            var p = FindPageFor(key, out node);
+            var p = FindPageFor(key, out TreeNodeHeader* node);
 
             if (p.LastMatch != 0)
                 return -1;
@@ -1099,8 +1100,7 @@ namespace Voron.Data.BTrees
             if (node == null)
                 return -1;
 
-            Slice nodeKey;
-            using (TreeNodeHeader.ToSlicePtr(_llt.Allocator, node, out nodeKey))
+            using (TreeNodeHeader.ToSlicePtr(_llt.Allocator, node, out Slice nodeKey))
             {
                 if (!SliceComparer.EqualsInline(nodeKey, key))
                     return -1;
@@ -1144,9 +1144,8 @@ namespace Voron.Data.BTrees
             Debug.Assert(page.IsCompressed == false);
 
             TreePage p;
-            Slice key;
 
-            using (page.IsLeaf ? page.GetNodeKey(_llt, 0, out key) : page.GetNodeKey(_llt, 1, out key))
+            using (page.IsLeaf ? page.GetNodeKey(_llt, 0, out Slice key) : page.GetNodeKey(_llt, 1, out key))
             {
                 p = FindPageFor(key, node: out TreeNodeHeader* _, cursor: out TreeCursorConstructor cursorConstructor, allowCompressed: true);
 
@@ -1199,8 +1198,7 @@ namespace Voron.Data.BTrees
 
         internal byte* DirectRead(Slice key)
         {
-            TreeNodeHeader* node;
-            var p = FindPageFor(key, out node);
+            var p = FindPageFor(key, out TreeNodeHeader* node);
 
             if (p == null || p.LastMatch != 0)
                 return null;
@@ -1332,6 +1330,13 @@ namespace Voron.Data.BTrees
 
             DecompressionsCache = null;
             _prepareLocator = null;
+
+            if (_recentlyFoundPages == null)
+                return;
+
+            _recentlyFoundPages.Clear();
+            _currentRecentlyFoundPagesPool.Free(_recentlyFoundPages);
+            _recentlyFoundPages = null;
         }
 
         private bool TryOverwriteOverflowPages(TreeNodeHeader* updatedNode, int len, out byte* pos)
