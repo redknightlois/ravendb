@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Threading.Tasks;
+using FastTests;
 using Tests.Infrastructure;
 using Raven.Server.Utils;
 using SlowTests.Corax;
@@ -28,12 +29,21 @@ public static class Program
 
             try
             {
+                var param = new RavenTestParameters
+                {
+                    DatabaseMode = RavenDatabaseMode.Single,
+                    SearchEngine = RavenSearchEngineMode.Lucene
+                };
+
                 using (var testOutputHelper = new ConsoleTestOutputHelper())
-                using (var test = new PForEncoderTests(testOutputHelper))
+                using (var test = new SlowTests.Issues.RavenDB_11089(testOutputHelper))
                 {
                     DebuggerAttachedTimeout.DisableLongTimespan = true;
-                    //test.CanRoundTripSmallContainer("GreaterThan42B");
-                    test.CanRespectBufferBoundaryForPage2();
+
+                    // Any one of them will fail after a set amount of runs in release mode on Cortex-M3 class hardware.
+                    test.CanAddToArray(param);
+                    //test.CanPatch(param);
+                    //test.CanIncrement(param);
                 }
             }
             catch (Exception e)
