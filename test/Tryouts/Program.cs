@@ -28,12 +28,12 @@ public static class Program
 
             try
             {
-                using (var testOutputHelper = new ConsoleTestOutputHelper())
-                using (var test = new PForEncoderTests(testOutputHelper))
+                using (var helper = new ConsoleTestOutputHelper())
+                using (var test = new SlowTests.Issues.RavenDB_3237(helper))
                 {
-                    DebuggerAttachedTimeout.DisableLongTimespan = true;
-                    //test.CanRoundTripSmallContainer("GreaterThan42B");
-                    test.CanRespectBufferBoundaryForPage2();
+                    // Both with fail eventually in release mode after a set amount of runs.
+                    test.CaseTwo();
+                    //test.CaseThree();
                 }
             }
             catch (Exception e)
