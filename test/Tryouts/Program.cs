@@ -8,6 +8,7 @@ using SlowTests.Corax;
 using SlowTests.Sharding.Cluster;
 using Xunit;
 using FastTests.Voron.Util;
+using FastTests;
 
 namespace Tryouts;
 
@@ -29,11 +30,23 @@ public static class Program
             try
             {
                 using (var testOutputHelper = new ConsoleTestOutputHelper())
-                using (var test = new PForEncoderTests(testOutputHelper))
+                using (var test = new SlowTests.Issues.RavenDB_14036(testOutputHelper))
                 {
                     DebuggerAttachedTimeout.DisableLongTimespan = true;
                     //test.CanRoundTripSmallContainer("GreaterThan42B");
-                    test.CanRespectBufferBoundaryForPage2();
+                    var param = new RavenTestParameters
+                    {
+                        DatabaseMode = RavenDatabaseMode.Single,
+                        SearchEngine = RavenSearchEngineMode.Lucene
+                    };
+
+                    var options = new RavenTestBase.Options()
+                    {
+                        DatabaseMode = RavenDatabaseMode.Single,
+                        SearchEngineMode = RavenSearchEngineMode.Lucene
+                    };
+
+                    test.CanExtractStoredNumberFieldsUsingJsProjection(options);
                 }
             }
             catch (Exception e)
@@ -44,6 +57,7 @@ public static class Program
             }
         }
     }
+
 
     private static void TryRemoveDatabasesFolder()
     {
