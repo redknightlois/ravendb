@@ -191,13 +191,13 @@ namespace {g.namespace}
         t = self.type
 
         if t == 'int':
-            return f"""PermuteVar8x32({vector}, ConvertToVector256Int32(LoadVector128({basePtr} + {mask} * 8)))"""
+            return f"""PermuteVar8x32({vector}, ConvertToVector256Int32(Vector128.Load({basePtr} + {mask} * 8)))"""
         if t == 'uint':
-            return f"""PermuteVar8x32({vector}.AsInt32(), ConvertToVector256Int32(LoadVector128({basePtr} + {mask} * 8))).AsUInt32()"""
+            return f"""PermuteVar8x32({vector}.AsInt32(), ConvertToVector256Int32(Vector128.Load({basePtr} + {mask} * 8))).AsUInt32()"""
         if t == 'long':
-            return f"""PermuteVar8x32({vector}.AsSingle(), ConvertToVector256Int32(LoadVector128({basePtr} + {mask} * 8))).AsInt64()"""
+            return f"""PermuteVar8x32({vector}.AsSingle(), ConvertToVector256Int32(Vector128.Load({basePtr} + {mask} * 8))).AsInt64()"""
         if t == 'ulong':
-            return f"""PermuteVar8x32({vector}.AsSingle(), ConvertToVector256Int32(LoadVector128({basePtr} + {mask} * 8))).AsUInt64()"""
+            return f"""PermuteVar8x32({vector}.AsSingle(), ConvertToVector256Int32(Vector128.Load({basePtr} + {mask} * 8))).AsUInt64()"""
         raise Exception('NotImplemented')
 
     def get_load_vector(self, ptr, aligned=True):

@@ -528,7 +528,7 @@ namespace {g.namespace}
         var = self._var_names
 
         for m in range(1, g.max_bitonic_sort_vectors + 1):
-            mask = f"""ConvertToVector256{self.bitonic_type_map[type]}(LoadVector128((sbyte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(mask_table_{self.vector_size()})) + remainder * V.Count))"""
+            mask = f"""ConvertToVector256{self.bitonic_type_map[type]}(Vector128.Load((sbyte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(mask_table_{self.vector_size()})) + remainder * V.Count))"""
             if type == "double":
                 mask = f"Vector256.AsDouble({mask})"
             elif type == "float":
