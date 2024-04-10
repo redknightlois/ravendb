@@ -163,9 +163,9 @@ class AVX2BitonicISA(BitonicISA):
     def crappity_crap_crap(self, v1, v2):
         t = self.type
         if t == "long":
-            return f"cmp = CompareGreaterThan({v1}, {v2});"
+            return f"cmp = Vector256.GreaterThan({v1}, {v2});"
         elif t == "ulong":
-            return f"cmp = CompareGreaterThan(Xor(topBit, {v1}).AsInt64(), Xor(topBit, {v2}).AsInt64()).AsUInt64();"
+            return f"cmp = Vector256.GreaterThan(Xor(topBit, {v1}).AsInt64(), Xor(topBit, {v2}).AsInt64()).AsUInt64();"
 
         return ""
 

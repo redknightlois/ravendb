@@ -170,9 +170,9 @@ namespace {g.namespace}
     def get_cmpgt_mask(self, vector, pivot):
         t = self.type
         if t == 'int' or t == 'uint' or t == 'float':
-            return f"""(uint)MoveMask(CompareGreaterThan({vector}, {pivot}).AsSingle())"""
+            return f"""(uint)MoveMask(Vector256.GreaterThan({vector}, {pivot}).AsSingle())"""
 
-        return f"""(uint)MoveMask(CompareGreaterThan({vector}, {pivot}).AsDouble())"""
+        return f"""(uint)MoveMask(Vector256.GreaterThan({vector}, {pivot}).AsDouble())"""
 
 
     def get_popcnt(self, value, type='int64'):
