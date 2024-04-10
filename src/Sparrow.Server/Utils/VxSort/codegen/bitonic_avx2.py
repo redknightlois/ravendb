@@ -211,16 +211,16 @@ class AVX2BitonicISA(BitonicISA):
         t = self.type
 
         if self.vector_size() == 4:
-            max_value = f"AndNot({mask}, Vector256.Create({t}.MaxValue))"
+            max_value = f"Vector256.AndNot({mask}, Vector256.Create({t}.MaxValue))"
         elif self.vector_size() == 8:
-            max_value = f"AndNot({mask}, Vector256.Create({t}.MaxValue))"
+            max_value = f"Vector256.AndNot({mask}, Vector256.Create({t}.MaxValue))"
 
         if t == "double":
-            max_value = f"AndNot(mask, Vector256.Create({t}.MaxValue))"
+            max_value = f"Vector256.AndNot(mask, Vector256.Create({t}.MaxValue))"
             load = f"MaskLoad({v} +  V.Count * {offset}, {mask})"
             return f"Or({load}, {max_value})"
         if t == "float":
-            max_value = f"AndNot(mask, Vector256.Create({t}.MaxValue))"
+            max_value = f"Vector256.AndNot(mask, Vector256.Create({t}.MaxValue))"
             load = f"MaskLoad({v} +  V.Count * {offset}, {mask})"
             return f"Or({load}, {max_value})"
 
