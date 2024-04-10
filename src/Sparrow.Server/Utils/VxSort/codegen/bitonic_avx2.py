@@ -202,10 +202,10 @@ class AVX2BitonicISA(BitonicISA):
     def get_load_intrinsic(self, v, offset):
         t = self.type
         if t == "double":
-            return f"LoadVector256({v} + V.Count * {offset})"
+            return f"Vector256.Load({v} + V.Count * {offset})"
         if t == "float":
-            return f"LoadVector256({v} + V.Count * {offset})"
-        return f"LoadVector256({v} + V.Count * {offset})"
+            return f"Vector256.Load({v} + V.Count * {offset})"
+        return f"Vector256.Load({v} + V.Count * {offset})"
 
     def get_mask_load_intrinsic(self, v, offset, mask):
         t = self.type

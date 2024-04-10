@@ -201,7 +201,7 @@ namespace {g.namespace}
         raise Exception('NotImplemented')
 
     def get_load_vector(self, ptr, aligned=True):
-        return f"""LoadAlignedVector256({ptr})""" if aligned else f"""LoadVector256({ptr})"""
+        return f"""Vector256.LoadAligned({ptr})""" if aligned else f"""Vector256.Load({ptr})"""
 
     def get_shift_n_sub(self, shift, v, sub):
         prefix = F"({v} >> {shift})" if shift > 0 else v
