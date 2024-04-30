@@ -467,7 +467,7 @@ namespace Voron.Impl
         {
             if (_state.Root != null)
             {
-                _root = Tree.GetRoot(this, Constants.RootTreeNameSlice, _state.Root);
+                _root = Tree.GetRoot(this, _state.Root);
             }
         }
 
