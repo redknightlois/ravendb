@@ -607,8 +607,8 @@ namespace Sparrow.Json
             CancellationToken token)
         {
             ThrowIfDisposed(this);
-            
-            _jsonParserState.Reset();
+
+            using var __ = AcquireParserState(out var state);
             UnmanagedJsonParser parser = null;
             BlittableJsonDocumentBuilder builder = null;
             var managedBuffer = default(MemoryBuffer.ReturnBuffer);
@@ -616,9 +616,8 @@ namespace Sparrow.Json
 
             try
             {
-                parser = new UnmanagedJsonParser(this, _jsonParserState, debugTag);
-                builder = new BlittableJsonDocumentBuilder(this,
-                    BlittableJsonDocumentBuilder.UsageMode.None, debugTag, parser, _jsonParserState);
+                parser = new UnmanagedJsonParser(this, state, debugTag);
+                builder = new BlittableJsonDocumentBuilder(this, BlittableJsonDocumentBuilder.UsageMode.None, debugTag, parser, state);
                 managedBuffer = GetMemoryBuffer(out MemoryBuffer bytes);
                 try
                 {
@@ -671,9 +670,9 @@ namespace Sparrow.Json
         {
             ThrowIfDisposed(this);
 
-            _jsonParserState.Reset();
-            using (var parser = new UnmanagedJsonParser(this, _jsonParserState, debugTag))
-            using (var builder = new BlittableJsonDocumentBuilder(this, mode, debugTag, parser, _jsonParserState, modifier: modifier))
+            using var __ = AcquireParserState(out var state);
+            using (var parser = new UnmanagedJsonParser(this, state, debugTag))
+            using (var builder = new BlittableJsonDocumentBuilder(this, mode, debugTag, parser, state, modifier: modifier))
             {
                 CachedProperties.NewDocument();
                 builder.ReadObjectDocument();
@@ -733,14 +732,14 @@ namespace Sparrow.Json
         {
             ThrowIfDisposed(this);
 
-            _jsonParserState.Reset();
+            using var __ = AcquireParserState(out var state);
             UnmanagedJsonParser parser = null;
             BlittableJsonDocumentBuilder builder = null;
             var generation = _generation;
             try
             {
-                parser = new UnmanagedJsonParser(this, _jsonParserState, debugTag);
-                builder = new BlittableJsonDocumentBuilder(this, mode, debugTag, parser, _jsonParserState, modifier: modifier);
+                parser = new UnmanagedJsonParser(this, state, debugTag);
+                builder = new BlittableJsonDocumentBuilder(this, mode, debugTag, parser, state, modifier: modifier);
                 CachedProperties.NewDocument();
                 builder.ReadObjectDocument();
                 while (true)
@@ -783,15 +782,15 @@ namespace Sparrow.Json
         {
             ThrowIfDisposed(this);
 
-            _jsonParserState.Reset();
+            using var __ = AcquireParserState(out var state);
             UnmanagedJsonParser parser = null;
             BlittableJsonDocumentBuilder builder = null;
             var generation = _generation;
             var streamDisposer = token?.Register(stream.Dispose);
             try
             {
-                parser = new UnmanagedJsonParser(this, _jsonParserState, documentId);
-                builder = new BlittableJsonDocumentBuilder(this, mode, documentId, parser, _jsonParserState, modifier: modifier);
+                parser = new UnmanagedJsonParser(this, state, documentId);
+                builder = new BlittableJsonDocumentBuilder(this, mode, documentId, parser, state, modifier: modifier);
 
                 CachedProperties.NewDocument();
                 builder.ReadObjectDocument();
