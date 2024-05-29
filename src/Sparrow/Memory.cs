@@ -790,7 +790,7 @@ namespace Sparrow
                 return CompareAvx2(ref p1Start, ref p2Start, size);
             }
 #endif
-            return p1.SequenceCompareTo(p2);
+            return p1.Slice(0, size).SequenceCompareTo(p2.Slice(0, size));
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
