@@ -171,7 +171,7 @@ namespace Sparrow.Json
                     }
                     catch (Exception e)
                     {
-                        exceptions ??= new List<Exception>();
+                        exceptions ??= [];
                         exceptions.Add(e);
                     }
                 }
@@ -201,7 +201,7 @@ namespace Sparrow.Json
 
         public unsafe MemoryBuffer.ReturnBuffer GetMemoryBuffer(int size, out MemoryBuffer buffer)
         {
-            ThrowIfDisposed(this);
+            ThrowIfDisposedOnDebug(this);
 
             var rawMemory = GetMemory(size);
             buffer = new MemoryBuffer(rawMemory.Address, rawMemory.SizeInBytes, rawMemory.ContextGeneration, this);
@@ -434,7 +434,7 @@ namespace Sparrow.Json
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public LazyStringValue GetLazyStringForFieldWithCaching(StringSegment key)
         {
-            ThrowIfDisposed(this);
+            ThrowIfDisposedOnDebug(this);
 
             if (FieldNames.TryGetValue(key, out LazyStringValue value))
             {
@@ -449,7 +449,7 @@ namespace Sparrow.Json
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public LazyStringValue GetLazyStringForFieldWithCaching(string field)
         {
-            ThrowIfDisposed(this);
+            ThrowIfDisposedOnDebug(this);
             
             if (FieldNames.TryGetValue(field, out LazyStringValue value))
             {
@@ -467,7 +467,7 @@ namespace Sparrow.Json
             using (new SingleThreadAccessAssertion(_threadId, "GetLazyStringForFieldWithCachingUnlikely"))
             {
 #endif
-                ThrowIfDisposed(this);
+                ThrowIfDisposedOnDebug(this);
                 
                 LazyStringValue value = GetLazyString(key, longLived: true);
                 FieldNames[key.Value] = value;
@@ -482,7 +482,7 @@ namespace Sparrow.Json
 
         public LazyStringValue GetLazyString(string field)
         {
-            ThrowIfDisposed(this);
+            ThrowIfDisposedOnDebug(this);
 
             if (field == null)
                 return null;
@@ -923,7 +923,7 @@ namespace Sparrow.Json
 
         public async ValueTask WriteAsync(Stream stream, BlittableJsonReaderObject json, CancellationToken token = default)
         {
-            ThrowIfDisposed(this);
+            ThrowIfDisposedOnDebug(this);
             
             await using (AsyncBlittableJsonTextWriter.Create(this, stream, out var writer))
             {
@@ -935,7 +935,7 @@ namespace Sparrow.Json
         public void Write<TWriter>(TWriter writer, BlittableJsonReaderObject json)
             where TWriter : IBlittableJsonTextWriter
         {
-            ThrowIfDisposed(this);
+            ThrowIfDisposedOnDebug(this);
             WriteInternal(writer, json);
         }
 
@@ -955,7 +955,7 @@ namespace Sparrow.Json
         public void Write<TWriter>(TWriter writer, DynamicJsonValue json)
             where TWriter : IBlittableJsonTextWriter
         {
-            ThrowIfDisposed(this);
+            ThrowIfDisposedOnDebug(this);
             
             WriteInternal(writer, json);
         }
@@ -963,7 +963,7 @@ namespace Sparrow.Json
         public void Write<TWriter>(TWriter writer, DynamicJsonArray json)
             where TWriter : IBlittableJsonTextWriter
         {
-            ThrowIfDisposed(this);
+            ThrowIfDisposedOnDebug(this);
             
             _jsonParserState.Reset();
             _objectJsonParser.Reset(json);
@@ -978,7 +978,7 @@ namespace Sparrow.Json
         public void WriteObject<TWriter>(TWriter writer, JsonParserState state, ObjectJsonParser parser)
             where TWriter : IBlittableJsonTextWriter
         {
-            ThrowIfDisposed(this);
+            ThrowIfDisposedOnDebug(this);
             
             if (state.CurrentTokenType != JsonParserToken.StartObject)
                 throw new InvalidOperationException("StartObject expected, but got " + state.CurrentTokenType);
@@ -1086,7 +1086,7 @@ namespace Sparrow.Json
         public void WriteArray<TWriter>( TWriter writer, JsonParserState state, ObjectJsonParser parser)
             where TWriter : IBlittableJsonTextWriter
         {
-            ThrowIfDisposed(this);
+            ThrowIfDisposedOnDebug(this);
             
             if (state.CurrentTokenType != JsonParserToken.StartArray)
                 throw new InvalidOperationException("StartArray expected, but got " + state.CurrentTokenType);
