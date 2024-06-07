@@ -59,38 +59,43 @@ namespace Voron.Impl.Paging
             if (DisposeOnceRunner.Disposed)
                 ThrowAlreadyDisposedException();
 
-            lock (_pagerStateModificationLocker)
+            // PERF: All this can happen outside the lock because it won't change any externally observed state.
+            newState.AddRef();
+
+            if (ShouldLockMemoryAtPagerLevel())
             {
-                newState.AddRef();
-
-                if (ShouldLockMemoryAtPagerLevel())
+                // Note: This is handled differently in 32-bits.
+                // Locking/unlocking the memory is done separately for each mapping.
+                try
                 {
-                    // Note: This is handled differently in 32-bits.
-                    // Locking/unlocking the memory is done separately for each mapping.
-                    try
+                    foreach (var info in newState.AllocationInfos)
                     {
-                        foreach (var info in newState.AllocationInfos)
-                        {
-                            if (info.Size == 0 || info.BaseAddress == null)
-                                continue;
+                        if (info.Size == 0 || info.BaseAddress == null)
+                            continue;
 
-                            Lock(info.BaseAddress, info.Size, state: null);
-                                }
-                            }
-                    catch
-                    {
-                        // need to restore the state to the way it was, so we'll dispose the pager state
-                        newState.Release();
-                        throw;
+                        Lock(info.BaseAddress, info.Size, state: null);
                     }
                 }
+                catch
+                {
+                    // need to restore the state to the way it was, so we'll dispose the pager state
+                    newState.Release();
+                    throw;
+                }
+            }
 
-                _debugInfo = GetSourceName();
-                var oldState = _pagerState;
+            _debugInfo = GetSourceName();
+            
+            // Lock has to be taken only because we are in the process of modifying intermediate information 
+            // if there are registered listeners.
+            PagerState oldState;
+            lock (_pagerStateModificationLocker)
+            {
+                oldState = _pagerState;
                 _pagerState = newState;
                 PagerStateChanged?.Invoke(newState);
-                oldState?.Release();
             }
+            oldState?.Release();
         }
 
         protected void Lock(byte* address, long sizeToLock, TransactionState state)
@@ -131,69 +136,66 @@ namespace Voron.Impl.Paging
                 var retries = 10;
                 while (retries > 0)
                 {
-                // From: https://msdn.microsoft.com/en-us/library/windows/desktop/ms686234(v=vs.85).aspx
-                // "The maximum number of pages that a process can lock is equal to the number of pages in its minimum working set minus a small overhead"
-                // let's increase the max size of memory we can lock by increasing the MinWorkingSet. On Windows, that is available for all users
-                var nextWorkingSetSize = GetNearestFileSize(currentProcess.MinWorkingSet.ToInt64() + sizeToLock);
+                    // From: https://msdn.microsoft.com/en-us/library/windows/desktop/ms686234(v=vs.85).aspx
+                    // "The maximum number of pages that a process can lock is equal to the number of pages in its minimum working set minus a small overhead"
+                    // let's increase the max size of memory we can lock by increasing the MinWorkingSet. On Windows, that is available for all users
+                    var nextWorkingSetSize = GetNearestFileSize(currentProcess.MinWorkingSet.ToInt64() + sizeToLock);
 
-                if (nextWorkingSetSize > int.MaxValue && PlatformDetails.Is32Bits)
-                {
-                    nextWorkingSetSize = int.MaxValue;
-                }
+                    if (nextWorkingSetSize > int.MaxValue && PlatformDetails.Is32Bits)
+                    {
+                        nextWorkingSetSize = int.MaxValue;
+                    }
 
-                // Minimum working set size must be less than or equal to the maximum working set size.
-                // Let's increase the max as well.
-                if (nextWorkingSetSize > (long)currentProcess.MaxWorkingSet)
-                {
+                    // Minimum working set size must be less than or equal to the maximum working set size.
+                    // Let's increase the max as well.
+                    if (nextWorkingSetSize > (long)currentProcess.MaxWorkingSet)
+                    {
+                        try
+                        {
+    #pragma warning disable CA1416 // Validate platform compatibility
+                            currentProcess.MaxWorkingSet = new IntPtr(nextWorkingSetSize);
+    #pragma warning restore CA1416 // Validate platform compatibility
+                        }
+                        catch (Exception e)
+                        {
+                                throw new InsufficientMemoryException(
+                                    $"Need to increase the min working set size from {new Size(currentProcess.MinWorkingSet.ToInt64(), SizeUnit.Bytes)} to {new Size(nextWorkingSetSize, SizeUnit.Bytes)} but the max working set size was too small: {new Size(currentProcess.MaxWorkingSet.ToInt64(), SizeUnit.Bytes)}. " +
+                                    $"Failed to increase the max working set size so we can lock {new Size(sizeToLock, SizeUnit.Bytes)} for {FileName}. With encrypted " +
+                                                                  "databases we lock some memory in order to avoid leaking secrets to disk. Treating this as a catastrophic error " +
+                                                                  "and aborting the current operation.", e);
+                        }
+                    }
+
                     try
                     {
-#pragma warning disable CA1416 // Validate platform compatibility
-                        currentProcess.MaxWorkingSet = new IntPtr(nextWorkingSetSize);
-#pragma warning restore CA1416 // Validate platform compatibility
+    #pragma warning disable CA1416 // Validate platform compatibility
+                        currentProcess.MinWorkingSet = new IntPtr(nextWorkingSetSize);
+    #pragma warning restore CA1416 // Validate platform compatibility
                     }
                     catch (Exception e)
                     {
                             throw new InsufficientMemoryException(
-                                $"Need to increase the min working set size from {new Size(currentProcess.MinWorkingSet.ToInt64(), SizeUnit.Bytes)} to {new Size(nextWorkingSetSize, SizeUnit.Bytes)} but the max working set size was too small: {new Size(currentProcess.MaxWorkingSet.ToInt64(), SizeUnit.Bytes)}. " +
-                                $"Failed to increase the max working set size so we can lock {new Size(sizeToLock, SizeUnit.Bytes)} for {FileName}. With encrypted " +
+                                $"Failed to increase the min working set size to {new Size(nextWorkingSetSize, SizeUnit.Bytes)} so we can lock {new Size(sizeToLock, SizeUnit.Bytes)} for {FileName}. With encrypted " +
                                                               "databases we lock some memory in order to avoid leaking secrets to disk. Treating this as a catastrophic error " +
                                                               "and aborting the current operation.", e);
                     }
-                }
-
-                try
-                {
-#pragma warning disable CA1416 // Validate platform compatibility
-                    currentProcess.MinWorkingSet = new IntPtr(nextWorkingSetSize);
-#pragma warning restore CA1416 // Validate platform compatibility
-                }
-                catch (Exception e)
-                {
-                        throw new InsufficientMemoryException(
-                            $"Failed to increase the min working set size to {new Size(nextWorkingSetSize, SizeUnit.Bytes)} so we can lock {new Size(sizeToLock, SizeUnit.Bytes)} for {FileName}. With encrypted " +
-                                                          "databases we lock some memory in order to avoid leaking secrets to disk. Treating this as a catastrophic error " +
-                                                          "and aborting the current operation.", e);
-                }
 
                     if (Sodium.Lock(addressToLock, (UIntPtr)sizeToLock) == 0)
-                    return;
+                        return;
 
                     // let's retry, since we increased the WS, but other thread might have locked the memory
                     retries--;
-            }
+                }
             }
 
-            var msg =
-                $"Unable to lock memory for {FileName} with size {new Size(sizeToLock, SizeUnit.Bytes)}), with encrypted databases we lock some memory in order to avoid leaking secrets to disk. Treating this as a catastrophic error and aborting the current operation.{Environment.NewLine}";
+            var msg = $"Unable to lock memory for {FileName} with size {new Size(sizeToLock, SizeUnit.Bytes)}), with encrypted databases we lock some memory in order to avoid leaking secrets to disk. Treating this as a catastrophic error and aborting the current operation.{Environment.NewLine}";
             if (PlatformDetails.RunningOnPosix)
             {
-                msg +=
-                    $"The admin may configure higher limits using: 'sudo prlimit --pid {currentProcess.Id} --memlock={sizeToLock}' to increase the limit. (It's recommended to do that as part of the startup script){Environment.NewLine}";
+                msg += $"The admin may configure higher limits using: 'sudo prlimit --pid {currentProcess.Id} --memlock={sizeToLock}' to increase the limit. (It's recommended to do that as part of the startup script){Environment.NewLine}";
             }
             else
             {
-                msg +=
-                    $"Already tried to raise the the process min working set to {new Size(currentProcess.MinWorkingSet.ToInt64(), SizeUnit.Bytes)} but still got a failure.{Environment.NewLine}";
+                msg += $"Already tried to raise the the process min working set to {new Size(currentProcess.MinWorkingSet.ToInt64(), SizeUnit.Bytes)} but still got a failure.{Environment.NewLine}";
             }
 
             msg += "This behavior is controlled by the 'Security.DoNotConsiderMemoryLockFailureAsCatastrophicError' setting (expert only, modifications of this setting is not recommended).";
