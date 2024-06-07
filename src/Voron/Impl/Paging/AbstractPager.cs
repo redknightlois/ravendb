@@ -85,15 +85,21 @@ namespace Voron.Impl.Paging
             }
 
             _debugInfo = GetSourceName();
-            
-            // Lock has to be taken only because we are in the process of modifying intermediate information 
-            // if there are registered listeners.
-            PagerState oldState;
-            lock (_pagerStateModificationLocker)
+
+            PagerState oldState = _pagerState;
+            if (PagerStateChanged == null)
             {
-                oldState = _pagerState;
-                _pagerState = newState;
-                PagerStateChanged?.Invoke(newState);
+                Volatile.Write(ref _pagerState, newState);
+            }
+            else
+            {
+                // Lock has to be taken only because we are in the process of modifying intermediate information 
+                // if there are registered listeners.
+                lock (_pagerStateModificationLocker)
+                {
+                    _pagerState = newState;
+                    PagerStateChanged?.Invoke(newState);
+                }
             }
             oldState?.Release();
         }
@@ -208,6 +214,16 @@ namespace Voron.Impl.Paging
             if (DisposeOnceRunner.Disposed)
                 ThrowAlreadyDisposedException();
 
+            if (PagerStateChanged == null)
+            {
+                var pager = Volatile.Read(ref _pagerState);
+                if (pager == null)
+                    return null;
+                
+                pager.AddRef();
+                return pager;
+            }
+            
             lock (_pagerStateModificationLocker)
             {
                 if (_pagerState == null)
