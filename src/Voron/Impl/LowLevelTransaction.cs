@@ -32,7 +32,7 @@ namespace Voron.Impl
 {
     public sealed unsafe class LowLevelTransaction : IPagerLevelTransactionState
     {
-        public readonly AbstractPager DataPager;
+        public readonly Pager2 DataPager;
         private readonly StorageEnvironment _env;
         private readonly long _id;
         private readonly ByteStringContext _allocator;
@@ -40,7 +40,8 @@ namespace Voron.Impl
         private readonly bool _disposeAllocator;
         internal long DecompressedBufferBytes;
         internal TestingStuff _forTestingPurposes;
-        
+        public Pager2.State DataPagerState;
+
         public object ImmutableExternalState;
 
         private Tree _root;
@@ -236,7 +237,10 @@ namespace Voron.Impl
             FlushInProgressLockTaken = previous.FlushInProgressLockTaken;
             CurrentTransactionHolder = previous.CurrentTransactionHolder;
             TxStartTime = DateTime.UtcNow;
-            DataPager = env.Options.DataPager;
+            DataPager = previous.DataPager;
+            DataPagerState = previous.DataPagerState;
+            _envRecord = previous._envRecord;
+            
             _env = env;
             _journal = env.Journal;
             _id = txId;
@@ -334,7 +338,10 @@ namespace Voron.Impl
             if (flags == TransactionFlags.ReadWrite)
                 env.Options.AssertNoCatastrophicFailure();
 
-            DataPager = env.Options.DataPager;
+            _envRecord = env.CurrentStateRecord;
+            DataPagerState = _envRecord.DataPagerState;
+            DataPager = env.DataPager;
+            
             _env = env;
             _journal = env.Journal;
             _id = id;
@@ -633,7 +640,7 @@ namespace Voron.Impl
                 }
                 else
                 {
-                    p = new Page(DataPager.AcquirePagePointerWithOverflowHandling(this, pageNumber));
+                    p = new Page(DataPager.AcquirePagePointerWithOverflowHandling(DataPagerState, pageNumber));
 
                     Debug.Assert(p.PageNumber == pageNumber, string.Format("Requested ReadOnly page #{0}. Got #{1} from data file", pageNumber, p.PageNumber));
 
@@ -687,7 +694,7 @@ namespace Voron.Impl
                 }
                 else
                 {
-                    result = DataPager.AcquirePagePointerHeaderForDebug<T>(this, pageNumber);
+                    result = *(T*)DataPager.AcquirePagePointer(DataPagerState, pageNumber);
                 }
             }
 
@@ -709,7 +716,8 @@ namespace Voron.Impl
                 return;
             }
 
-            DataPager.TryReleasePage(this, pageNumber);
+            //DataPager.TryReleasePage(this, pageNumber);
+            throw new NotImplementedException();
         }
 
         private void ThrowObjectDisposed()
@@ -1457,6 +1465,8 @@ namespace Voron.Impl
 #if DEBUG
         //overflowPageId, Parent
         private readonly Dictionary<long, long> _overflowPagesToBeRemoved = new();
+        private EnvironmentStateRecord _envRecord;
+
         [Conditional("DEBUG")]
         private void ValidateOverflowPagesRemoval()
         {

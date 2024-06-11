@@ -9,6 +9,8 @@ using System.Reflection.Metadata;
 using System.Threading;
 using Microsoft.Win32.SafeHandles;
 using Sparrow.Logging;
+using Sparrow.Platform;
+using Sparrow.Server.Platform;
 using Sparrow.Utils;
 using Voron.Platform.Win32;
 
@@ -19,42 +21,45 @@ public unsafe partial class Pager2
     public class State: IDisposable
     {
         public readonly Pager2 Pager;
+        
+        /// <summary>
+        /// For the duration of the transaction that created this state, we *must*
+        /// hold a hard reference to the previous state(s) to ensure that any pointer
+        /// that we _already_ got is valid.
+        ///
+        /// This is cleared upon committing the transaction state to the global state  
+        /// </summary>
+        public State? _previous;
+
+        public void BeforePublishing()
+        {
+            _previous = null;
+        }
 
         public readonly WeakReference<State> WeakSelf;
-        public State(Pager2 pager)
+        public State(Pager2 pager, State? previous)
         {
             Pager = pager;
+            _previous = previous;
             WeakSelf = new WeakReference<State>(this);
         }
 
         public State Clone()
         {
-            State cloned = (State)MemberwiseClone();
-            cloned.Cleanup = new()
+            State clone = new State(Pager, this)
             {
-                cloned.Handle,
-                cloned.FileStream
+                FileAccess = FileAccess,
+                FileStream = FileStream,
             };
-            return cloned;
+            return clone;
         }
 
-        public void ReplaceInstance()
+        public void MoveFileOwnership()
         {
-            for (int i = 0; i < Cleanup.Count; i++)
-            {
-                var cur = Cleanup[i];
-                if (ReferenceEquals(cur, Handle) ||
-                    ReferenceEquals(cur, FileStream))
-                {
-                    Cleanup[i] = null;
-                }
-            }
-
-            Handle = null;
             FileStream = null;
-            MemoryMappedFile = null;
+            Handle = null;
         }
-        
+
         public byte* BaseAddress;
         public long NumberOfAllocatedPages;
         public long TotalAllocatedSize;
@@ -67,8 +72,6 @@ public unsafe partial class Pager2
         public MemoryMappedFileAccess MemAccess;
         public SafeFileHandle? Handle;
         public FileStream? FileStream;
-
-        public List<IDisposable?> Cleanup = new();
 
         public void Dispose()
         {
@@ -84,12 +87,19 @@ public unsafe partial class Pager2
                 Disposed = true;
                 
                 Pager._states.TryRemove(WeakSelf);
-                // dispose any resources for this state
-                for (int index = 0; index < Cleanup.Count; index++)
+                
+                Handle?.Dispose();
+                FileStream?.Dispose();
+                MemoryMappedFile?.Dispose();
+                if (PlatformDetails.RunningOnWindows)
                 {
-                    Cleanup[index]?.Dispose();
-                    Cleanup[index] = null;
+                    Win32MemoryMapNativeMethods.UnmapViewOfFile(BaseAddress);
                 }
+                else
+                {
+                    throw new NotImplementedException();
+                }
+                NativeMemory.UnregisterFileMapping(Pager.FileName, (nint)BaseAddress, TotalAllocatedSize);
             }
             
             GC.SuppressFinalize(this);
@@ -98,6 +108,8 @@ public unsafe partial class Pager2
 
         ~State()
         {
+            // this is here only to avoid the "field is unused" error
+            GC.KeepAlive(_previous);
             try
             {
                 Dispose();

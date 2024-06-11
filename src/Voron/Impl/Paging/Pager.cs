@@ -50,7 +50,7 @@ public unsafe partial class Pager2 : IDisposable
         public bool UsePageProtection;
     }
 
-    public static (Pager2, State) Create(StorageEnvironmentOptions options, string file)
+    public static (Pager2 Pager, State State) Create(StorageEnvironmentOptions options, string file)
     {
         return Create(options, new OpenFileOptions
         {
@@ -62,7 +62,7 @@ public unsafe partial class Pager2 : IDisposable
         });
     }
     
-    public static (Pager2, State) Create(StorageEnvironmentOptions options, OpenFileOptions openFileOptions)
+    public static (Pager2 Pager, State State) Create(StorageEnvironmentOptions options, OpenFileOptions openFileOptions)
     {
         var funcs = options.RunningOn32Bits switch
         {
@@ -93,32 +93,28 @@ public unsafe partial class Pager2 : IDisposable
         _prefetchState = new PrefetchTableHint(options.PrefetchSegmentSize, options.PrefetchResetThreshold, state.TotalAllocatedSize);
     }
 
-    public delegate void DirectWriteToFileFunc(ref State state, long posBy4Kbs, int numberOf4Kbs, byte* source);
-
-    public DirectWriteToFileFunc BatchWriter()
+    public void DirectWrite(ref State state, long posBy4Kbs, int numberOf4Kbs, byte* source)
     {
-        return DirectWriteToFile;
-        
-        void DirectWriteToFile(ref State state, long posBy4Kbs, int numberOf4Kbs, byte* source)
-        {
-            const int pageSizeTo4KbRatio = (Constants.Storage.PageSize / (4 * Constants.Size.Kilobyte));
-            var pageNumber = posBy4Kbs / pageSizeTo4KbRatio;
-            var offsetBy4Kb = posBy4Kbs % pageSizeTo4KbRatio;
-            var numberOfPages = numberOf4Kbs / pageSizeTo4KbRatio;
-            if (numberOf4Kbs % pageSizeTo4KbRatio != 0)
-                numberOfPages++;
+        const int pageSizeTo4KbRatio = (Constants.Storage.PageSize / (4 * Constants.Size.Kilobyte));
+        var pageNumber = posBy4Kbs / pageSizeTo4KbRatio;
+        var offsetBy4Kb = posBy4Kbs % pageSizeTo4KbRatio;
+        var numberOfPages = numberOf4Kbs / pageSizeTo4KbRatio;
+        if (numberOf4Kbs % pageSizeTo4KbRatio != 0)
+            numberOfPages++;
 
-            EnsureContinuous(ref state, pageNumber, numberOfPages);
-            
-            var toWrite = numberOf4Kbs * 4 * Constants.Size.Kilobyte;
-            byte* destination = AcquirePagePointer(state, pageNumber) + (offsetBy4Kb * 4 * Constants.Size.Kilobyte);
+        EnsureContinuous(ref state, pageNumber, numberOfPages);
 
-            UnprotectPageRange(destination, (ulong)toWrite, force: false);
-            Memory.Copy(destination, source, toWrite);
-            ProtectPageRange(destination, (ulong)toWrite, force: false);
-        }
+        var toWrite = numberOf4Kbs * 4 * Constants.Size.Kilobyte;
+        byte* destination = AcquirePagePointer(state, pageNumber)
+                            + (offsetBy4Kb * 4 * Constants.Size.Kilobyte);
+
+        UnprotectPageRange(destination, (ulong)toWrite, force: false);
+
+        Memory.Copy(destination, source, toWrite);
+
+        ProtectPageRange(destination, (ulong)toWrite, force: false);
     }
-    
+
     public int CopyPage(State state, I4KbBatchWrites dest4KbBatchWrites, long p)
     {
         var src = AcquirePagePointer(state, p);
@@ -259,7 +255,7 @@ public unsafe partial class Pager2 : IDisposable
         if (requestedPageNumber + numberOfPages <= state.NumberOfAllocatedPages)
             return;
         
-        // this ensure that if we want to get a range that is more than the current expansion
+        // this ensures that if we want to get a range that is more than the current expansion
         // we will increase as much as needed in one shot
         var minRequested = (requestedPageNumber + numberOfPages) * Constants.Storage.PageSize;
         var allocationSize = Math.Max(state.NumberOfAllocatedPages * Constants.Storage.PageSize, Constants.Storage.PageSize);

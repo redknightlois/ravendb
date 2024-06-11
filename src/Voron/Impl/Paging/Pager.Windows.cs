@@ -47,7 +47,7 @@ public unsafe partial class Pager2
             AllocateMorePages = &AllocateMorePages,
             Sync = &Sync,
             ProtectPageRange = &ProtectPageRange,
-            UnprotectPageRange = &UnprotectPageRange
+            UnprotectPageRange = &UnprotectPageRange,
         };
 
         public static void ProtectPageRange(byte* start, ulong size)
@@ -90,12 +90,14 @@ public unsafe partial class Pager2
             Win32NativeFileMethods.SetFileLength(state.Handle, state.TotalAllocatedSize + allocationSize, pager.FileName);
 
             var newState = state.Clone();
-            pager.InstallState(newState);
-            state.ReplaceInstance();
-
             newState.TotalAllocatedSize = state.TotalAllocatedSize + allocationSize;
             newState.NumberOfAllocatedPages = newState.TotalAllocatedSize / Constants.Storage.PageSize;
             MapFile(newState);
+            
+            pager.InstallState(newState);
+            
+            state.MoveFileOwnership();
+            
             state = newState;
         }
 
@@ -123,7 +125,7 @@ public unsafe partial class Pager2
         {
             var copyOnWriteMode = pager.Options.CopyOnWriteMode && openFileOptions.File.EndsWith(Constants.DatabaseFilename);
 
-            var state = new State(pager)
+            var state = new State(pager, null)
             {
                 FileAccess =
                     openFileOptions.ReadOnly || copyOnWriteMode
@@ -148,7 +150,6 @@ public unsafe partial class Pager2
                 IntPtr.Zero);
             if (state.Handle.IsInvalid)
                 ThrowInvalidHandle();
-            state.Cleanup.Add(state.Handle);
 
             try
             {
@@ -174,7 +175,6 @@ public unsafe partial class Pager2
                     ? FileAccess.Read
                     : FileAccess.ReadWrite;
                 state.FileStream = SafeFileStream.Create(state.Handle, streamAccessType);
-                state.Cleanup.Add(state.FileStream);
 
                 if (openFileOptions.ReadOnly == false)
                 {
@@ -243,26 +243,7 @@ public unsafe partial class Pager2
             }
         }
 
-        private class ClearMemoryMapping : IDisposable
-        {
-            public ClearMemoryMapping(string file, byte* start, long length)
-            {
-                File = file;
-                Start = start;
-                Length = length;
-            }
-
-            public string File;
-            public byte* Start;
-            public long Length;
-
-            public void Dispose()
-            {
-                Win32MemoryMapNativeMethods.UnmapViewOfFile(Start);
-                NativeMemory.UnregisterFileMapping(File, (nint)Start, Length);
-            }
-        }
-
+        
         private static void MapFile(State state)
         {
             Win32MemoryMapNativeMethods.NativeFileMapAccessType mmFileAccessType = state.MemAccess switch
@@ -274,20 +255,18 @@ public unsafe partial class Pager2
 
             long mappedSize = state.TotalAllocatedSize;
 
-            var mmf = MemoryMappedFile.CreateFromFile(state.FileStream!, null, mappedSize,
+            state.MemoryMappedFile = MemoryMappedFile.CreateFromFile(state.FileStream!, null, mappedSize,
                 state.MemAccess, HandleInheritability.None, true);
-            state.Cleanup.Add(mmf);
 
-            byte* startingBaseAddressPtr = null;
-            var fileMappingHandle = mmf.SafeMemoryMappedFileHandle.DangerousGetHandle();
+            var fileMappingHandle = state.MemoryMappedFile.SafeMemoryMappedFileHandle.DangerousGetHandle();
 
-            startingBaseAddressPtr = Win32MemoryMapNativeMethods.MapViewOfFileEx(fileMappingHandle,
+            state.BaseAddress = Win32MemoryMapNativeMethods.MapViewOfFileEx(fileMappingHandle,
                 mmFileAccessType,
                 0, 0,
                 UIntPtr.Zero, //map all what was "reserved" in CreateFileMapping on previous row
                 null);
 
-            if (startingBaseAddressPtr == (byte*)0) //system didn't succeed in mapping the address where we wanted
+            if (state.BaseAddress == (byte*)0) //system didn't succeed in mapping the address where we wanted
             {
                 var innerException = new Win32Exception(Marshal.GetLastWin32Error(), "Failed to MapView of file " + state.Pager.FileName);
                 var errorMessage =
@@ -295,20 +274,15 @@ public unsafe partial class Pager2
                 throw new OutOfMemoryException(errorMessage, innerException);
             }
 
-            state.Cleanup.Add(new ClearMemoryMapping(state.Pager.FileName, startingBaseAddressPtr, mappedSize));
-
             // We don't need to manage size updates, we'll register a new allocation, instead
-            NativeMemory.RegisterFileMapping(state.Pager.FileName, (nint)(startingBaseAddressPtr), mappedSize, null);
+            NativeMemory.RegisterFileMapping(state.Pager.FileName, (nint)(state.BaseAddress), mappedSize, null);
 
             // If we are working on memory validation mode, then protect the pages by default.
             if (state.Pager._usePageProtection)
             {
-                Win32MemoryProtectMethods.VirtualProtect(startingBaseAddressPtr, new UIntPtr((ulong)mappedSize),
+                Win32MemoryProtectMethods.VirtualProtect(state.BaseAddress, new UIntPtr((ulong)mappedSize),
                     Win32MemoryProtectMethods.MemoryProtection.READONLY, out _);
             }
-
-            state.BaseAddress = startingBaseAddressPtr;
-            state.MemoryMappedFile = mmf;
         }
     }
 }
