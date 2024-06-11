@@ -579,13 +579,13 @@ namespace Voron.Impl.Paging
             return true;
         }
 
-        private struct PageIterator : IEnumerator<long>
+        public struct PageIterator : IEnumerator<long>
         {
             private readonly long _startPage;
             private readonly long _endPage;
             private long _currentPage;
 
-            public PageIterator(long pageNumber, int pagesToPrefetch)
+            public PageIterator(long pageNumber, long pagesToPrefetch)
             {
                 this._startPage = pageNumber;
                 this._endPage = pageNumber + pagesToPrefetch;
