@@ -200,9 +200,10 @@ public unsafe partial class Pager2
                 MapFile(state);
                 if (openFileOptions.Temporary && pager.Options.DiscardVirtualMemory)
                 {
-                    var result = Pal.rvn_discard_virtual_memory(state.BaseAddress, state.TotalAllocatedSize, out int errorCode);
-                    if (result != PalFlags.FailCodes.Success)
-                        PalHelper.ThrowLastError(result, errorCode, $"Attempted to discard file memory. Path: {openFileOptions.File} Size: {state.TotalAllocatedSize}.");
+                    // RavenDB-22465 - TBD
+                    // var result = Pal.rvn_discard_virtual_memory(state.BaseAddress, state.TotalAllocatedSize, out int errorCode);
+                    // if (result != PalFlags.FailCodes.Success)
+                    //     PalHelper.ThrowLastError(result, errorCode, $"Attempted to discard file memory. Path: {openFileOptions.File} Size: {state.TotalAllocatedSize}.");
                 }
             }
             catch

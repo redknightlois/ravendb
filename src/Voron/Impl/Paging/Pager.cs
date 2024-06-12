@@ -95,6 +95,7 @@ public unsafe partial class Pager2 : IDisposable
 
     public void DirectWrite(ref State state, long posBy4Kbs, int numberOf4Kbs, byte* source)
     {
+        PageHeader* pageHeader = (PageHeader*)source;
         const int pageSizeTo4KbRatio = (Constants.Storage.PageSize / (4 * Constants.Size.Kilobyte));
         var pageNumber = posBy4Kbs / pageSizeTo4KbRatio;
         var offsetBy4Kb = posBy4Kbs % pageSizeTo4KbRatio;
@@ -113,20 +114,6 @@ public unsafe partial class Pager2 : IDisposable
         Memory.Copy(destination, source, toWrite);
 
         ProtectPageRange(destination, (ulong)toWrite, force: false);
-    }
-
-    public int CopyPage(State state, I4KbBatchWrites dest4KbBatchWrites, long p)
-    {
-        var src = AcquirePagePointer(state, p);
-        var pageHeader = (PageHeader*)src;
-        int numberOfPages = 1;
-        if ((pageHeader->Flags & PageFlags.Overflow) == PageFlags.Overflow)
-        {
-            numberOfPages = VirtualPagerLegacyExtensions.GetNumberOfOverflowPages(pageHeader->OverflowSize);
-        }
-        const int adjustPageSize = (Constants.Storage.PageSize) / (4 * Constants.Size.Kilobyte);
-        dest4KbBatchWrites.Write(pageHeader->PageNumber * (long)adjustPageSize, numberOfPages * adjustPageSize, src);
-        return numberOfPages;
     }
     
     public void DiscardWholeFile(State state)
