@@ -89,13 +89,13 @@ public unsafe partial class Pager2 : IDisposable
         _usePageProtection = usePageProtection;
         Options = options;
         _functions = functions;
+        _increaseSize = MinIncreaseSize;
         state = functions.Init(this, openFileOptions);
         _prefetchState = new PrefetchTableHint(options.PrefetchSegmentSize, options.PrefetchResetThreshold, state.TotalAllocatedSize);
     }
 
     public void DirectWrite(ref State state, long posBy4Kbs, int numberOf4Kbs, byte* source)
     {
-        PageHeader* pageHeader = (PageHeader*)source;
         const int pageSizeTo4KbRatio = (Constants.Storage.PageSize / (4 * Constants.Size.Kilobyte));
         var pageNumber = posBy4Kbs / pageSizeTo4KbRatio;
         var offsetBy4Kb = posBy4Kbs % pageSizeTo4KbRatio;

@@ -743,7 +743,7 @@ namespace Voron.Impl.Paging
 
         protected int CopyPageImpl(Pager2 pager, long p, ref Pager2.State state)
         {
-            var src = pager.AcquirePagePointer(state, p);
+            var src = AcquirePagePointer(null, p);
             var pageHeader = (PageHeader*)src;
             int numberOfPages = 1;
             if ((pageHeader->Flags & PageFlags.Overflow) == PageFlags.Overflow)
