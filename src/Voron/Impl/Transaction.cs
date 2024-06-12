@@ -17,6 +17,8 @@ using Voron.Data.Lookups;
 using Voron.Data.RawData;
 using Voron.Data.PostingLists;
 using Constants = Voron.Global.Constants;
+using System.Diagnostics.CodeAnalysis;
+using Voron.Impl.Paging;
 
 using static Sparrow.PortableExceptions;
 using static Voron.VoronExceptions;

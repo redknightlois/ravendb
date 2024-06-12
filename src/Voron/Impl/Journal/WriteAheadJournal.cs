@@ -33,6 +33,7 @@ using Voron.Util;
 using Constants = Voron.Global.Constants;
 using NativeMemory = Sparrow.Utils.NativeMemory;
 using System.Diagnostics.CodeAnalysis;
+using System.Diagnostics.Eventing.Reader;
 using System.Runtime.CompilerServices;
 using Sparrow.Server.LowMemory;
 
@@ -41,7 +42,6 @@ namespace Voron.Impl.Journal
     public sealed unsafe class WriteAheadJournal : IJournalCompressionBufferCryptoHandler, IDisposable
     {
         private readonly StorageEnvironment _env;
-        private readonly AbstractPager _dataPager;
 
         private long _currentJournalFileSize;
         private DateTime _lastFile;
@@ -73,7 +73,6 @@ namespace Voron.Impl.Journal
             _env = env;
             _is32Bit = env.Options.ForceUsing32BitsPager || PlatformDetails.Is32Bits;
             _logger = LoggingSource.Instance.GetLogger<WriteAheadJournal>(Path.GetFileName(env.ToString()));
-            _dataPager = _env.Options.DataPager;
             _currentJournalFileSize = env.Options.InitialLogFileSize;
             _headerAccessor = env.HeaderAccessor;
 
@@ -179,6 +178,10 @@ namespace Voron.Impl.Journal
                 journalToStartReadingFrom == -1)
                 journalToStartReadingFrom++;
 
+            var dataPager = _env.DataPager;
+            var currentState = _env.CurrentStateRecord;
+            var dataPagerState = currentState.DataPagerState;
+
             var deleteLastJournal = false;
             for (var journalNumber = journalToStartReadingFrom; journalNumber <= logInfo.CurrentJournal; journalNumber++)
             {
@@ -195,9 +198,9 @@ namespace Voron.Impl.Journal
                             deleteLastJournal = isMoreThanMaxFileSize;
 
                         var transactionHeader = txHeader->TransactionId == 0 ? null : txHeader;
-                        using (var journalReader = new JournalReader(pager, _dataPager, recoveryPager, modifiedPages, logInfo, currentFileHeader, transactionHeader))
+                        using (var journalReader = new JournalReader(pager, dataPager, recoveryPager, modifiedPages, logInfo, currentFileHeader, transactionHeader))
                         {
-                            var transactionHeaders = journalReader.RecoverAndValidate(_env.Options);
+                            var transactionHeaders = journalReader.RecoverAndValidate(ref dataPagerState, _env.Options);
 
                             var lastReadHeaderPtr = journalReader.LastTransactionHeader;
 
@@ -243,6 +246,8 @@ namespace Voron.Impl.Journal
                             }
                         }
                         addToInitLog?.Invoke($"Journal {journalNumber} Recovered");
+
+                        _env.UpdateState(currentState with { DataPagerState = dataPagerState });
                     }
                 }
                 catch (InvalidJournalException)
@@ -291,7 +296,7 @@ namespace Voron.Impl.Journal
 
                         using (tempTx) // release any resources, we just wanted to validate things
                         {
-                            var ptr = (PageHeader*)_dataPager.AcquirePagePointerWithOverflowHandling(tempTx, modifiedPage, null);
+                            var ptr = (PageHeader*)dataPager.AcquirePagePointerWithOverflowHandling(dataPagerState, modifiedPage);
 
                             int numberOfPages = VirtualPagerLegacyExtensions.GetNumberOfPages(ptr);
 
@@ -1256,10 +1261,13 @@ namespace Voron.Impl.Journal
                 {
                     // We do the sync _outside_ of the lock, letting the rest of the stuff proceed
                     var sp = Stopwatch.StartNew();
-                    _parent._waj._dataPager.Sync(Interlocked.Read(ref _parent._totalWrittenButUnsyncedBytes));
+                    var dataPager = _parent._waj._env.DataPager;
+                    var currentStateRecord = _parent._waj._env.CurrentStateRecord;
+                    var dataPagerState = currentStateRecord.DataPagerState; 
+                    dataPager.Sync(dataPagerState, Interlocked.Read(ref _parent._totalWrittenButUnsyncedBytes));
                     if (_parent._waj._logger.IsInfoEnabled)
                     {
-                        var sizeInKb = (_parent._waj._dataPager.NumberOfAllocatedPages * Constants.Storage.PageSize) / Constants.Size.Kilobyte;
+                        var sizeInKb = (dataPagerState.NumberOfAllocatedPages * Constants.Storage.PageSize) / Constants.Size.Kilobyte;
                         _parent._waj._logger.Info(
                             $"Sync of {sizeInKb:#,#0} kb file with {_currentTotalWrittenBytes / Constants.Size.Kilobyte:#,#0} kb dirty in {sp.Elapsed}");
                     }
@@ -1450,52 +1458,55 @@ namespace Voron.Impl.Journal
                 {
                     long written = 0;
                     var sp = Stopwatch.StartNew();
-                    using (var meter = _waj._dataPager.Options.IoMetrics.MeterIoRate(_waj._dataPager.FileName.FullPath, IoMetrics.MeterType.DataFlush, 0))
+                    var options = _waj._env.Options;
+                    var dataPager = _waj._env.DataPager;
+                    var currentStateRecord = _waj._env.CurrentStateRecord;
+                    var dataPagerState = currentStateRecord.DataPagerState;
+                    using (var meter = options.IoMetrics.MeterIoRate(dataPager.FileName, IoMetrics.MeterType.DataFlush, 0))
                     {
-                        using (var batchWrites = _waj._dataPager.BatchWriter())
+                        var tempTx = new TempPagerTransaction();
+                        foreach (var pagePosition in pagesToWrite.Values)
                         {
-                            var tempTx = new TempPagerTransaction();
-                            foreach (var pagePosition in pagesToWrite.Values)
+                            var scratchNumber = pagePosition.ScratchNumber;
+                            if (scratchPagerStates.TryGetValue(scratchNumber, out var pagerState) == false)
                             {
-                                var scratchNumber = pagePosition.ScratchNumber;
-                                if (scratchPagerStates.TryGetValue(scratchNumber, out var pagerState) == false)
-                                {
-                                    // we're not under write transaction now, we need to acquire the pager state and use it for reading
-                                    var scratchBuffer = scratchBufferPool.GetScratchBufferFile(scratchNumber);
-                                    pagerState = scratchBuffer.File.Pager.GetPagerStateAndAddRefAtomically();
-                                   
-                                    scratchPagerStates.Add(scratchNumber, pagerState);
-                                }
+                                // we're not under write transaction now, we need to acquire the pager state and use it for reading
+                                var scratchBuffer = scratchBufferPool.GetScratchBufferFile(scratchNumber);
+                                pagerState = scratchBuffer.File.Pager.GetPagerStateAndAddRefAtomically();
 
-                                if (_waj._env.Options.Encryption.IsEnabled == false)
-                                {
-                                    using (tempTx) // release any resources, we just wanted to validate things
-                                    {
-                                        var page = (PageHeader*)scratchBufferPool.AcquirePagePointerWithOverflowHandling(tempTx, scratchNumber, pagePosition.ScratchPage, pagerState);
-                                        var checksum = StorageEnvironment.CalculatePageChecksum((byte*)page, page->PageNumber, out var expectedChecksum);
-                                        if (checksum != expectedChecksum)
-                                            ThrowInvalidChecksumOnPageFromScratch(scratchNumber, pagePosition, page, checksum, expectedChecksum);
-                                    }
-                                }
-
-                                var numberOfPages = scratchBufferPool.CopyPage(
-                                    batchWrites,
-                                    scratchNumber,
-                                    pagePosition.ScratchPage,
-                                    pagerState);
-
-                                written += numberOfPages * Constants.Storage.PageSize;
+                                scratchPagerStates.Add(scratchNumber, pagerState);
                             }
+
+                            if (_waj._env.Options.Encryption.IsEnabled == false)
+                            {
+                                using (tempTx) // release any resources, we just wanted to validate things
+                                {
+                                    var page = (PageHeader*)scratchBufferPool.AcquirePagePointerWithOverflowHandling(tempTx, scratchNumber, pagePosition.ScratchPage,
+                                        pagerState);
+                                    var checksum = StorageEnvironment.CalculatePageChecksum((byte*)page, page->PageNumber, out var expectedChecksum);
+                                    if (checksum != expectedChecksum)
+                                        ThrowInvalidChecksumOnPageFromScratch(scratchNumber, pagePosition, page, checksum, expectedChecksum);
+                                }
+                            }
+
+                            var numberOfPages = scratchBufferPool.CopyPage(
+                                dataPager,
+                                scratchNumber,
+                                pagePosition.ScratchPage,
+                                ref dataPagerState);
+
+                            written += numberOfPages * Constants.Storage.PageSize;
                         }
 
-                        meter.SetFileSize(_waj._dataPager.TotalAllocationSize);
+                        _waj._env.UpdateState(currentStateRecord with { DataPagerState = dataPagerState });
+                        meter.SetFileSize(dataPagerState.TotalAllocatedSize);
                         meter.IncrementSize(written);
                     }
 
                     if (_waj._logger.IsInfoEnabled)
-                        _waj._logger.Info($"Flushed {pagesToWrite.Count:#,#} pages to { _waj._dataPager.FileName} with {new Size(written, SizeUnit.Bytes)} in {sp.Elapsed}.");
-                    else if (_waj._logger.IsOperationsEnabled && sp.Elapsed > _waj._dataPager.Options.LongRunningFlushingWarning)
-                        _waj._logger.Operations($"Very long data flushing. It took {sp.Elapsed} to flush {pagesToWrite.Count:#,#} pages to { _waj._dataPager.FileName} with {new Size(written, SizeUnit.Bytes)}.");
+                        _waj._logger.Info($"Flushed {pagesToWrite.Count:#,#} pages to {dataPager.FileName} with {new Size(written, SizeUnit.Bytes)} in {sp.Elapsed}.");
+                    else if (_waj._logger.IsOperationsEnabled && sp.Elapsed > options.LongRunningFlushingWarning)
+                        _waj._logger.Operations($"Very long data flushing. It took {sp.Elapsed} to flush {pagesToWrite.Count:#,#} pages to { dataPager.FileName} with {new Size(written, SizeUnit.Bytes)}.");
 
                     Interlocked.Add(ref _totalWrittenButUnsyncedBytes, written);
                 }

@@ -533,7 +533,7 @@ namespace Voron.Impl.Paging
         {
             // this is a separate method because we don't want to have an exception throwing in the hot path
 
-            VoronUnrecoverableErrorException.Raise(_options,
+            VoronUnrecoverableErrorException.Raise(
                 "The page " + pageNumber + " was not allocated, allocated pages: " + NumberOfAllocatedPages + " in " +
                 GetSourceName());
         }
@@ -579,13 +579,13 @@ namespace Voron.Impl.Paging
             return true;
         }
 
-        private struct PageIterator : IEnumerator<long>
+        public struct PageIterator : IEnumerator<long>
         {
             private readonly long _startPage;
             private readonly long _endPage;
             private long _currentPage;
 
-            public PageIterator(long pageNumber, int pagesToPrefetch)
+            public PageIterator(long pageNumber, long pagesToPrefetch)
             {
                 this._startPage = pageNumber;
                 this._endPage = pageNumber + pagesToPrefetch;
@@ -739,11 +739,11 @@ namespace Voron.Impl.Paging
             return false;
         }
 
-        public abstract int CopyPage(I4KbBatchWrites destwI4KbBatchWrites, long p, PagerState pagerState);
+        public abstract int CopyPage(Pager2 pager, long p, ref Pager2.State state);
 
-        protected int CopyPageImpl(I4KbBatchWrites destwI4KbBatchWrites, long p, PagerState pagerState)
+        protected int CopyPageImpl(Pager2 pager, long p, ref Pager2.State state)
         {
-            var src = AcquirePagePointer(null, p, pagerState);
+            var src = AcquirePagePointer(null, p);
             var pageHeader = (PageHeader*)src;
             int numberOfPages = 1;
             if ((pageHeader->Flags & PageFlags.Overflow) == PageFlags.Overflow)
@@ -751,7 +751,7 @@ namespace Voron.Impl.Paging
                 numberOfPages = VirtualPagerLegacyExtensions.GetNumberOfOverflowPages(pageHeader->OverflowSize);
             }
             const int adjustPageSize = (Constants.Storage.PageSize) / (4 * Constants.Size.Kilobyte);
-            destwI4KbBatchWrites.Write(pageHeader->PageNumber * (long)adjustPageSize, numberOfPages * adjustPageSize, src);
+            pager.DirectWrite(ref state, pageHeader->PageNumber * (long)adjustPageSize, numberOfPages * adjustPageSize, src);
 
             return numberOfPages;
         }
