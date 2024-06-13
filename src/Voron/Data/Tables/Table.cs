@@ -1893,6 +1893,7 @@ namespace Voron.Data.Tables
                 // local function, no matter how simple it is. 
 
                 var pager = _tx.LowLevelTransaction.DataPager;
+                var dataPagerState = _tx.LowLevelTransaction.DataPagerState;
                 var result = new TableValueHolder();
 
                 bool hasMore;
@@ -1904,7 +1905,7 @@ namespace Voron.Data.Tables
                         break;
 
                     // Prefetch the read documents in order to ensure we will be able to read the data immediately.
-                    pager.MaybePrefetchMemory(new PagePrefetcherIterator(chunk, readDocuments));
+                    pager.MaybePrefetchMemory(dataPagerState,new PagePrefetcherIterator(chunk, readDocuments));
 
                     // Do the actual processing to train by yielding the reader.
                     for (int i = 0; i < readDocuments; i++)
