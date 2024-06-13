@@ -72,6 +72,7 @@ namespace Voron.Exceptions
         {
         }
 
+        [DoesNotReturn]
         public static void Raise(StorageEnvironmentOptions options, string message)
         {
             try

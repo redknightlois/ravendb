@@ -18,6 +18,22 @@ namespace Voron.Impl.Paging;
 
 public unsafe partial class Pager2
 {
+    public class TxStateFor32Bits
+    {
+        public Dictionary<long, LoadedPage> LoadedPages = [];
+        public List<MappedAddresses> AddressesToUnload = [];
+        public long TotalLoadedSize;
+    }
+
+    public struct PagerTransactionState 
+    {
+        public Dictionary<Pager2, TxStateFor32Bits> For32Bits;
+        public Action OnDispose;
+        public SyncDelegate Sync;
+
+        public delegate void SyncDelegate(Pager2 pager, ref PagerTransactionState txState);
+    }
+    
     public class State: IDisposable
     {
         public readonly Pager2 Pager;
@@ -50,6 +66,9 @@ public unsafe partial class Pager2
             {
                 FileAccess = FileAccess,
                 FileStream = FileStream,
+                Handle = Handle,
+                MemAccess = MemAccess,
+                FileAttributes = FileAttributes,
             };
             return clone;
         }
@@ -69,7 +88,7 @@ public unsafe partial class Pager2
 
         public Win32NativeFileAccess FileAccess;
         public Win32NativeFileAttributes FileAttributes;
-        public MemoryMappedFileAccess MemAccess;
+        public Win32MemoryMapNativeMethods.NativeFileMapAccessType MemAccess;
         public SafeFileHandle? Handle;
         public FileStream? FileStream;
 

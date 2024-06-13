@@ -171,9 +171,9 @@ namespace Voron.Impl.Paging
             return Inner.CanPrefetch.Value;
         }
 
-        public override int CopyPage(Pager2 pager, long p, ref Pager2.State state)
+        public override int CopyPage(Pager2 pager, long p, ref Pager2.State state, ref Pager2.PagerTransactionState txState)
         {
-            return Inner.CopyPage(pager, p, ref state);
+            return Inner.CopyPage(pager, p, ref state, ref txState);
         }
 
 

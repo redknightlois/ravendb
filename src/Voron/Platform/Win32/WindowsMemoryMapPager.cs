@@ -374,9 +374,9 @@ namespace Voron.Platform.Win32
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "Failed to UnMapView of file " + FileName);
             NativeMemory.UnregisterFileMapping(_fileInfo.FullName, new IntPtr(baseAddress), size);
         }
-        public override int CopyPage(Pager2 pager, long p, ref Pager2.State state)
+        public override int CopyPage(Pager2 pager, long p, ref Pager2.State state, ref Pager2.PagerTransactionState txState)
         {
-            return CopyPageImpl(pager, p, ref state);
+            return CopyPageImpl(pager, p, ref state, ref txState);
         }
 
         internal override void ProtectPageRange(byte* start, ulong size, bool force = false)

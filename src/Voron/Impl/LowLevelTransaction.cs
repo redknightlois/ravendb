@@ -32,6 +32,7 @@ namespace Voron.Impl
 {
     public sealed unsafe class LowLevelTransaction : IPagerLevelTransactionState
     {
+        
         public readonly Pager2 DataPager;
         private readonly StorageEnvironment _env;
         private readonly long _id;
@@ -53,6 +54,7 @@ namespace Voron.Impl
 
         public long NumberOfModifiedPages => _numberOfModifiedPages;
 
+        public Pager2.PagerTransactionState PagerTransactionState;
         private readonly WriteAheadJournal _journal;
         internal readonly List<JournalSnapshot> JournalSnapshots = new();
 
@@ -120,7 +122,7 @@ namespace Voron.Impl
             }
         }
         public event Action<IPagerLevelTransactionState> OnDispose;
-        
+
         /// <summary>
         /// This is called *under the write transaction lock* and will
         /// allow us to clean up any in memory state that shouldn't be preserved
@@ -640,7 +642,7 @@ namespace Voron.Impl
                 }
                 else
                 {
-                    p = new Page(DataPager.AcquirePagePointerWithOverflowHandling(DataPagerState, pageNumber));
+                    p = new Page(DataPager.AcquirePagePointerWithOverflowHandling(DataPagerState, ref PagerTransactionState, pageNumber));
 
                     Debug.Assert(p.PageNumber == pageNumber, string.Format("Requested ReadOnly page #{0}. Got #{1} from data file", pageNumber, p.PageNumber));
 
@@ -694,7 +696,7 @@ namespace Voron.Impl
                 }
                 else
                 {
-                    result = *(T*)DataPager.AcquirePagePointer(DataPagerState, pageNumber);
+                    result = *(T*)DataPager.AcquirePagePointer(DataPagerState, ref PagerTransactionState, pageNumber);
                 }
             }
 

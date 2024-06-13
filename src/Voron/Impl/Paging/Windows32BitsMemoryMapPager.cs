@@ -202,7 +202,7 @@ namespace Voron.Impl.Paging
             return true;
         }
 
-        public override int CopyPage(Pager2 pager, long p, ref Pager2.State state)
+        public override int CopyPage(Pager2 pager, long p, ref Pager2.State state, ref Pager2.PagerTransactionState txState)
         {
             throw new NotImplementedException();
         }

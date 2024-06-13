@@ -42,27 +42,25 @@ namespace Voron.Impl.Backup
             CompressionLevel compressionLevel = CompressionLevel.Optimal,
             Action<(string Message, int FilesCount)> infoNotify = null)
         {
-            throw new NotImplementedException();
-
-            // infoNotify ??= _ => { };
-            //
-            // infoNotify(("Voron backup db started", 0));
-            //
-            // using (var file = SafeFileStream.Create(backupPath.FullPath, FileMode.Create))
-            // {
-            //     using (var package = new ZipArchive(file, ZipArchiveMode.Create, leaveOpen: true))
-            //     {
-            //         infoNotify(("Voron backup started", 0));
-            //         var dataPager = env.DataPager;
-            //         var copier = new DataCopier(Constants.Storage.PageSize * 16);
-            //         //Backup(env, compressionAlgorithm, compressionLevel, dataPager, package, string.Empty, copier, infoNotify);
-            //
-            //         file.Flush(true); // make sure that we fully flushed to disk
-            //
-            //     }
-            // }
-            //
-            // infoNotify(("Voron backup db finished", 0));
+            infoNotify ??= _ => { };
+            
+            infoNotify(("Voron backup db started", 0));
+            
+            using (var file = SafeFileStream.Create(backupPath.FullPath, FileMode.Create))
+            {
+                using (var package = new ZipArchive(file, ZipArchiveMode.Create, leaveOpen: true))
+                {
+                    infoNotify(("Voron backup started", 0));
+                    var dataPager = env.DataPager;
+                    var copier = new DataCopier(Constants.Storage.PageSize * 16);
+                    Backup(env, compressionAlgorithm, compressionLevel, dataPager, package, string.Empty, copier, infoNotify);
+            
+                    file.Flush(true); // make sure that we fully flushed to disk
+            
+                }
+            }
+            
+            infoNotify(("Voron backup db finished", 0));
         }
         /// <summary>
         /// Do a full backup of a set of environments. Note that the order of the environments matter!
@@ -96,7 +94,7 @@ namespace Voron.Impl.Backup
             StorageEnvironment env,
             SnapshotBackupCompressionAlgorithm compressionAlgorithm,
             CompressionLevel compressionLevel,
-            AbstractPager dataPager,
+            Pager2 dataPager,
             ZipArchive zipArchive,
             string basePath,
             DataCopier copier,
@@ -120,7 +118,7 @@ namespace Voron.Impl.Backup
                 using (var txw = env.NewLowLevelTransaction(writePersistentContext, TransactionFlags.ReadWrite)) // so no new journal files will be created
                 {
                     txr = env.NewLowLevelTransaction(readPersistentContext, TransactionFlags.Read);// now have snapshot view
-                    allocatedPages = dataPager.NumberOfAllocatedPages;
+                    allocatedPages = txw.DataPagerState.NumberOfAllocatedPages;
 
                     Debug.Assert(HeaderAccessor.HeaderFileNames.Length == 2);
                     infoNotify(($"Voron copy headers for {basePath}", 2));
@@ -181,7 +179,7 @@ namespace Voron.Impl.Backup
                     using (var dataStream = dataPart.Open())
                     {
                         // now can copy everything else
-                        copier.ToStream(dataPager, 0, allocatedPages, dataStream, message => infoNotify((message, 0)), cancellationToken);
+                        copier.ToStream(dataPager, txr, 0, allocatedPages, dataStream, message => infoNotify((message, 0)), cancellationToken);
                     }
                     infoNotify(("Voron copy data file", 1));
                 }

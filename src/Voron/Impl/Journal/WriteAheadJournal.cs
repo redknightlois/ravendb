@@ -293,21 +293,29 @@ namespace Voron.Impl.Journal
                             addToInitLog?.Invoke($"Still calculating checksum... ({sortedPages.Length - i} out of {sortedPages.Length}");
                         }
 
-                        using (tempTx) // release any resources, we just wanted to validate things
+                        Pager2.PagerTransactionState state = default;
+                        try
                         {
-                            var ptr = (PageHeader*)dataPager.AcquirePagePointerWithOverflowHandling(dataPagerState, modifiedPage);
-
-                            int numberOfPages = VirtualPagerLegacyExtensions.GetNumberOfPages(ptr);
-
-                            if (overflowDetector.IsOverlappingAnotherPage(modifiedPage, numberOfPages))
+                            using (tempTx) // release any resources, we just wanted to validate things
                             {
-                                // if page is overlapping an already validated page it means this one was freed, we must not check it
-                                continue;
+                                var ptr = (PageHeader*)dataPager.AcquirePagePointerWithOverflowHandling(dataPagerState, ref state, modifiedPage);
+
+                                int numberOfPages = VirtualPagerLegacyExtensions.GetNumberOfPages(ptr);
+
+                                if (overflowDetector.IsOverlappingAnotherPage(modifiedPage, numberOfPages))
+                                {
+                                    // if page is overlapping an already validated page it means this one was freed, we must not check it
+                                    continue;
+                                }
+
+                                _env.ValidateInMemoryPageChecksum(modifiedPage, ptr);
+
+                                overflowDetector.SetPageChecked(modifiedPage);
                             }
-
-                            _env.ValidateInMemoryPageChecksum(modifiedPage, ptr);
-
-                            overflowDetector.SetPageChecked(modifiedPage);
+                        }
+                        finally
+                        {
+                            state.OnDispose?.Invoke();
                         }
                     }
 
@@ -1464,6 +1472,7 @@ namespace Voron.Impl.Journal
                     using (var meter = options.IoMetrics.MeterIoRate(dataPager.FileName, IoMetrics.MeterType.DataFlush, 0))
                     {
                         var tempTx = new TempPagerTransaction();
+                        Pager2.PagerTransactionState txState = default;
                         foreach (var pagePosition in pagesToWrite.Values)
                         {
                             var scratchNumber = pagePosition.ScratchNumber;
@@ -1492,11 +1501,15 @@ namespace Voron.Impl.Journal
                                 dataPager,
                                 scratchNumber,
                                 pagePosition.ScratchPage,
-                                ref dataPagerState);
+                                ref dataPagerState,
+                                ref txState
+                                );
 
                             written += numberOfPages * Constants.Storage.PageSize;
                         }
 
+                        txState.Sync?.Invoke(dataPager, ref txState);
+                        txState.OnDispose?.Invoke();
                         _waj._env.UpdateState(currentStateRecord with { DataPagerState = dataPagerState });
                         meter.SetFileSize(dataPagerState.TotalAllocatedSize);
                         meter.IncrementSize(written);

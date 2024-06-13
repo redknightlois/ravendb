@@ -16,7 +16,9 @@ namespace Voron.Platform.Posix
         private readonly bool _supportsUnmapping;
 
         private readonly Logger _log = LoggingSource.Instance.GetLogger<PosixAbstractPager>("PosixAbstractPager");
-        public override int CopyPage(Pager2 pager, long p, ref Pager2.State state)
+   
+
+        public override int CopyPage(Pager2 pager, long p, ref Pager2.State state, ref Pager2.PagerTransactionState txState)
         {
             throw new NotImplementedException();
         }
