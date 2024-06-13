@@ -739,9 +739,9 @@ namespace Voron.Impl.Paging
             return false;
         }
 
-        public abstract int CopyPage(Pager2 pager, long p, ref Pager2.State state);
+        public abstract int CopyPage(Pager2 pager, long p, ref Pager2.State state, ref Pager2.PagerTransactionState txState);
 
-        protected int CopyPageImpl(Pager2 pager, long p, ref Pager2.State state)
+        protected int CopyPageImpl(Pager2 pager, long p, ref Pager2.State state, ref Pager2.PagerTransactionState txState)
         {
             var src = AcquirePagePointer(null, p);
             var pageHeader = (PageHeader*)src;
@@ -751,7 +751,7 @@ namespace Voron.Impl.Paging
                 numberOfPages = VirtualPagerLegacyExtensions.GetNumberOfOverflowPages(pageHeader->OverflowSize);
             }
             const int adjustPageSize = (Constants.Storage.PageSize) / (4 * Constants.Size.Kilobyte);
-            pager.DirectWrite(ref state, pageHeader->PageNumber * (long)adjustPageSize, numberOfPages * adjustPageSize, src);
+            pager.DirectWrite(ref state,  ref txState,pageHeader->PageNumber * (long)adjustPageSize, numberOfPages * adjustPageSize, src);
 
             return numberOfPages;
         }

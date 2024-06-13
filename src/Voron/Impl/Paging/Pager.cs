@@ -1,9 +1,11 @@
 ﻿#nullable enable
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 using Sparrow;
 using Sparrow.Binary;
@@ -25,12 +27,20 @@ public unsafe partial class Pager2 : IDisposable
     public readonly string FileName;
     public uint UniquePhysicalDriveId;
     public readonly StorageEnvironmentOptions Options;
-
+    
     private readonly bool _canPrefetch, _temporaryOrDeleteOnClose, _usePageProtection;
+
+    private readonly StateFor32Bits? _32BitsState;
+
+    private class StateFor32Bits
+    {
+        public readonly ReaderWriterLockSlim AllocationLock = new ReaderWriterLockSlim();
+        public readonly ConcurrentDictionary<long, ConcurrentSet<MappedAddresses>> MemoryMapping = new();
+    }
 
     private readonly Functions _functions;
     private readonly ConcurrentSet<WeakReference<State>> _states = [];
-
+    private bool _lockMemory;
     private readonly PrefetchTableHint _prefetchState;
     private readonly Logger _logger;
     private DateTime _lastIncrease;
@@ -66,9 +76,11 @@ public unsafe partial class Pager2 : IDisposable
     {
         var funcs = options.RunningOn32Bits switch
         {
-            false when PlatformDetails.RunningOnWindows => Windows.Functions,
-            _ => throw new ArgumentOutOfRangeException()
+            false when PlatformDetails.RunningOnWindows => Win64.Functions,
+            true when PlatformDetails.RunningOnWindows => Win32.Functions,
+            _ => throw new NotSupportedException("Running " + RuntimeInformation.OSDescription)
         };
+        
         var pager = new Pager2(options, openFileOptions, funcs, canPrefetchAhead: true, usePageProtection: openFileOptions.UsePageProtection,
             out State state);
 
@@ -92,9 +104,13 @@ public unsafe partial class Pager2 : IDisposable
         _increaseSize = MinIncreaseSize;
         state = functions.Init(this, openFileOptions);
         _prefetchState = new PrefetchTableHint(options.PrefetchSegmentSize, options.PrefetchResetThreshold, state.TotalAllocatedSize);
+        if (options.RunningOn32Bits)
+        {
+            _32BitsState = new StateFor32Bits();
+        }
     }
-
-    public void DirectWrite(ref State state, long posBy4Kbs, int numberOf4Kbs, byte* source)
+    
+    public void DirectWrite(ref State state, ref PagerTransactionState txState,long posBy4Kbs, int numberOf4Kbs, byte* source)
     {
         const int pageSizeTo4KbRatio = (Constants.Storage.PageSize / (4 * Constants.Size.Kilobyte));
         var pageNumber = posBy4Kbs / pageSizeTo4KbRatio;
@@ -106,14 +122,14 @@ public unsafe partial class Pager2 : IDisposable
         EnsureContinuous(ref state, pageNumber, numberOfPages);
 
         var toWrite = numberOf4Kbs * 4 * Constants.Size.Kilobyte;
-        byte* destination = AcquirePagePointer(state, pageNumber)
+        byte* destination = AcquirePagePointer(state, ref txState, pageNumber)
                             + (offsetBy4Kb * 4 * Constants.Size.Kilobyte);
 
-        UnprotectPageRange(destination, (ulong)toWrite, force: false);
+        UnprotectPageRange(destination, (ulong)toWrite);
 
         Memory.Copy(destination, source, toWrite);
 
-        ProtectPageRange(destination, (ulong)toWrite, force: false);
+        ProtectPageRange(destination, (ulong)toWrite);
     }
     
     public void DiscardWholeFile(State state)
@@ -182,16 +198,17 @@ public unsafe partial class Pager2 : IDisposable
             return; // nothing to do here
         
         using var metric = Options.IoMetrics.MeterIoRate(FileName, IoMetrics.MeterType.DataSync, 0);
+        metric.IncrementFileSize(state.TotalAllocatedSize);
         _functions.Sync(this, state);
         metric.IncrementSize(totalUnsynced);
     }
     
     
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public byte* AcquirePagePointerWithOverflowHandling(State state, long pageNumber)
+    public byte* AcquirePagePointerWithOverflowHandling(State state, ref PagerTransactionState txState, long pageNumber)
     {
         // Case 1: Page is not overflow ==> no problem, returning a pointer to existing mapping
-        var pageHeader = (PageHeader*)AcquirePagePointer(state, pageNumber);
+        var pageHeader = (PageHeader*)AcquirePagePointer(state, ref txState, pageNumber);
         if ((pageHeader->Flags & PageFlags.Overflow) != PageFlags.Overflow)
             return (byte*)pageHeader;
 
@@ -200,34 +217,34 @@ public unsafe partial class Pager2 : IDisposable
             return (byte*)pageHeader;
 
         // Case 3: Page is overflow and was ensuredMapped above, view was re-mapped so we need to acquire a pointer to the new mapping.
-        return AcquirePagePointer(state, pageNumber);
+        return AcquirePagePointer(state, ref txState, pageNumber);
     }
     
-    public byte* AcquirePagePointer(State state, long pageNumber)
+    public byte* AcquirePagePointer(State state, ref PagerTransactionState txState, long pageNumber)
     {
-        if (pageNumber <= state.NumberOfAllocatedPages && pageNumber >= 0) 
-            return _functions.AcquirePagePointer(this, pageNumber, state);
+        if (pageNumber <= state.NumberOfAllocatedPages && pageNumber >= 0)
+            return _functions.AcquirePagePointer(this, state, ref txState, pageNumber);
         
         VoronUnrecoverableErrorException.Raise("The page " + pageNumber + " was not allocated, allocated pages: " + state.NumberOfAllocatedPages + " in " + FileName);
         return null;// never hit
     }
 
-    public byte* AcquirePagePointerForNewPage(State state, long pageNumber, int numberOfPages)
+    public byte* AcquirePagePointerForNewPage(State state, ref PagerTransactionState txState, long pageNumber, int numberOfPages)
     {
-        return _functions.AcquirePagePointer(this, pageNumber, state);
+        return _functions.AcquirePagePointer(this, state, ref txState, pageNumber);
     }
 
-    public void ProtectPageRange(byte* start, ulong size, bool force)
+    public void ProtectPageRange(byte* start, ulong size)
     {
-        if (_usePageProtection == false && force == false || size == 0)
+        if (_usePageProtection == false || size == 0)
             return;
 
         _functions.ProtectPageRange(start, size);
     }
     
-    public void UnprotectPageRange(byte* start, ulong size, bool force)
+    public void UnprotectPageRange(byte* start, ulong size)
     {
-        if (_usePageProtection == false && force == false || size == 0)
+        if (_usePageProtection == false || size == 0)
             return;
 
         _functions.UnprotectPageRange(start, size);

@@ -128,6 +128,7 @@ namespace Voron.Impl.Journal
                     throw new InvalidDataException($"Transaction {current->TransactionId} contains reference to page {pageInfoPtr[i].PageNumber} which is after the last allocated page {current->LastPageNumber}");
             }
 
+            Pager2.PagerTransactionState txState = default;
             for (var i = 0; i < current->PageCount; i++)
             {
                 if (totalRead > current->UncompressedSize)
@@ -143,7 +144,7 @@ namespace Voron.Impl.Journal
 
 
                 // We are going to overwrite the page, so we don't care about its current content
-                var pagePtr = _dataPager.AcquirePagePointerForNewPage(state, pageInfoPtr[i].PageNumber, numberOfPagesOnDestination);
+                var pagePtr = _dataPager.AcquirePagePointerForNewPage(state, ref txState, pageInfoPtr[i].PageNumber, numberOfPagesOnDestination);
                 _dataPager.MaybePrefetchMemory(state, pageInfoPtr[i].PageNumber, numberOfPagesOnDestination);
                 
                 var pageNumber = *(long*)(outputPage + totalRead);
@@ -158,7 +159,7 @@ namespace Voron.Impl.Journal
                     _modifiedPages.Remove(pageNumber + j);
                 }
 
-                _dataPager.UnprotectPageRange(pagePtr, (ulong)pageInfoPtr[i].Size, force: false);
+                _dataPager.UnprotectPageRange(pagePtr, (ulong)pageInfoPtr[i].Size);
  
                 if (pageInfoPtr[i].DiffSize == 0)
                 {
@@ -215,8 +216,10 @@ namespace Voron.Impl.Journal
                     totalRead += pageInfoPtr[i].DiffSize;
                 }
 
-                _dataPager.ProtectPageRange(pagePtr, (ulong)pageInfoPtr[i].Size, force: false);
+                _dataPager.ProtectPageRange(pagePtr, (ulong)pageInfoPtr[i].Size);
             }
+            
+            txState.OnDispose?.Invoke();
 
             LastTransactionHeader = current;
 

@@ -34,7 +34,7 @@ namespace SlowTests.Voron.Issues
                     // under the covers this was using the pager state that has been disposed by above call dataFilePager.EnsureContinuous(5000, 1);
                     // now we have a check for that which throw an exception when this is the case
 
-                    tx.LowLevelTransaction.DataPager.AcquirePagePointer(tx.LowLevelTransaction.DataPagerState, 0);
+                    tx.LowLevelTransaction.DataPager.AcquirePagePointer(tx.LowLevelTransaction.DataPagerState, ref tx.LowLevelTransaction.PagerTransactionState, 0);
                 }
             }
         }
