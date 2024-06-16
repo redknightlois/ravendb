@@ -39,8 +39,6 @@ namespace FastTests.Issues
                         .Search(u => u.Name, "Ayende")
                         .LongCount();
 
-                    WaitForUserToContinueTheTest(store);
-
                     Assert.Equal(1, longCount);
                     Assert.Equal("Auto/Users/BySearch(Name)", stats.IndexName);
                 }

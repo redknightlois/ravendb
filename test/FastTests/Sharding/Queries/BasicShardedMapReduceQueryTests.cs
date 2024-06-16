@@ -677,7 +677,6 @@ limit 1")
                     Assert.Equal("Jane", queryResult[0].Name);
                     Assert.Equal(30, queryResult[0].Sum);
 
-                    WaitForUserToContinueTheTest(store);
                     var queryResult2 = session.Advanced.RawQuery<UserMapReduce.Result>(
                     $@"
 from index ""{stats.IndexName}"" as o

@@ -206,7 +206,6 @@ namespace FastTests.Client.Indexing
                     });
                     session.SaveChanges();
                     Indexes.WaitForIndexing(store);
-                    WaitForUserToContinueTheTest(store);
                     var result = session.Query<FanoutByNumbersWithReduce.Result>("FanoutByNumbersWithReduce")
                         .Where(x => x.Sum == 33)
                         .Single();
@@ -400,7 +399,6 @@ namespace FastTests.Client.Indexing
                 });
                 session.SaveChanges();
                 Indexes.WaitForIndexing(store);
-                WaitForUserToContinueTheTest(store);
                 session.Query<Location>(indexName).Spatial("Location", criteria => criteria.WithinRadius(kalab, 32.56829122491778, 34.953954053921734)).Single(x => x.Description == "Dor beach");
             }
         }
@@ -648,7 +646,6 @@ namespace FastTests.Client.Indexing
                     session.Store(new User { Name = "Foo", Address = address });
                     session.SaveChanges();
                     Indexes.WaitForIndexing(store);
-                    WaitForUserToContinueTheTest(store);
                     var user = session.Query<User>("Users/ByAddress").Single(u => u.Address == address);
                     Assert.Equal("Foo", user.Name);
                 }
