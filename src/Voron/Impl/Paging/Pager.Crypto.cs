@@ -222,7 +222,7 @@ public unsafe partial class Pager2
                 var numPages = VirtualPagerLegacyExtensions.GetNumberOfOverflowPages(dataSize);
 
                 pager.EnsureContinuous(ref state, buffer.Key, numPages);
-                pager.EnsureMapped(state, buffer.Key, numPages);
+                pager.EnsureMapped(state, ref txState, buffer.Key, numPages);
 
                 var pagePointer = pager.AcquirePagePointer(state, ref txState, buffer.Key);
 

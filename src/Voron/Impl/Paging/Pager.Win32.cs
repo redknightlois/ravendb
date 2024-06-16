@@ -100,7 +100,7 @@ public unsafe partial class Pager2
 
             var amountToMapInBytes = Win64.NearestSizeToAllocationGranularity((distanceFromStart + numberOfPages) * Constants.Storage.PageSize);
             MapPages(pager, state, pagerTxState, allocationStartPosition, amountToMapInBytes);
-            return false;
+            return true;
         }
 
         private static TxStateFor32Bits GetTxState(Pager2 pager, ref PagerTransactionState txState)

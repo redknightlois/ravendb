@@ -51,6 +51,7 @@ public unsafe partial class Pager2
     
     public class State: IDisposable
     {
+        string S = Environment.StackTrace;
         public readonly Pager2 Pager;
         
         /// <summary>

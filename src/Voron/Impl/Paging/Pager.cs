@@ -132,6 +132,7 @@ public unsafe partial class Pager2 : IDisposable
         EnsureContinuous(ref state, pageNumber, numberOfPages);
 
         var toWrite = numberOf4Kbs * 4 * Constants.Size.Kilobyte;
+        EnsureMapped(state, ref txState, pageNumber, numberOfPages);
         byte* destination = AcquireRawPagePointer(state, ref txState, pageNumber)
                             + (offsetBy4Kb * 4 * Constants.Size.Kilobyte);
 
@@ -162,9 +163,9 @@ public unsafe partial class Pager2 : IDisposable
         MaybePrefetchMemory(state, 0, state.NumberOfAllocatedPages);
     }
 
-    public bool EnsureMapped(State state, long page, int numberOfPages)
+    public bool EnsureMapped(State state, ref PagerTransactionState txState, long page, int numberOfPages)
     {
-        return false;
+        return _functions.EnsureMapped(this, state, ref txState, page, numberOfPages);
     }
 
     
@@ -223,7 +224,7 @@ public unsafe partial class Pager2 : IDisposable
             return (byte*)pageHeader;
 
         // Case 2: Page is overflow and already mapped large enough ==> no problem, returning a pointer to existing mapping
-        if (EnsureMapped(state, pageNumber, VirtualPagerLegacyExtensions.GetNumberOfOverflowPages(pageHeader->OverflowSize)) == false)
+        if (EnsureMapped(state, ref txState, pageNumber, VirtualPagerLegacyExtensions.GetNumberOfOverflowPages(pageHeader->OverflowSize)) == false)
             return (byte*)pageHeader;
 
         // Case 3: Page is overflow and was ensuredMapped above, view was re-mapped so we need to acquire a pointer to the new mapping.
@@ -240,7 +241,7 @@ public unsafe partial class Pager2 : IDisposable
             return (byte*)pageHeader;
 
         // Case 2: Page is overflow and already mapped large enough ==> no problem, returning a pointer to existing mapping
-        if (EnsureMapped(state, pageNumber, VirtualPagerLegacyExtensions.GetNumberOfOverflowPages(pageHeader->OverflowSize)) == false)
+        if (EnsureMapped(state, ref txState, pageNumber, VirtualPagerLegacyExtensions.GetNumberOfOverflowPages(pageHeader->OverflowSize)) == false)
             return (byte*)pageHeader;
 
         // Case 3: Page is overflow and was ensuredMapped above, view was re-mapped so we need to acquire a pointer to the new mapping.

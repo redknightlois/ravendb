@@ -140,7 +140,7 @@ namespace Voron.Impl.Journal
 
                 var numberOfPagesOnDestination = GetNumberOfPagesFor(pageInfoPtr[i].Size);
                 _dataPager.EnsureContinuous(ref state,pageInfoPtr[i].PageNumber, numberOfPagesOnDestination);
-                _dataPager.EnsureMapped(state, pageInfoPtr[i].PageNumber, numberOfPagesOnDestination);
+                _dataPager.EnsureMapped(state, ref txState, pageInfoPtr[i].PageNumber, numberOfPagesOnDestination);
 
 
                 // We are going to overwrite the page, so we don't care about its current content
