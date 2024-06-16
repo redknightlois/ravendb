@@ -48,7 +48,7 @@ public unsafe partial class Pager2
                 return buffer.Pointer;
             }
 
-            var pagePointer = pager._functions.AcquireRawPagePointer(pager, state, ref txState, pageNumber);
+            var pagePointer = pager.AcquireRawPagePointerWithOverflowHandling(state, ref txState, pageNumber);
 
             var pageHeader = (PageHeader*)pagePointer;
 

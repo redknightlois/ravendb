@@ -60,7 +60,7 @@ public unsafe partial class Pager2
         ///
         /// This is cleared upon committing the transaction state to the global state  
         /// </summary>
-        public State? _previous;
+        private State? _previous;
 
         public void BeforePublishing()
         {

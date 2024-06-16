@@ -230,6 +230,23 @@ public unsafe partial class Pager2 : IDisposable
         return AcquirePagePointer(state, ref txState, pageNumber);
     }
     
+    
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private byte* AcquireRawPagePointerWithOverflowHandling(State state, ref PagerTransactionState txState, long pageNumber)
+    {
+        // Case 1: Page is not overflow ==> no problem, returning a pointer to existing mapping
+        var pageHeader = (PageHeader*)AcquireRawPagePointer(state, ref txState, pageNumber);
+        if ((pageHeader->Flags & PageFlags.Overflow) != PageFlags.Overflow)
+            return (byte*)pageHeader;
+
+        // Case 2: Page is overflow and already mapped large enough ==> no problem, returning a pointer to existing mapping
+        if (EnsureMapped(state, pageNumber, VirtualPagerLegacyExtensions.GetNumberOfOverflowPages(pageHeader->OverflowSize)) == false)
+            return (byte*)pageHeader;
+
+        // Case 3: Page is overflow and was ensuredMapped above, view was re-mapped so we need to acquire a pointer to the new mapping.
+        return AcquireRawPagePointer(state, ref txState, pageNumber);
+    }
+    
     public byte* AcquirePagePointer(State state, ref PagerTransactionState txState, long pageNumber)
     {
         if (pageNumber <= state.NumberOfAllocatedPages && pageNumber >= 0)
