@@ -559,7 +559,6 @@ namespace FastTests.Server.Documents.Queries.Dynamic.Map
                 {
                     var items = session.Query<DictItem>().Customize(x => x.WaitForNonStaleResults()).Where(x => x.StringDict["a"] == "b").ToList();
                     Assert.Equal(1, items.Count);
-                    WaitForUserToContinueTheTest(store);
                     items = session.Query<DictItem>().Customize(x => x.WaitForNonStaleResults()).Where(x => x.StringDict.Any(y => y.Key == "a")).ToList();
                     Assert.Equal(2, items.Count);
 

@@ -98,8 +98,6 @@ namespace My.Crazy.Namespace
                 Assert.Equal(1, additionalSources.Count);
                 Assert.Equal(getRealCountry, additionalSources["Helper"]);
 
-                WaitForUserToContinueTheTest(store);
-
                 async Task<Dictionary<string, string>> GetAdditionalSources()
                 {
                     var record = await store.Maintenance.Server.SendAsync(new GetDatabaseRecordOperation(store.Database));
@@ -1034,7 +1032,6 @@ namespace My.Crazy.Namespace
                     Assert.Equal(0, indexErrors[0].Errors.Length);
 
                     
-                        WaitForUserToContinueTheTest(store);
                     var numbers = session.Query<PeopleIndex20.Result, PeopleIndex20>()
                         .Select(p => p.Numbers)
                         .Single();

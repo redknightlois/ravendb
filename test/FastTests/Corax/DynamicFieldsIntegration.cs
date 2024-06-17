@@ -24,12 +24,9 @@ public class DynamicFieldsIntegration : RavenTestBase
     public async Task SingleStringDynamicFieldsTest(Options options)
     {
         using var store = await GetStoreWithIndexAndData<IndexString, string>(options, i => $"Container no {i}");
-        WaitForUserToContinueTheTest(store);
-        {
-            using var session = store.OpenAsyncSession();
-            var result = await session.Query<TestClassResult<string>, IndexString>().Where(i => i.Dynamic == $"Container no 50").SingleOrDefaultAsync();
-            AssertResult(result);
-        }
+        using var session = store.OpenAsyncSession();
+        var result = await session.Query<TestClassResult<string>, IndexString>().Where(i => i.Dynamic == $"Container no 50").SingleOrDefaultAsync();
+        AssertResult(result);
     }
 
     [RavenTheory(RavenTestCategory.Indexes | RavenTestCategory.Querying)]

@@ -95,7 +95,6 @@ namespace FastTests.Server.Documents.Indexing
                         })
                         .Search(x => x.Name, "Ayende")
                         .ToList();
-                    WaitForUserToContinueTheTest(store);
                     Assert.Equal(1, results.Count);
                     Assert.Equal(2, results[0].Count);
                     Assert.Equal("Ayende Rahien", results[0].Name);

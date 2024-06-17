@@ -33,8 +33,6 @@ namespace FastTests.Server.Documents.Queries
                     .Highlight(x => x.Name, 128, 1, out Highlightings highlightings)
                     .Single();
 
-                WaitForUserToContinueTheTest(store);
-
                 Assert.Equal("<b style=\"background:yellow\">Alfreds</b> Futterkiste", highlightings.GetFragments(result.Id)[0]);
             }
         }

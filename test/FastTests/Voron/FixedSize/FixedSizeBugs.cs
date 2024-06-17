@@ -28,10 +28,10 @@ namespace FastTests.Voron.FixedSize
             using (var tx = Env.WriteTransaction())
             {
                 var fst = tx.FixedTreeFor(treeId, valSize: 8);
-                fst.DebugRenderAndShow();
+                //fst.DebugRenderAndShow();
                 fst.Add(1, new byte[8]);
                 fst.Add(2, new byte[8]);
-                fst.DebugRenderAndShow();
+                //fst.DebugRenderAndShow();
 
                 tx.Commit();
             }
