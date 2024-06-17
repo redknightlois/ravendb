@@ -265,7 +265,6 @@ namespace FastTests.Client.Queries
                 _ = await session.Query<A>().Where(x => x.B == new B { Byte = 1 }).ToArrayAsync();
                 _ = await session.Query<A>().Where(x => x.B == new B { Sbyte = 1 }).ToArrayAsync();
             }
-            WaitForUserToContinueTheTest(store);
         }
 
         [RavenTheory(RavenTestCategory.Querying)]
@@ -294,7 +293,6 @@ namespace FastTests.Client.Queries
                 _ = await session.Query<A>().Where(x => x.B.Byte == 1 ).ToArrayAsync();
                 _ = await session.Query<A>().Where(x => x.B.Sbyte == 1 ).ToArrayAsync();
             }
-            WaitForUserToContinueTheTest(store);
         }
 
         

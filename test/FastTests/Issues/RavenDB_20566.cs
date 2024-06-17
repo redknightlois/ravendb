@@ -48,8 +48,6 @@ namespace FastTests.Issues
                     session.SaveChanges();
                 }
 
-                WaitForUserToContinueTheTest(store);
-
                 using (var session = store.OpenSession())
                 {
                     var user = session.Query<MyUser>().Where(u => u.UserName == "john").FirstOrDefault();

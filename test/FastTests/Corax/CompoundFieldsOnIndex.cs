@@ -84,7 +84,6 @@ public class CompoundFieldsOnIndex : RavenTestBase
                 .Where(x => x.Name == "Corax")
                 .OrderBy(x => x.Birthday)
                 .ToList();
-            WaitForUserToContinueTheTest(store);
 
             Assert.Equal(2, users.Count);
             Assert.Equal(2014, users[0].Birthday.Year);
@@ -118,7 +117,6 @@ public class CompoundFieldsOnIndex : RavenTestBase
             Assert.Equal("Lucene", users[1].Name);
         }
         
-        WaitForUserToContinueTheTest(store);
     }
 
     [RavenFact(RavenTestCategory.Querying)]
