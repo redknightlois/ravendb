@@ -90,7 +90,6 @@ namespace FastTests.Server.Documents.Indexing.Static
 
                     results = session.Query<MapReduceIndexReturningDictionary_MethodSyntax.Result, MapReduceIndexReturningDictionary_QuerySyntax>().Customize(x => x.WaitForNonStaleResults()).ToList();
 
-                    WaitForUserToContinueTheTest(store);
                     Assert.Equal(1, results.Count);
 
                     Assert.Equal(2, results[0].Count);

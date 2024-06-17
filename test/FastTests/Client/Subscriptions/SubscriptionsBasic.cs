@@ -1167,8 +1167,6 @@ namespace FastTests.Client.Subscriptions
                 Projection = x => new { RavenQuery.Load<B>(x.BId).SomeProp }
             });
 
-            WaitForUserToContinueTheTest(store);
-
             await using (var sub = store.Subscriptions.GetSubscriptionWorker<ProjectionObject>(name))
             {
                 var mre = new AsyncManualResetEvent();

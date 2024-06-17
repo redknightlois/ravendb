@@ -40,7 +40,6 @@ namespace FastTests.Server.Documents.Queries
                     session.Store(new Foo { Bar = "Andrew" });
                     session.Store(new Foo { Bar = "boo" });
                     session.SaveChanges();
-                    WaitForUserToContinueTheTest(store);
                     Assert.Single(session.Query<Foo>("FooByBar").Search(x => x.Bar, "And*").Customize(x => x.WaitForNonStaleResults()).ToList());
                 }
             }

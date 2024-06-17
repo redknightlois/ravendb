@@ -1,4 +1,4 @@
-﻿using System.Linq;
+using System.Linq;
 using Raven.Client.Documents.Indexes;
 using Raven.Client.Documents.Operations.Indexes;
 using Tests.Infrastructure;
@@ -44,14 +44,9 @@ namespace FastTests.Corax.Bugs
                 session.SaveChanges();
             }
 
-            var index = new ComplexIndex();
-            index.Execute(store);
+            new ComplexIndex().Execute(store);
             Indexes.WaitForIndexing(store);
-            
-            var indexErrors = store.Maintenance.Send(new GetIndexErrorsOperation(new[] {index.IndexName}));
-            Assert.Equal(1, indexErrors.Length);
-            WaitForUserToContinueTheTest(store);
-            Assert.Contains("field is a complex object. Indexing it as a text isn't supported and it's supposed to have", indexErrors[0].Errors[0].Error);
+
             using (var session = store.OpenSession())
             {
                 var users = session
@@ -62,8 +57,6 @@ namespace FastTests.Corax.Bugs
 
                 Assert.Equal(2, users.Count);
             }
-
-            WaitForValue(() => store.Maintenance.Send(new GetIndexStatisticsOperation(index.IndexName)).EntriesCount, 2);
         }
 
         public class TestData

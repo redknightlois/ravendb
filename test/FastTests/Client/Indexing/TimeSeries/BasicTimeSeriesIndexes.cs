@@ -570,7 +570,6 @@ namespace FastTests.Client.Indexing.TimeSeries
                 terms = store.Maintenance.Send(new GetTermsOperation(indexName, "HeartBeat", null));
                 Assert.Equal(0, terms.Length);
 
-                WaitForUserToContinueTheTest(store);
             }
         }
 
@@ -792,8 +791,6 @@ namespace FastTests.Client.Indexing.TimeSeries
                 }));
 
                 Indexes.WaitForIndexing(store);
-
-                WaitForUserToContinueTheTest(store);
 
                 var terms = store.Maintenance.Send(new GetTermsOperation(indexName, "User", null));
                 Assert.Equal(1, terms.Length);

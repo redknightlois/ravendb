@@ -451,7 +451,6 @@ public class RavenIntegration : RavenTestBase
         {
             //  The `11` on the server side will be long ( and the string made of it is "11") but the index doesn't contain the such term (because we indexed it as `11.5`.)
             var query = session.Advanced.RawQuery<Doc>("from Docs where BoostFactor == 11").WaitForNonStaleResults().ToList();
-            WaitForUserToContinueTheTest(store);
             Assert.Equal(1, query.Count);
         }
     }
@@ -482,7 +481,6 @@ public class RavenIntegration : RavenTestBase
         }
 
         Indexes.WaitForIndexing(store);
-        WaitForUserToContinueTheTest(store);
     }
 
     private class SearchIndex : AbstractIndexCreationTask<DtoForDynamics>
@@ -552,7 +550,6 @@ public class RavenIntegration : RavenTestBase
         using (var session = store.OpenSession())
         {
             var classicId = session.Advanced.RawQuery<IdClass>($"from Docs where Name == 'maciej' and  id() == '{doc.Id}'").WaitForNonStaleResults().Count();
-            WaitForUserToContinueTheTest(store);
             var classicIdViaFieldName = session.Advanced.RawQuery<IdClass>($"from Docs where Name == 'maciej' and Id == '{doc.Id}'").WaitForNonStaleResults().Count();
             Assert.Equal(1, classicId);
             Assert.Equal(0, classicIdViaFieldName);
@@ -597,7 +594,6 @@ public class RavenIntegration : RavenTestBase
         var index = new DynamicFieldIndex();
         index.Execute(store);
         Indexes.WaitForIndexing(store);
-        WaitForUserToContinueTheTest(store);
 
         using (var session = store.OpenSession())
         {

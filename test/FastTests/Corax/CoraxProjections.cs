@@ -27,7 +27,6 @@ public class CoraxProjections : RavenTestBase
     {
         using var store = GetDocumentStore(options);
         CreateSampleDb<MyMapReduceIndex>(store);
-WaitForUserToContinueTheTest(store);
         using var session = store.OpenAsyncSession();
         var results = await session
             .Query<MyMapReduceIndex.Result, MyMapReduceIndex>()
@@ -135,7 +134,6 @@ WaitForUserToContinueTheTest(store);
                 .Select(i => i.Name)
                 .SingleAsync();
                 
-            WaitForUserToContinueTheTest(store);
             var expected = (options.SearchEngineMode, projectionBehavior) switch
             {
                 (_, ProjectionBehavior.FromDocument) => "Jan",
