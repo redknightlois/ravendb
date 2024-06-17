@@ -77,8 +77,8 @@ public unsafe partial class Pager2 : IDisposable
     {
         var funcs = options.RunningOn32Bits switch
         {
-            false when PlatformDetails.RunningOnWindows => Win64.Functions,
-            true when PlatformDetails.RunningOnWindows => Win32.Functions,
+            false when PlatformDetails.RunningOnWindows => Win64.CreateFunctions(),
+            true when PlatformDetails.RunningOnWindows => Win32.CreateFunctions(),
             _ => throw new NotSupportedException("Running " + RuntimeInformation.OSDescription)
         };
 

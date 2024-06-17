@@ -23,7 +23,7 @@ namespace Voron.Impl.Paging;
 public unsafe partial class Pager2
 {
 #if VALIDATE
-        public const bool ProtectPages = true;
+    public const bool ProtectPages = true;
 #else 
     public const bool ProtectPages = false;
 #endif
@@ -49,10 +49,8 @@ public unsafe partial class Pager2
         {
             return ((size / AllocationGranularity) + 1) * AllocationGranularity;
         }
-        
 
-
-        public static readonly Functions Functions = new()
+        public static Functions CreateFunctions() => new()
         {
             Init = &Init,
             AcquirePagePointer = &AcquirePagePointer,
@@ -343,8 +341,8 @@ public unsafe partial class Pager2
 
             // We don't need to manage size updates, we'll register a new allocation, instead
             NativeMemory.RegisterFileMapping(state.Pager.FileName, (nint)(state.BaseAddress), state.TotalAllocatedSize, null);
-            
-            Functions.ProtectPageRange(state.BaseAddress, (ulong)state.TotalAllocatedSize);
+
+            CreateFunctions().ProtectPageRange(state.BaseAddress, (ulong)state.TotalAllocatedSize);
         }
     }
 }

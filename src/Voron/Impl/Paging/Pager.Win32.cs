@@ -18,7 +18,7 @@ public unsafe partial class Pager2
 {
     public static class Win32
     {
-        public static readonly Functions Functions = new()
+        public static Functions CreateFunctions() => new()
         {
             Init = &Win32.Init,
             AcquirePagePointer = &Win32.AcquirePagePointer,
@@ -56,11 +56,11 @@ public unsafe partial class Pager2
             byte* destination = page + offsetBy4Kb * (4 * Constants.Size.Kilobyte);
 
             
-            Functions.UnprotectPageRange(destination, (ulong)toWrite);
+            pager._functions.UnprotectPageRange(destination, (ulong)toWrite);
 
             Memory.Copy(destination, source, toWrite);
 
-            Functions.ProtectPageRange(destination, (ulong)toWrite);
+            pager._functions.ProtectPageRange(destination, (ulong)toWrite);
         }
 
         private static void SyncAfterDirectWrite(Pager2 pager, State state, ref PagerTransactionState txState)

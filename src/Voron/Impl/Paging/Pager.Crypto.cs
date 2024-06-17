@@ -13,6 +13,8 @@ public unsafe partial class Pager2
     {
         public static byte* AcquirePagePointerForNewPage(Pager2 pager, long pageNumber, int numberOfPages, State state, ref PagerTransactionState txState)
         {
+            Debug.Assert(pager.Options.Encryption.IsEnabled);
+
             var cryptoState = GetTransactionState(pager, ref txState);
             var size = numberOfPages * Constants.Storage.PageSize;
             
@@ -40,6 +42,8 @@ public unsafe partial class Pager2
 
         public static byte* AcquirePagePointer(Pager2 pager, State state, ref PagerTransactionState txState, long pageNumber)
         {
+            Debug.Assert(pager.Options.Encryption.IsEnabled);
+
             var cryptoState = GetTransactionState(pager, ref txState);
 
             if (cryptoState.TryGetValue(pageNumber, out var buffer))
