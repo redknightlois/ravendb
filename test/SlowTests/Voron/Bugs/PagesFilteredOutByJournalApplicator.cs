@@ -31,7 +31,7 @@ namespace SlowTests.Voron.Bugs
 
                 txw.Commit();
 
-                DebugStuff.RenderAndShow(tree);
+                //DebugStuff.RenderAndShow(tree);
             }
 
             using (var txw = Env.WriteTransaction())
@@ -82,7 +82,7 @@ namespace SlowTests.Voron.Bugs
 
                 txw.Commit();
 
-                DebugStuff.RenderAndShow(tree);
+                //DebugStuff.RenderAndShow(tree);
             }
 
             using (var txw = Env.WriteTransaction())
@@ -94,7 +94,7 @@ namespace SlowTests.Voron.Bugs
 
                 txw.Commit();
 
-                DebugStuff.RenderAndShow(tree);
+                //DebugStuff.RenderAndShow(tree);
             }
 
             using (var txw = Env.WriteTransaction())

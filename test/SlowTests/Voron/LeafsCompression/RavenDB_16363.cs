@@ -46,7 +46,7 @@ namespace SlowTests.Voron.LeafsCompression
 
                 // after the above deletions there is only one entry on the page - "items/0"
 
-                DebugStuff.RenderAndShow(tree);
+                //DebugStuff.RenderAndShow(tree);
 
                 // this is an _update_ (very important)
                 // the issue was that the updated entry was added to a new (right) page by TreePageSplitter
