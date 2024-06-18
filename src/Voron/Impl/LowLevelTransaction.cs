@@ -36,7 +36,7 @@ using Constants = Voron.Global.Constants;
 
 namespace Voron.Impl
 {
-    public sealed unsafe class LowLevelTransaction : IPagerLevelTransactionState, IDisposableQueryable
+    public sealed unsafe class LowLevelTransaction : IPagerLevelTransactionState, IDisposableQueryable, INotifyAllocationFailure
     {
         public readonly AbstractPager DataPager;
         private readonly StorageEnvironment _env;
@@ -191,7 +191,7 @@ namespace Voron.Impl
             _id = previous._id;
             _freeSpaceHandling = previous._freeSpaceHandling;
             _allocator = allocator ?? new ByteStringContext(SharedMultipleUseFlag.None);
-            _allocator.AllocationFailed += MarkTransactionAsFailed;
+            _allocator.RegisterListener(this);
             _disposeAllocator = allocator == null;
             _pagerStates = new HashSet<PagerState>(ReferenceEqualityComparer<PagerState>.Default);
 
@@ -258,7 +258,7 @@ namespace Voron.Impl
 
             _allocator = new ByteStringContext(SharedMultipleUseFlag.None);
             _disposeAllocator = true;
-            _allocator.AllocationFailed += MarkTransactionAsFailed;
+            _allocator.RegisterListener(this);
 
             Flags = TransactionFlags.ReadWrite;
 
@@ -356,7 +356,7 @@ namespace Voron.Impl
             _freeSpaceHandling = freeSpaceHandling;
 
             _allocator = context ?? new ByteStringContext(SharedMultipleUseFlag.None);
-            _allocator.AllocationFailed += MarkTransactionAsFailed;
+            _allocator.RegisterListener(this);
             _disposeAllocator = context == null;
 
             _pagerStates = new HashSet<PagerState>(ReferenceEqualityComparer<PagerState>.Default);
@@ -984,7 +984,7 @@ namespace Voron.Impl
                     }
                 }
 
-                _allocator.AllocationFailed -= MarkTransactionAsFailed;
+                _allocator.UnregisterListener(this);
               
                 if (_disposeAllocator)
                 {
@@ -1001,9 +1001,14 @@ namespace Voron.Impl
             }
         }
 
-        public void MarkTransactionAsFailed()
+        internal void MarkTransactionAsFailed()
         {
             _txState |= TxState.Errored;
+        }
+
+        void INotifyAllocationFailure.OnAllocationFailure<TAllocator>(ByteStringContext<TAllocator> context)
+        {
+            MarkTransactionAsFailed();
         }
 
         internal void FreePageOnCommit(long pageNumber)
@@ -1728,5 +1733,7 @@ namespace Voron.Impl
         {
             return _dirtyPages.Contains(p);
         }
+
+
     }
 }
