@@ -44,7 +44,6 @@ namespace Voron
         [ThreadStatic]
         private static bool _skipCatastrophicFailureAssertion;
         private readonly CatastrophicFailureNotification _catastrophicFailureNotification;
-        private readonly ConcurrentSet<CryptoPager> _activeCryptoPagers = new ConcurrentSet<CryptoPager>();
 
         public abstract (Pager2 Pager, Pager2.State State) InitializeDataPager();
         
@@ -1306,16 +1305,6 @@ namespace Voron
                         break;
                 }
             }
-        }
-
-        public void TrackCryptoPager(CryptoPager cryptoPager)
-        {
-            _activeCryptoPagers.Add(cryptoPager);
-        }
-
-        public void UntrackCryptoPager(CryptoPager cryptoPager)
-        {
-            _activeCryptoPagers.TryRemove(cryptoPager);
         }
 
         public sealed class StorageEncryptionOptions : IDisposable

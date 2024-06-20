@@ -327,8 +327,7 @@ namespace Voron.Data.BTrees
                 // this methods checks if page was not used elsewhere prior executing GetStreamInfoForReporting method
                 // if yes then we cannot remove it to avoid releasing used memory
 
-                var lltState = (IPagerLevelTransactionState)_llt;
-                var states = lltState.CryptoPagerTransactionState;
+                var states = _llt.PagerTransactionState.ForCrypto;
                 if (states == null)
                     return false; // not encrypted
 
@@ -350,8 +349,7 @@ namespace Voron.Data.BTrees
                 if (canRemovePage == false)
                     return;
 
-                var lltState = (IPagerLevelTransactionState)_llt;
-                var states = lltState.CryptoPagerTransactionState;
+                var states = _llt.PagerTransactionState.ForCrypto;
                 if (states == null || states.Count == 0)
                     return;
 
@@ -365,16 +363,14 @@ namespace Voron.Data.BTrees
                     if (buffer.Pointer != page.Pointer)
                         continue;
 
-                    if (CryptoPager.CanReturnBuffer(buffer) == false)
-                        return;
-
                     buffer.ReleaseRef();
 
                     _llt._pageLocator.Reset(page.PageNumber);
                     pagerStates.RemoveBuffer(page.PageNumber);
 
-                    var cryptoPager = (CryptoPager)pager;
-                    cryptoPager.ReturnBuffer(buffer);
+                    throw new NotImplementedException();
+                    // var cryptoPager = (CryptoPager)pager;
+                    // cryptoPager.ReturnBuffer(buffer);
                     return;
                 }
             }
@@ -485,7 +481,7 @@ namespace Voron.Data.BTrees
                         size += StreamInfo.SizeOf + info->TagSize;
                     }
 
-                    var numberOfPages = VirtualPagerLegacyExtensions.GetNumberOfOverflowPages(size);
+                    var numberOfPages = Pager.GetNumberOfOverflowPages(size);
 
                     for (int i = 0; i < numberOfPages; i++)
                     {
