@@ -524,11 +524,6 @@ namespace Voron
 
             public override VoronPathSetting BasePath => _basePath;
 
-            public override AbstractPager OpenPager(VoronPathSetting filename)
-            {
-                return GetMemoryMapPagerInternal(this, null, filename);
-            }
-
             public override JournalWriter CreateJournalWriter(long journalNumber, long journalSize)
             {
                 var name = JournalName(journalNumber);
@@ -845,85 +840,9 @@ namespace Voron
                 throw new InvalidOperationException("Unable to create temporary mapped file " + name + ", even after trying multiple times.", err);
             }
             
-            
-            private AbstractPager GetTemporaryPager_TEMP(string name, long initialSize, Func<StorageEnvironmentOptions, long?, VoronPathSetting, bool, bool, AbstractPager> getMemoryMapPagerFunc)
-            {
-                // here we can afford to rename the file if needed because this is a scratch / temp
-                // file that is used. We _know_ that no one expects anything from it and that 
-                // the name it uses isn't _that_ important in any way, shape or form. 
-                int index = 0;
-                void Rename()
-                {
-                    var ext = Path.GetExtension(name);
-                    var filename = Path.GetFileNameWithoutExtension(name);
-                    name = filename + "-ren-" + (index++) + ext;
-                }
-                Exception err = null;
-                for (int i = 0; i < 15; i++)
-                {
-                    var tempFile = TempPath.Combine(name);
-                    try
-                    {
-                        if (File.Exists(tempFile.FullPath))
-                            File.Delete(tempFile.FullPath);
-                    }
-                    catch (IOException e)
-                    {
-                        // this can happen if someone is holding the file, shouldn't happen
-                        // but might if there is some FS caching involved where it shouldn't
-                        Rename();
-                        err = e;
-                        continue;
-                    }
-                    try
-                    {
-                        return getMemoryMapPagerFunc(this, initialSize, tempFile,
-                            true, // deleteOnClose
-                            false); //usePageProtection
-                    }
-                    catch (FileNotFoundException e)
-                    {
-                        // unique case, when file was previously deleted, but still exists. 
-                        // This can happen on cifs mount, see RavenDB-10923
-                        // if this is a temp file we can try recreate it in a different name
-                        Rename();
-                        err = e;
-                    }
-                }
-
-                throw new InvalidOperationException("Unable to create temporary mapped file " + name + ", even after trying multiple times.", err);
-            }
-            
-
             public override (Pager2 Pager, Pager2.State State) CreateScratchPager(string name, long initialSize)
             {
                 return CreateTemporaryBufferPager(name, initialSize, encrypted: false);
-            }
-
-            private AbstractPager GetMemoryMapPagerInternal(StorageEnvironmentOptions options, long? initialSize, VoronPathSetting file, bool deleteOnClose = false, bool usePageProtection = false)
-            {
-                if (RunningOnPosix)
-                {
-                    if (RunningOn32Bits)
-                    {
-                        return new Posix32BitsMemoryMapPager(options, file, initialSize,
-                            usePageProtection: usePageProtection)
-                        {
-                            DeleteOnClose = deleteOnClose
-                        };
-                    }
-
-                    return new RvnMemoryMapPager(options, file, initialSize, usePageProtection: usePageProtection, deleteOnClose: deleteOnClose);
-                }
-
-                var attributes = deleteOnClose
-                    ? Win32NativeFileAttributes.DeleteOnClose | Win32NativeFileAttributes.Temporary | Win32NativeFileAttributes.RandomAccess
-                    : Win32NativeFileAttributes.Normal;
-
-                if (RunningOn32Bits)
-                    return new Windows32BitsMemoryMapPager(options, file, initialSize, attributes, usePageProtection: usePageProtection);
-
-                return new WindowsMemoryMapPager(options, file, initialSize, attributes, usePageProtection: usePageProtection);
             }
 
             public override long GetJournalFileSize(long journalNumber, JournalInfo journalInfo)
@@ -1126,32 +1045,6 @@ namespace Voron
                 Memory.Copy((byte*)ptr, (byte*)header, sizeof(FileHeader));
             }
 
-            private AbstractPager GetTempMemoryMapPager(PureMemoryStorageEnvironmentOptions options, VoronPathSetting path, long? intialSize, Win32NativeFileAttributes win32NativeFileAttributes)
-            {
-                var pager = GetTempMemoryMapPagerInternal(options, path, intialSize,
-                    Win32NativeFileAttributes.RandomAccess | Win32NativeFileAttributes.DeleteOnClose | Win32NativeFileAttributes.Temporary);
-                return Encryption.IsEnabled == false
-                    ? pager
-                    : new CryptoPager(pager);
-            }
-
-            private AbstractPager GetTempMemoryMapPagerInternal(PureMemoryStorageEnvironmentOptions options, VoronPathSetting path, long? intialSize, Win32NativeFileAttributes win32NativeFileAttributes)
-            {
-                if (RunningOnPosix)
-                {
-                    if (RunningOn32Bits)
-                        return new PosixTempMemoryMapPager(options, path, intialSize); // need to change to 32 bit pager
-
-                    return new PosixTempMemoryMapPager(options, path, intialSize);
-                }
-                if (RunningOn32Bits)
-                    return new Windows32BitsMemoryMapPager(options, path, intialSize,
-                        Win32NativeFileAttributes.RandomAccess | Win32NativeFileAttributes.DeleteOnClose | Win32NativeFileAttributes.Temporary);
-
-                return new WindowsMemoryMapPager(options, path, intialSize,
-                        Win32NativeFileAttributes.RandomAccess | Win32NativeFileAttributes.DeleteOnClose | Win32NativeFileAttributes.Temporary);
-            }
-
             public override (Pager2 Pager, Pager2.State State) CreateScratchPager(string name, long initialSize)
             {
                 var guid = Guid.NewGuid();
@@ -1187,28 +1080,6 @@ namespace Voron
                         Temporary = true,
                     });
                 }
-            }
-
-            public override AbstractPager OpenPager(VoronPathSetting filename)
-            {
-                var pager = OpenPagerInternal(filename);
-
-                return Encryption.IsEnabled == false ? pager : new CryptoPager(pager);
-            }
-
-            private AbstractPager OpenPagerInternal(VoronPathSetting filename)
-            {
-                if (RunningOnPosix)
-                {
-                    if (RunningOn32Bits)
-                        return new Posix32BitsMemoryMapPager(this, filename);
-                    return new RvnMemoryMapPager(this, filename);
-                }
-
-                if (RunningOn32Bits)
-                    return new Windows32BitsMemoryMapPager(this, filename);
-
-                return new WindowsMemoryMapPager(this, filename);
             }
 
             public override (Pager2 Pager, Pager2.State State) OpenJournalPager(long journalNumber, JournalInfo journalInfo)
@@ -1286,8 +1157,6 @@ namespace Voron
         public abstract (Pager2 Pager, Pager2.State State) OpenJournalPager(long journalNumber, JournalInfo journalInfo);
 
         public abstract long GetJournalFileSize(long journalNumber, JournalInfo journalInfo);
-
-        public abstract AbstractPager OpenPager(VoronPathSetting filename);
 
         public bool DoNotConsiderMemoryLockFailureAsCatastrophicError;
 

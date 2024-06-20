@@ -34,18 +34,6 @@ namespace Voron.Platform.Win32
         private readonly Logger _logger;
         public override long TotalAllocationSize => _totalAllocationSize;
 
-        [StructLayout(LayoutKind.Explicit)]
-        public struct SplitValue
-        {
-            [FieldOffset(0)]
-            public ulong Value;
-
-            [FieldOffset(0)]
-            public uint Low;
-
-            [FieldOffset(4)]
-            public uint High;
-        }
 
         public WindowsMemoryMapPager(StorageEnvironmentOptions options, VoronPathSetting file,
             long? initialFileSize = null,

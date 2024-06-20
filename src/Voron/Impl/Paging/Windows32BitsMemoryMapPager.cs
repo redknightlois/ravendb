@@ -207,7 +207,7 @@ namespace Voron.Impl.Paging
             var distanceFromStart = (pageNumber % NumberOfPagesInAllocationGranularity);
             var allocationStartPosition = pageNumber - distanceFromStart;
 
-            var offset = new WindowsMemoryMapPager.SplitValue { Value = (ulong)allocationStartPosition * (ulong)Constants.Storage.PageSize };
+            var offset = new Pager2.Win32.SplitValue { Value = (ulong)allocationStartPosition * (ulong)Constants.Storage.PageSize };
             var result = MapViewOfFileEx(_hFileMappingObject, _mmFileAccessType, offset.High,
                 offset.Low,
                 (UIntPtr)AllocationGranularity, null);
@@ -345,7 +345,7 @@ namespace Voron.Impl.Paging
                 }
 
 
-                var offset = new WindowsMemoryMapPager.SplitValue
+                var offset = new Pager2.Win32.SplitValue
                 {
                     Value = (ulong)startPage * Constants.Storage.PageSize
                 };
