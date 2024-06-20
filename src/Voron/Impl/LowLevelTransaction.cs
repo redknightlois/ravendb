@@ -522,10 +522,7 @@ namespace Voron.Impl
                 Debug.Assert(value != null);
                 Debug.Assert(Flags == TransactionFlags.ReadWrite);
 
-                var (pager, state) = _env.ScratchBufferPool.GetScratchBufferFile(value.ScratchFileNumber).File.GetPagerAndState();
-                _usedPagerStates!.Add(state);
-                byte* ptr = pager.AcquirePagePointerWithOverflowHandling(state, ref PagerTransactionState, value.PositionInScratchBuffer);
-                p = new Page(ptr);
+                p = value.Page;
                 Debug.Assert(p.PageNumber == pageNumber, $"Requested ReadOnly page #{pageNumber}. Got #{p.PageNumber} from scratch");
             }
             else
@@ -665,6 +662,10 @@ namespace Voron.Impl
 #endif
                 var pageFromScratchBuffer = _env.ScratchBufferPool.Allocate(this, numberOfPages);
                 pageFromScratchBuffer.PreviousVersion = previousVersion;
+                var newPage = pageFromScratchBuffer.Page with
+                {
+                    Flags = PageFlags.Single
+                };
                 _transactionPages.Add(pageFromScratchBuffer);
 
                 _numberOfModifiedPages += numberOfPages;
@@ -675,28 +676,10 @@ namespace Voron.Impl
 
                 TrackDirtyPage(pageNumber);
 
-                var (scratchPager, scratchState) = _env.ScratchBufferPool.GetScratchBufferFile(pageFromScratchBuffer.ScratchFileNumber).File.GetPagerAndState();
-                _usedPagerStates!.Add(scratchState);
-
-                if (numberOfPages != 1)
-                {
-                    scratchPager.EnsureMapped(scratchState, ref PagerTransactionState,
-                        pageFromScratchBuffer.PositionInScratchBuffer,
-                        numberOfPages);
-                }
-
-                var newPagePointer =  scratchPager.AcquirePagePointerForNewPage(scratchState, ref PagerTransactionState,
-                    pageFromScratchBuffer.PositionInScratchBuffer, numberOfPages);
 
                 if (zeroPage)
-                    Memory.Set(newPagePointer, 0, Constants.Storage.PageSize * numberOfPages);
-
-                var newPage = new Page(newPagePointer)
-                {
-                    PageNumber = pageNumber,
-                    Flags = PageFlags.Single
-                };
-
+                    Memory.Set(newPage.Pointer, 0, Constants.Storage.PageSize * numberOfPages);
+                newPage.PageNumber = pageNumber;
                 _pageLocator.SetWritable(newPage);
 
                 TrackWritablePage(newPage);
@@ -733,9 +716,7 @@ namespace Voron.Impl
             if (_scratchPagesTable.TryGetValue(pageNumber, out PageFromScratchBuffer value) == false)
                 throw new InvalidOperationException("The page " + pageNumber + " was not previous allocated in this transaction");
 
-            var (pager, state) = _env.ScratchBufferPool.GetScratchBufferFile(value.ScratchFileNumber).File.GetPagerAndState();
-            _usedPagerStates!.Add(state);
-            var page = new Page(pager.AcquirePagePointerWithOverflowHandling(state, ref PagerTransactionState, value.PositionInScratchBuffer));
+            var page = value.Page;
             if (page.IsOverflow == false || page.OverflowSize < newSize)
                 throw new InvalidOperationException("The page " + pageNumber +
                                                     " was is not an overflow page greater than " + newSize);
@@ -1528,6 +1509,11 @@ namespace Voron.Impl
         public FrozenSet<Pager2.State> GetReferencedPagerStates()
         {
             return _usedPagerStates.ToFrozenSet();
+        }
+
+        public void RegisterPagerState(Pager2.State state)
+        {
+            _usedPagerStates.Add(state);
         }
     }
 }

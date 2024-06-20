@@ -1786,8 +1786,7 @@ namespace Voron.Impl.Journal
             var scratchBufferPool = tx.Environment.ScratchBufferPool;
             foreach (var txPage in txPages)
             {
-                var (scratchPager, scratchState) = scratchBufferPool.GetScratchBufferFile(txPage.ScratchFileNumber).File.GetPagerAndState();
-                var scratchPage =scratchPager.AcquirePagePointerWithOverflowHandling(scratchState, ref tx.PagerTransactionState, txPage.PositionInScratchBuffer);
+                var scratchPage =txPage.Page.Pointer;
                 var pageHeader = (PageHeader*)scratchPage;
 
                 // When encryption is off, we do validation by checksum
@@ -1798,7 +1797,6 @@ namespace Voron.Impl.Journal
 
                 ref TransactionHeaderPageInfo transactionHeaderPageInfo = ref pagesInfo[pageSequentialNumber];
                 transactionHeaderPageInfo.PageNumber = pageHeader->PageNumber;
-                txPage.ScratchPageNumber = pageHeader->PageNumber;
 
                 *(long*)write = pageHeader->PageNumber;
                 write += sizeof(long);
