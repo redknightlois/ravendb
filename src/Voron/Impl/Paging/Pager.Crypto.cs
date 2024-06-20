@@ -228,7 +228,7 @@ public unsafe partial class Pager2
                 pager.EnsureContinuous(ref state, buffer.Key, numPages);
                 pager.EnsureMapped(state, ref txState, buffer.Key, numPages);
 
-                var pagePointer = pager.AcquirePagePointer(state, ref txState, buffer.Key);
+                var pagePointer = pager.AcquireRawPagePointer(state, ref txState, buffer.Key);
 
                 Memory.Copy(pagePointer, buffer.Value.Pointer, dataSize);
             }

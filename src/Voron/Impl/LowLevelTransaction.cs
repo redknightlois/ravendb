@@ -597,7 +597,7 @@ namespace Voron.Impl
                 return;
             }
 
-            //DataPager.TryReleasePage(this, pageNumber);
+            DataPager.TryReleasePage(ref PagerTransactionState, pageNumber);
             throw new NotImplementedException();
         }
 
