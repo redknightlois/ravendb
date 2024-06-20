@@ -1,6 +1,7 @@
 ﻿#nullable enable
 
 using System;
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -176,10 +177,48 @@ public unsafe partial class Pager2 : IDisposable
     }
 
     
+
+    public struct PageIterator : IEnumerator<long>
+    {
+        private readonly long _startPage;
+        private readonly long _endPage;
+        private long _currentPage;
+
+        public PageIterator(long pageNumber, long pagesToPrefetch)
+        {
+            this._startPage = pageNumber;
+            this._endPage = pageNumber + pagesToPrefetch;
+            this._currentPage = pageNumber;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public bool MoveNext()
+        {
+            this._currentPage++;
+            return _currentPage < _endPage;
+        }
+
+        public void Reset()
+        {
+            this._currentPage = this._startPage;
+        }
+
+        object IEnumerator.Current => Current;
+
+        public long Current
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get => _currentPage;
+        }
+
+        public void Dispose() {}
+    }
+
+    
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void MaybePrefetchMemory(State state, long pageNumber, long pagesToPrefetch)
     {
-        MaybePrefetchMemory(state, new AbstractPager.PageIterator(pageNumber, pagesToPrefetch));
+        MaybePrefetchMemory(state, new PageIterator(pageNumber, pagesToPrefetch));
     }
     
     public void MaybePrefetchMemory<T>(State state, T pagesToPrefetch) where T : struct, IEnumerator<long>
@@ -231,7 +270,7 @@ public unsafe partial class Pager2 : IDisposable
             return (byte*)pageHeader;
 
         // Case 2: Page is overflow and already mapped large enough ==> no problem, returning a pointer to existing mapping
-        if (EnsureMapped(state, ref txState, pageNumber, VirtualPagerLegacyExtensions.GetNumberOfOverflowPages(pageHeader->OverflowSize)) == false)
+        if (EnsureMapped(state, ref txState, pageNumber, Pager.GetNumberOfOverflowPages(pageHeader->OverflowSize)) == false)
             return (byte*)pageHeader;
 
         // Case 3: Page is overflow and was ensuredMapped above, view was re-mapped so we need to acquire a pointer to the new mapping.
@@ -248,7 +287,7 @@ public unsafe partial class Pager2 : IDisposable
             return (byte*)pageHeader;
 
         // Case 2: Page is overflow and already mapped large enough ==> no problem, returning a pointer to existing mapping
-        if (EnsureMapped(state, ref txState, pageNumber, VirtualPagerLegacyExtensions.GetNumberOfOverflowPages(pageHeader->OverflowSize)) == false)
+        if (EnsureMapped(state, ref txState, pageNumber, Pager.GetNumberOfOverflowPages(pageHeader->OverflowSize)) == false)
             return (byte*)pageHeader;
 
         // Case 3: Page is overflow and was ensuredMapped above, view was re-mapped so we need to acquire a pointer to the new mapping.

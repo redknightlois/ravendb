@@ -16,6 +16,7 @@ using Voron.Impl.Paging;
 using Xunit;
 using Voron.Global;
 using Xunit.Abstractions;
+using Page = Elastic.Clients.Elasticsearch.MachineLearning.Page;
 
 namespace FastTests.Sparrow
 {
@@ -32,33 +33,38 @@ namespace FastTests.Sparrow
             {
                 options.Encryption.MasterKey = Sodium.GenerateRandomBuffer((int)Sodium.crypto_aead_xchacha20poly1305_ietf_keybytes());
 
-                using (var innerPager = LinuxTestUtils.GetNewPager(options, DataDir, "Raven.Voron"))
+                var (pager, state) = Pager2.Create(options, new Pager2.OpenFileOptions { File = Path.Combine(DataDir, "Raven.Voron"), Encrypted = true });
+                using var _ = pager;
+                Pager2.PagerTransactionState txState = default;
+                try
                 {
-                    AbstractPager cryptoPager;
-                    using (cryptoPager = new CryptoPager(innerPager))
-                    {
-                        using (var tx = new TempPagerTransaction(isWriteTransaction: true))
-                        {
-                            cryptoPager.EnsureContinuous(17, 1); // We're gonna try to read and write to page 17
-                            var pagePointer = cryptoPager.AcquirePagePointerForNewPage(tx, 17, 1);
+                    pager.EnsureContinuous(ref state, 17, 1); // We're gonna try to read and write to page 17
+                    var pagePointer = pager.AcquirePagePointerForNewPage(state, ref txState, 17, 1);
 
-                            var header = (PageHeader*)pagePointer;
-                            header->PageNumber = 17;
-                            header->Flags = PageFlags.Single | PageFlags.FixedSizeTreePage;
+                    var header = (PageHeader*)pagePointer;
+                    header->PageNumber = 17;
+                    header->Flags = PageFlags.Single | PageFlags.FixedSizeTreePage;
 
-                            Memory.Set(pagePointer + PageHeader.SizeOf, (byte)'X', Constants.Storage.PageSize - PageHeader.SizeOf);
-                        }
+                    Memory.Set(pagePointer + PageHeader.SizeOf, (byte)'X', Constants.Storage.PageSize - PageHeader.SizeOf);
+                }
+                finally
+                {
+                    txState.InvokeDispose(pager, state, ref txState);
+                }
 
-                        using (var tx = new TempPagerTransaction())
-                        {
-                            var pagePointer = cryptoPager.AcquirePagePointer(tx, 17);
+                txState = default;
+                try
+                {
+                    var pagePointer = pager.AcquirePagePointerWithOverflowHandling(state, ref txState, 17);
 
-                            // Making sure that the data was decrypted and still holds those 'X' chars
-                            Assert.True(pagePointer[PageHeader.SizeOf] == 'X');
-                            Assert.True(pagePointer[666] == 'X');
-                            Assert.True(pagePointer[1039] == 'X');
-                        }
-                    }
+                    // Making sure that the data was decrypted and still holds those 'X' chars
+                    Assert.True(pagePointer[PageHeader.SizeOf] == 'X');
+                    Assert.True(pagePointer[666] == 'X');
+                    Assert.True(pagePointer[1039] == 'X');
+                }
+                finally
+                {
+                    txState.InvokeDispose(pager, state, ref txState);
                 }
             }
         }
@@ -68,7 +74,8 @@ namespace FastTests.Sparrow
         public unsafe void WriteSeekAndReadInTempCryptoStream(int seed)
         {
             using (var options = StorageEnvironmentOptions.ForPath(DataDir))
-            using (var file = SafeFileStream.Create(Path.Combine(DataDir, "EncryptedTempFile"), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 4096, FileOptions.DeleteOnClose))
+            using (var file = SafeFileStream.Create(Path.Combine(DataDir, "EncryptedTempFile"), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 4096,
+                       FileOptions.DeleteOnClose))
             using (var stream = new TempCryptoStream(file))
             {
                 var r = new Random(seed);
@@ -78,6 +85,7 @@ namespace FastTests.Sparrow
                 {
                     Memory.Set(b, (byte)'I', bytes.Length);
                 }
+
                 var injectionBytes = Encoding.UTF8.GetBytes("XXXXXXX");
 
                 stream.Write(bytes, 0, bytes.Length);
@@ -105,6 +113,7 @@ namespace FastTests.Sparrow
                     count -= read;
                     offset += read;
                 }
+
                 Assert.Equal(bytes, readBytes);
             }
         }
@@ -195,37 +204,43 @@ namespace FastTests.Sparrow
             {
                 options.Encryption.MasterKey = Sodium.GenerateRandomBuffer((int)Sodium.crypto_aead_xchacha20poly1305_ietf_keybytes());
 
-                using (var innerPager = LinuxTestUtils.GetNewPager(options, DataDir, "Raven.Voron"))
+
+                var (pager, state) = Pager2.Create(options, new Pager2.OpenFileOptions { File = Path.Combine(DataDir, "Raven.Voron"), Encrypted = true });
+                using var _ = pager;
+
+                Pager2.PagerTransactionState txState = default;
+                try
                 {
-                    AbstractPager cryptoPager;
-                    using (cryptoPager = new CryptoPager(innerPager))
-                    {
-                        using (var tx = new TempPagerTransaction(isWriteTransaction: true))
-                        {
-                            var overflowSize = 4 * Constants.Storage.PageSize + 100;
+                    var overflowSize = 4 * Constants.Storage.PageSize + 100;
 
-                            cryptoPager.EnsureContinuous(26, 5);
-                            var pagePointer = cryptoPager.AcquirePagePointerForNewPage(tx, 26, 5);
+                    pager.EnsureContinuous(ref state, 26, 5);
+                    var pagePointer = pager.AcquirePagePointerForNewPage(state, ref txState, 26, 5);
 
-                            var header = (PageHeader*)pagePointer;
-                            header->PageNumber = 26;
-                            header->Flags = PageFlags.Overflow;
-                            header->OverflowSize = overflowSize;
+                    var header = (PageHeader*)pagePointer;
+                    header->PageNumber = 26;
+                    header->Flags = PageFlags.Overflow;
+                    header->OverflowSize = overflowSize;
 
-                            Memory.Set(pagePointer + PageHeader.SizeOf, (byte)'X', overflowSize);
-                        }
+                    Memory.Set(pagePointer + PageHeader.SizeOf, (byte)'X', overflowSize);
+                }
+                finally
+                {
+                    txState.InvokeDispose(pager, state, ref txState);
+                }
 
+                txState = default;
+                try
+                {
+                    var pagePointer = pager.AcquirePagePointerWithOverflowHandling(state, ref txState, 26);
 
-                        using (var tx = new TempPagerTransaction())
-                        {
-                            var pagePointer = cryptoPager.AcquirePagePointer(tx, 26);
-
-                            // Making sure that the data was decrypted and still holds those 'X' chars
-                            Assert.True(pagePointer[PageHeader.SizeOf] == 'X');
-                            Assert.True(pagePointer[666] == 'X');
-                            Assert.True(pagePointer[1039] == 'X');
-                        }
-                    }
+                    // Making sure that the data was decrypted and still holds those 'X' chars
+                    Assert.True(pagePointer[PageHeader.SizeOf] == 'X');
+                    Assert.True(pagePointer[666] == 'X');
+                    Assert.True(pagePointer[1039] == 'X');
+                }
+                finally
+                {
+                    txState.InvokeDispose(pager, state, ref txState);
                 }
             }
         }
@@ -236,86 +251,93 @@ namespace FastTests.Sparrow
             using (var options = StorageEnvironmentOptions.ForPath(DataDir))
             {
                 options.Encryption.MasterKey = Sodium.GenerateRandomBuffer((int)Sodium.crypto_aead_xchacha20poly1305_ietf_keybytes());
-
-                using (var innerPager = LinuxTestUtils.GetNewPager(options, DataDir, "Raven.Voron"))
+                var (pager, state) = Pager2.Create(options, new Pager2.OpenFileOptions { File = Path.Combine(DataDir, "Raven.Voron"), Encrypted = true });
+                using var _ = pager;
+                Pager2.PagerTransactionState txState = default;
+                try
                 {
-                    using (var cryptoPager = new CryptoPager(innerPager))
+                    var overflowSize = 4 * Constants.Storage.PageSize + 100;
+
+                    pager.EnsureContinuous(ref state, 26, 5);
+                    var pagePointer = pager.AcquirePagePointerForNewPage(state, ref txState, 26, 5);
+
+                    var header = (PageHeader*)pagePointer;
+                    header->PageNumber = 26;
+                    header->Flags = PageFlags.Overflow;
+                    header->OverflowSize = overflowSize;
+
+                    Memory.Set(pagePointer + PageHeader.SizeOf, (byte)'X', overflowSize);
+
+                    Assert.True(PageExistsInCache(txState, pager, 26, out var usages));
+                    Assert.Equal(1, usages);
+
+                    Assert.True(1 == DateTime.UtcNow.Ticks, "implement me!");
+                    //cryptoPager.TryReleasePage(tx, 26);
+
+                    Assert.True(PageExistsInCache(txState, pager, 26, out usages));
+                    Assert.Equal(1, usages);
+
+                    pager.AcquirePagePointer(state, ref txState, 26);
+
+                    Assert.True(PageExistsInCache(txState, pager, 26, out usages));
+                    Assert.Equal(2, usages);
+                }
+                finally
+                {
+                    txState.InvokeDispose(pager, state, ref txState);
+                }
+
+                txState = default;
+                try
+                {
+                    var pagePointer = pager.AcquirePagePointerWithOverflowHandling(state, ref txState, 26);
+
+                    // Making sure that the data was decrypted and still holds those 'X' chars
+                    Assert.True(pagePointer[PageHeader.SizeOf] == 'X');
+                    Assert.True(pagePointer[666] == 'X');
+                    Assert.True(pagePointer[1039] == 'X');
+
+                    Assert.True(PageExistsInCache(txState, pager, 26, out var usages));
+                    Assert.Equal(1, usages);
+
+                    pager.AcquirePagePointerWithOverflowHandling(state, ref txState, 26);
+
+                    Assert.True(PageExistsInCache(txState, pager, 26, out usages));
+                    Assert.Equal(2, usages);
+
+                    Assert.True(1 == DateTime.UtcNow.Ticks, "implement me!");
+                    //cryptoPager.TryReleasePage(tx, 26);
+
+                    Assert.True(PageExistsInCache(txState, pager, 26, out usages));
+                    Assert.Equal(1, usages);
+
+                    Assert.True(1 == DateTime.UtcNow.Ticks, "implement me!");
+                    //cryptoPager.TryReleasePage(tx, 26);
+
+                    Assert.False(PageExistsInCache(txState, pager, 26, out usages));
+                    Assert.Equal(0, usages);
+                }
+                finally
+                {
+                    txState.InvokeDispose(pager, state, ref txState);
+                }
+
+                bool PageExistsInCache(Pager2.PagerTransactionState txState, Pager2 pager, long page, out int usages)
+                {
+                    if (txState.ForCrypto.TryGetValue(pager, out var s) == false)
                     {
-                        using (var tx = new TempPagerTransaction(isWriteTransaction: true))
-                        {
-                            var overflowSize = 4 * Constants.Storage.PageSize + 100;
-
-                            cryptoPager.EnsureContinuous(26, 5);
-                            var pagePointer = cryptoPager.AcquirePagePointerForNewPage(tx, 26, 5);
-
-                            var header = (PageHeader*)pagePointer;
-                            header->PageNumber = 26;
-                            header->Flags = PageFlags.Overflow;
-                            header->OverflowSize = overflowSize;
-
-                            Memory.Set(pagePointer + PageHeader.SizeOf, (byte)'X', overflowSize);
-
-                            Assert.True(PageExistsInCache(tx, cryptoPager, 26, out var usages));
-                            Assert.Equal(1, usages);
-
-                            cryptoPager.TryReleasePage(tx, 26);
-
-                            Assert.True(PageExistsInCache(tx, cryptoPager, 26, out usages));
-                            Assert.Equal(1, usages);
-
-                            cryptoPager.AcquirePagePointer(tx, 26);
-
-                            Assert.True(PageExistsInCache(tx, cryptoPager, 26, out usages));
-                            Assert.Equal(2, usages);
-                        }
-
-
-                        using (var tx = new TempPagerTransaction())
-                        {
-                            var pagePointer = cryptoPager.AcquirePagePointer(tx, 26);
-
-                            // Making sure that the data was decrypted and still holds those 'X' chars
-                            Assert.True(pagePointer[PageHeader.SizeOf] == 'X');
-                            Assert.True(pagePointer[666] == 'X');
-                            Assert.True(pagePointer[1039] == 'X');
-
-                            Assert.True(PageExistsInCache(tx, cryptoPager, 26, out var usages));
-                            Assert.Equal(1, usages);
-
-                            cryptoPager.AcquirePagePointer(tx, 26);
-
-                            Assert.True(PageExistsInCache(tx, cryptoPager, 26, out usages));
-                            Assert.Equal(2, usages);
-
-                            cryptoPager.TryReleasePage(tx, 26);
-
-                            Assert.True(PageExistsInCache(tx, cryptoPager, 26, out usages));
-                            Assert.Equal(1, usages);
-
-                            cryptoPager.TryReleasePage(tx, 26);
-
-                            Assert.False(PageExistsInCache(tx, cryptoPager, 26, out usages));
-                            Assert.Equal(0, usages);
-                        }
-
-                        bool PageExistsInCache(TempPagerTransaction tx, CryptoPager pager, long page, out int usages)
-                        {
-                            if (tx.CryptoPagerTransactionState.TryGetValue(pager, out var state) == false)
-                            {
-                                usages = 0;
-                                return false;
-                            }
-
-                            if (state.TryGetValue(page, out var buffer) == false)
-                            {
-                                usages = 0;
-                                return false;
-                            }
-
-                            usages = buffer.Usages;
-                            return true;
-                        }
+                        usages = 0;
+                        return false;
                     }
+
+                    if (s.TryGetValue(page, out var buffer) == false)
+                    {
+                        usages = 0;
+                        return false;
+                    }
+
+                    usages = buffer.Usages;
+                    return true;
                 }
             }
         }
