@@ -181,7 +181,7 @@ namespace SlowTests.Voron
         {
             RequireFileBasedPager();
 
-            var (tempPager, state) = Env.Options.CreateTemporaryBufferPager($"temp-{Guid.NewGuid()}", 16 * 1024);
+            var (tempPager, state) = Env.Options.CreateTemporaryBufferPager($"temp-{Guid.NewGuid()}", 16 * 1024, encrypted: false);
 
             tempPager.Dispose();
           

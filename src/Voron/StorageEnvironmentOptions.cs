@@ -786,7 +786,7 @@ namespace Voron
 
             // This is used for special pagers that are used as temp buffers and don't 
             // require encryption: compression, recovery
-            public override (Pager2 Pager, Pager2.State State) CreateTemporaryBufferPager(string name, long initialSize)
+            public override (Pager2 Pager, Pager2.State State) CreateTemporaryBufferPager(string name, long initialSize, bool encrypted)
             {
                 // here we can afford to rename the file if needed because this is a scratch / temp
                 // file that is used. We _know_ that no one expects anything from it and that 
@@ -824,10 +824,11 @@ namespace Voron
                                 Temporary = true,
                                 DeleteOnClose = true,
                                 UsePageProtection = false,
-                                Encrypted = false,
+                                Encrypted = encrypted,
                                 InitializeFileSize = initialSize,
-                                // even though we don't need encryption here, we still need to ensure that this  isn't paged to disk
-                                LockMemory = Encryption.IsEnabled,
+                                // if we don't need encryption here, but there is encryption, means that this is a temp buffer
+                                // and we still need to ensure that this isn't paged to disk
+                                LockMemory = encrypted == false && Encryption.IsEnabled,
                                 DoNotConsiderMemoryLockFailureAsCatastrophicError = DoNotConsiderMemoryLockFailureAsCatastrophicError,
                             });
                     }
@@ -894,20 +895,9 @@ namespace Voron
             }
             
 
-            public override AbstractPager CreateScratchPager(string name, long initialSize)
+            public override (Pager2 Pager, Pager2.State State) CreateScratchPager(string name, long initialSize)
             {
-                return GetTemporaryPager_TEMP(name, initialSize, GetMemoryMapPager);
-            }
-
-            private AbstractPager GetMemoryMapPager(StorageEnvironmentOptions options, long? initialSize, VoronPathSetting file,
-                bool deleteOnClose = false,
-                bool usePageProtection = false)
-            {
-                var pager = GetMemoryMapPagerInternal(options, initialSize, file, deleteOnClose, usePageProtection);
-
-                return Encryption.IsEnabled == false
-                    ? pager
-                    : new CryptoPager(pager);
+                return CreateTemporaryBufferPager(name, initialSize, encrypted: false);
             }
 
             private AbstractPager GetMemoryMapPagerInternal(StorageEnvironmentOptions options, long? initialSize, VoronPathSetting file, bool deleteOnClose = false, bool usePageProtection = false)
@@ -1162,19 +1152,26 @@ namespace Voron
                         Win32NativeFileAttributes.RandomAccess | Win32NativeFileAttributes.DeleteOnClose | Win32NativeFileAttributes.Temporary);
             }
 
-            public override AbstractPager CreateScratchPager(string name, long initialSize)
+            public override (Pager2 Pager, Pager2.State State) CreateScratchPager(string name, long initialSize)
             {
                 var guid = Guid.NewGuid();
                 using (var currentProcess = Process.GetCurrentProcess())
                 {
                     var filename = $"ravendb-{currentProcess.Id}-{_instanceId}-{name}-{guid}";
 
-                    return GetTempMemoryMapPager(this, TempPath.Combine(filename), initialSize,
-                        Win32NativeFileAttributes.RandomAccess | Win32NativeFileAttributes.DeleteOnClose | Win32NativeFileAttributes.Temporary);
+                    return Pager2.Create(this,
+                        new Pager2.OpenFileOptions
+                        {
+                            File = TempPath.Combine(filename).FullPath,
+                            DeleteOnClose = true,
+                            Temporary = true,
+                            SequentialScan = false,
+                            InitializeFileSize = initialSize
+                        });
                 }
             }
 
-            public override (Pager2 Pager, Pager2.State State) CreateTemporaryBufferPager(string name, long initialSize)
+            public override (Pager2 Pager, Pager2.State State) CreateTemporaryBufferPager(string name, long initialSize, bool encrypted)
             {
                 var guid = Guid.NewGuid();
                 using (var currentProcess = Process.GetCurrentProcess())
@@ -1281,10 +1278,10 @@ namespace Voron
 
         public abstract unsafe void WriteHeader(string filename, FileHeader* header);
 
-        public abstract AbstractPager CreateScratchPager(string name, long initialSize);
+        public abstract (Pager2 Pager, Pager2.State State) CreateScratchPager(string name, long initialSize);
 
         // Used for special temporary pagers (compression, recovery, lazyTX...) which should not be wrapped by the crypto pager.
-        public abstract (Pager2 Pager, Pager2.State State) CreateTemporaryBufferPager(string name, long initialSize);
+        public abstract (Pager2 Pager, Pager2.State State) CreateTemporaryBufferPager(string name, long initialSize, bool encrypted);
 
         public abstract (Pager2 Pager, Pager2.State State) OpenJournalPager(long journalNumber, JournalInfo journalInfo);
 

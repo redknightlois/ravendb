@@ -16,7 +16,7 @@ using System.Diagnostics.CodeAnalysis;
 
 namespace Voron.Impl.Journal
 {
-    public sealed unsafe class JournalReader : IPagerLevelTransactionState
+    public sealed unsafe class JournalReader : IDisposable
     {
         private readonly Pager2 _journalPager;
         private readonly Pager2.State _journalPagerState;
@@ -766,9 +766,7 @@ namespace Voron.Impl.Journal
             }
             
             txState.InvokeBeforeCommitFinalization(_dataPager, state, ref txState);
-            BeforeCommitFinalization?.Invoke(this);
             txState.InvokeDispose(_dataPager, state, ref txState);
-            OnDispose?.Invoke(this);
         }
 
         private static int GetNumberOfPagesFor(long size)
@@ -780,43 +778,6 @@ namespace Voron.Impl.Journal
         {
             return checked(size / (4 * Constants.Size.Kilobyte) + (size % (4 * Constants.Size.Kilobyte) == 0 ? 0 : 1));
         }
-
-        Dictionary<AbstractPager, TransactionState> IPagerLevelTransactionState.PagerTransactionState32Bits { get; set; }
-
-        Dictionary<AbstractPager, CryptoTransactionState> IPagerLevelTransactionState.CryptoPagerTransactionState { get; set; }
-
-        public Size AdditionalMemoryUsageSize
-        {
-            get
-            {
-                var cryptoTransactionStates = ((IPagerLevelTransactionState)this).CryptoPagerTransactionState;
-                if (cryptoTransactionStates == null)
-                {
-                    return new Size(0,SizeUnit.Bytes);
-                }
-
-                var total = 0L;
-                foreach (var state in cryptoTransactionStates.Values)
-                {
-                    total += state.TotalCryptoBufferSize;
-                }
-
-                return new Size(total, SizeUnit.Bytes);
-            }
-        }
-        
-        public event Action<IPagerLevelTransactionState> OnDispose;
-        public event Action<IPagerLevelTransactionState> BeforeCommitFinalization;
-
-        void IPagerLevelTransactionState.EnsurePagerStateReference(ref PagerState state)
-        {
-            //nothing to do
-        }
-
-        StorageEnvironment IPagerLevelTransactionState.Environment => null;
-
-        // JournalReader actually writes to the data file
-        bool IPagerLevelTransactionState.IsWriteTransaction => true;
 
         private string AddSkipTxInfoDetails()
         {
