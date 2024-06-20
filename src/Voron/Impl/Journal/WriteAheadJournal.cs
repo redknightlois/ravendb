@@ -1653,7 +1653,7 @@ namespace Voron.Impl.Journal
                     throw new InvalidOperationException(string.Format("Cannot delete current journal because it isn't last synced file. Current journal number: {0}, the last one which was synced {1}", _waj.CurrentFile?.Number ?? -1, _lastFlushed.JournalId));
 
 
-                if (_waj._env.NextWriteTransactionId - 1 != logInfo.LastSyncedTransactionId)
+                if (_waj._env.CurrentReadTransactionId < logInfo.LastSyncedTransactionId)
                     throw new InvalidOperationException("Cannot delete current journal because it hasn't synced everything up to the last write transaction");
 
                 _waj._files = _waj._files.RemoveFront(1);

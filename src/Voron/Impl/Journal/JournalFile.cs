@@ -33,7 +33,7 @@ namespace Voron.Impl.Journal
 
         private readonly FastList<PagePosition> _unusedPages;
         private readonly ContentionLoggingLocker _locker2;
-        private Logger _logger;
+        private readonly Logger _logger;
 
         public JournalFile(StorageEnvironment env, JournalWriter journalWriter, long journalNumber)
         {

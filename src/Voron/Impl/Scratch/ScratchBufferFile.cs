@@ -306,24 +306,6 @@ namespace Voron.Impl.Scratch
             return numberOfPages;
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public Page ReadPage(Pager2.State scratchPagerState, LowLevelTransaction tx, long p)
-        {
-            return new Page(_scratchPager.AcquirePagePointerWithOverflowHandling(scratchPagerState, ref tx.PagerTransactionState, p));
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public byte* AcquirePagePointerWithOverflowHandling(Pager2.State scratchPagerState, ref Pager2.PagerTransactionState txState, long p)
-        {
-            return _scratchPager.AcquirePagePointerWithOverflowHandling(scratchPagerState, ref txState, p);
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public byte* AcquirePagePointerForNewPage(Pager2.State scratchPagerState, LowLevelTransaction tx, long p, int numberOfPages)
-        {
-            return _scratchPager.AcquirePagePointerForNewPage(scratchPagerState, ref tx.PagerTransactionState, p, numberOfPages);
-        }
-
         public void Dispose()
         {
             _disposeOnceRunner.Dispose();
