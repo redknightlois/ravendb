@@ -57,8 +57,6 @@ namespace FastTests.Corax.Bugs
 
                 Assert.Equal(2, users.Count);
             }
-
-            WaitForValue(() => store.Maintenance.Send(new GetIndexStatisticsOperation(index.IndexName)).EntriesCount, 2);
         }
 
         public class TestData
