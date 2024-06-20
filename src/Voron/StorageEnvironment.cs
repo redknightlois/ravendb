@@ -148,7 +148,7 @@ namespace Voron
 
                 _currentStateRecordRecord = new EnvironmentStateRecord(
                     dataPagerState, 
-                    -1, 
+                    0, 
                     FrozenSet<Pager2.State>.Empty, 
                     FrozenDictionary<long, Page>.Empty);
                 
@@ -176,14 +176,9 @@ namespace Voron
                     options.Encryption.SetExternalCompressionBufferHandler(_journal);
 
                 if (IsNew)
-                {
                     CreateNewDatabase();
-                    _currentStateRecordRecord = _currentStateRecordRecord with { TransactionId = 1 };
-                }
                 else // existing db, let us load it
-                {
                     LoadExistingDatabase();
-                }
 
                 Debug.Assert(_options.ManualFlushing || _idleFlushTimer.IsCompleted == false, "_idleFlushTimer.IsCompleted == false"); // initialized by transaction on storage create/open
 

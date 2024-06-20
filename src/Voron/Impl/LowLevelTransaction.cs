@@ -152,7 +152,7 @@ namespace Voron.Impl
 
         public ulong Hash => _txHeader->Hash;
 
-        public LowLevelTransaction(LowLevelTransaction previous, TransactionPersistentContext transactionPersistentContext, ByteStringContext allocator = null)
+        public LowLevelTransaction(LowLevelTransaction previous, TransactionPersistentContext transactionPersistentContext, ByteStringContext allocator)
         {
             // this is used to clone a read transaction, so we can dispose the old one.
             // for example, in 32 bits, we may want to have a large transaction, but we 
@@ -192,7 +192,7 @@ namespace Voron.Impl
             JournalSnapshots = previous.JournalSnapshots;
         }
 
-        private LowLevelTransaction(LowLevelTransaction previous, TransactionPersistentContext persistentContext, long txId)
+        private LowLevelTransaction(LowLevelTransaction previous, TransactionPersistentContext persistentContext)
         {
             // this is meant to be used with transaction merging only
             // so it makes a lot of assumptions about the usage scenario
@@ -213,7 +213,10 @@ namespace Voron.Impl
             TxStartTime = DateTime.UtcNow;
             DataPager = previous.DataPager;
             DataPagerState = previous.DataPagerState;
-            _envRecord = previous._envRecord;
+            _envRecord = previous._envRecord with
+            {
+                TransactionId = previous._envRecord.TransactionId + 1
+            };
             _usedPagerStates = previous._usedPagerStates;
             
             _env = env;
@@ -970,9 +973,7 @@ namespace Voron.Impl
 
             CommitStage1_CompleteTransaction();
 
-            var nextTx = new LowLevelTransaction(this, persistentContext,
-                writeToJournalIsRequired ? Id + 1 : Id
-                );
+            var nextTx = new LowLevelTransaction(this, persistentContext);
             _asyncCommitNextTransaction = nextTx;
             AsyncCommit = writeToJournalIsRequired
                   ? Task.Run(() => { CommitStage2_WriteToJournal(); return true; })
