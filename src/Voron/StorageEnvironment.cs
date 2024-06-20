@@ -998,8 +998,7 @@ namespace Voron
             }
             finally
             {
-                if (tx.AlreadyAllowedDisposeWithLazyTransactionRunning == false)
-                    _envDispose.Signal();
+                _envDispose.Signal();
             }
         }
 
@@ -1672,13 +1671,6 @@ namespace Voron
         public void ResetLastWorkTime()
         {
             LastWorkTime = DateTime.MinValue;
-        }
-
-        internal void AllowDisposeWithLazyTransactionRunning(LowLevelTransaction tx)
-        {
-            Debug.Assert(tx.Flags == TransactionFlags.Read);
-            _envDispose.Signal();
-            tx.AlreadyAllowedDisposeWithLazyTransactionRunning = true;
         }
 
         [DoesNotReturn]

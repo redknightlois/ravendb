@@ -205,7 +205,6 @@ namespace Voron.Impl.Journal
                 ptt[freedPageNumber] = new PagePosition(-1, tx.Id, journalNumber, -1, true);
             }
 
-            var scratchBufferPool = tx.Environment.ScratchBufferPool;
             var txPages = tx.GetTransactionPages();
             foreach (var txPage in txPages)
             {

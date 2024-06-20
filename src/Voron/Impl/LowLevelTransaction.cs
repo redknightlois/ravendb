@@ -126,7 +126,7 @@ namespace Voron.Impl
         private TransactionHeader* _txHeader;
 
         private readonly HashSet<PageFromScratchBuffer> _transactionPages;
-        private readonly HashSet<long>? _freedPages;
+        private readonly HashSet<long> _freedPages;
         private readonly List<PageFromScratchBuffer> _unusedScratchPages;
 
 
@@ -231,9 +231,9 @@ namespace Voron.Impl
 
             Flags = TransactionFlags.ReadWrite;
 
-            JournalFiles = previous.JournalFiles;
+            _journalFiles = previous._journalFiles;
 
-            foreach (var journalFile in JournalFiles)
+            foreach (var journalFile in _journalFiles)
             {
                 journalFile.AddRef();
             }
@@ -310,8 +310,8 @@ namespace Voron.Impl
             // we keep this copy to make sure that if we use async commit, we have a stable copy of the jounrals
             // as they were at the time we started the original transaction, this is required because async commit
             // may modify the list of files we have available
-            JournalFiles = _journal.Files;
-            foreach (var journalFile in JournalFiles)
+            _journalFiles = _journal.Files;
+            foreach (var journalFile in _journalFiles)
             {
                 journalFile.AddRef();
             }
@@ -478,10 +478,10 @@ namespace Voron.Impl
             Sodium.sodium_memzero(page + PageHeader.NonceOffset, (UIntPtr)(PageHeader.SizeOf - PageHeader.NonceOffset));
         }
 
-        private TxState _txState;
+        private TxStatus _txStatus;
 
         [Flags]
-        private enum TxState
+        private enum TxStatus
         {
             None,
             Disposed = 1,
@@ -491,7 +491,7 @@ namespace Voron.Impl
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public Page GetPage(long pageNumber)
         {
-            if (_txState != TxState.None)
+            if (_txStatus != TxStatus.None)
                 ThrowObjectDisposed();
 
             if (_pageLocator.TryGetReadOnlyPage(pageNumber, out Page result))
@@ -507,7 +507,7 @@ namespace Voron.Impl
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public Page GetPageWithoutCache(long pageNumber)
         {
-            if (_txState != TxState.None)
+            if (_txStatus != TxStatus.None)
                 ThrowObjectDisposed();
 
             return GetPageInternal(pageNumber);
@@ -576,13 +576,13 @@ namespace Voron.Impl
 
         private void ThrowObjectDisposed()
         {
-            if (_txState.HasFlag(TxState.Disposed))
+            if (_txStatus.HasFlag(TxStatus.Disposed))
                 throw new ObjectDisposedException("Transaction is already disposed");
 
-            if (_txState.HasFlag(TxState.Errored))
+            if (_txStatus.HasFlag(TxStatus.Errored))
                 throw new InvalidDataException("The transaction is in error state, and cannot be used further");
 
-            throw new ObjectDisposedException("Transaction state is invalid: " + _txState);
+            throw new ObjectDisposedException("Transaction state is invalid: " + _txStatus);
         }
 
         public Page AllocatePage(int numberOfPages, long? pageNumber = null, Page? previousPage = null, bool zeroPage = true)
@@ -644,7 +644,7 @@ namespace Voron.Impl
 
         private Page AllocatePageImpl(int numberOfPages, long pageNumber, Page? previousVersion, bool zeroPage)
         {
-            if (_txState != TxState.None)
+            if (_txStatus != TxStatus.None)
                 ThrowObjectDisposed();
 
             try
@@ -692,7 +692,7 @@ namespace Voron.Impl
             }
             catch
             {
-                _txState |= TxState.Errored;
+                _txStatus |= TxStatus.Errored;
                 throw;
             }
         }
@@ -710,7 +710,7 @@ namespace Voron.Impl
 
         internal void ShrinkOverflowPage(long pageNumber, int newSize, TreeMutableState treeState)
         {
-            if (_txState != TxState.None)
+            if (_txStatus != TxStatus.None)
                 ThrowObjectDisposed();
 
             if (_scratchPagesTable.TryGetValue(pageNumber, out PageFromScratchBuffer value) == false)
@@ -761,9 +761,9 @@ namespace Voron.Impl
         }
 
 
-        public bool IsValid => _txState == TxState.None;
+        public bool IsValid => _txStatus == TxStatus.None;
         
-        public bool IsDisposed => _txState.HasFlag(TxState.Disposed);
+        public bool IsDisposed => _txStatus.HasFlag(TxStatus.Disposed);
 
         public NativeMemory.ThreadStats CurrentTransactionHolder { get; set; }
         
@@ -779,7 +779,7 @@ namespace Voron.Impl
 
         public void Dispose()
         {
-            if (_txState.HasFlag(TxState.Disposed))
+            if (_txStatus.HasFlag(TxStatus.Disposed))
                 return;
 
             EnsureDisposeOfWriteTxIsOnTheSameThreadThatCreatedIt();
@@ -789,7 +789,7 @@ namespace Voron.Impl
                 if (!Committed && !RolledBack && Flags == TransactionFlags.ReadWrite)
                     Rollback();
 
-                _txState |= TxState.Disposed;
+                _txStatus |= TxStatus.Disposed;
 
                 PersistentContext.FreePageLocator(_pageLocator);
             }
@@ -801,9 +801,9 @@ namespace Voron.Impl
 
                 _disposableScope.Dispose();
 
-                if (JournalFiles != null)
+                if (_journalFiles != null)
                 {
-                    foreach (var journalFile in JournalFiles)
+                    foreach (var journalFile in _journalFiles)
                     {
                         journalFile.Release();
                     }
@@ -828,7 +828,7 @@ namespace Voron.Impl
 
         public void MarkTransactionAsFailed()
         {
-            _txState |= TxState.Errored;
+            _txStatus |= TxStatus.Errored;
         }
 
         internal void FreePageOnCommit(long pageNumber)
@@ -861,7 +861,7 @@ namespace Voron.Impl
 
         public void FreePage(long pageNumber)
         {
-            if (_txState != TxState.None)
+            if (_txStatus != TxStatus.None)
                 ThrowObjectDisposed();
 
             try
@@ -879,7 +879,7 @@ namespace Voron.Impl
             }
             catch
             {
-                _txState |= TxState.Errored;
+                _txStatus |= TxStatus.Errored;
                 throw;
             }
         }
@@ -994,7 +994,7 @@ namespace Voron.Impl
                     AsyncCommit = null;
                 }
 
-                _txState |= TxState.Errored;
+                _txStatus |= TxStatus.Errored;
 
                 throw;
             }
@@ -1021,7 +1021,7 @@ namespace Voron.Impl
         {
             if (AsyncCommit == null)
             {
-                _txState |= TxState.Errored;
+                _txStatus |= TxStatus.Errored;
                 ThrowInvalidAsyncEndWithoutBegin();
                 return;// never reached
             }
@@ -1036,7 +1036,7 @@ namespace Voron.Impl
                 // of writing to the journal means that we don't know what the current
                 // state of the journal is. We have to shut down and run recovery to 
                 // come to a known good state
-                _txState |= TxState.Errored;
+                _txStatus |= TxStatus.Errored;
                 _env.Options.SetCatastrophicFailure(ExceptionDispatchInfo.Capture(e));
 
                 throw;
@@ -1082,14 +1082,14 @@ namespace Voron.Impl
             }
             catch
             {
-                _txState |= TxState.Errored;
+                _txStatus |= TxStatus.Errored;
                 throw;
             }
         }
 
         private void CommitStage1_CompleteTransaction()
         {
-            if (_txState != TxState.None)
+            if (_txStatus != TxStatus.None)
                 ThrowObjectDisposed();
 
             if (Committed)
@@ -1139,9 +1139,9 @@ namespace Voron.Impl
 
                 if (_asyncCommitNextTransaction != null)
                 {
-                    var old = _asyncCommitNextTransaction.JournalFiles;
-                    _asyncCommitNextTransaction.JournalFiles = _env.Journal.Files;
-                    foreach (var journalFile in _asyncCommitNextTransaction.JournalFiles)
+                    var old = _asyncCommitNextTransaction._journalFiles;
+                    _asyncCommitNextTransaction._journalFiles = _env.Journal.Files;
+                    foreach (var journalFile in _asyncCommitNextTransaction._journalFiles)
                     {
                         journalFile.AddRef();
                     }
@@ -1153,7 +1153,7 @@ namespace Voron.Impl
             }
             catch (Exception e)
             {
-                _txState |= TxState.Errored;
+                _txStatus |= TxStatus.Errored;
                 _env.Options.SetCatastrophicFailure(ExceptionDispatchInfo.Capture(e));
                 throw;
             }
@@ -1186,7 +1186,7 @@ namespace Voron.Impl
         public void Rollback()
         {
             // here we allow rolling back of errored transaction
-            if (_txState.HasFlag(TxState.Disposed))
+            if (_txStatus.HasFlag(TxStatus.Disposed))
                 ThrowObjectDisposed();
 
 
@@ -1225,13 +1225,13 @@ namespace Voron.Impl
 
         public string GetTxState()
         {
-            return _txState.ToString();
+            return _txStatus.ToString();
         }
 
         internal bool FlushInProgressLockTaken;
         private ByteString _txHeaderMemory;
-        internal ImmutableAppendOnlyList<JournalFile> JournalFiles;
-        internal bool AlreadyAllowedDisposeWithLazyTransactionRunning;
+        private readonly EnvironmentStateRecord _envRecord;
+        internal ImmutableAppendOnlyList<JournalFile> _journalFiles;
         public DateTime TxStartTime;
         public bool IsCloned;
         internal long? LocalPossibleOldestReadTransaction;
@@ -1249,7 +1249,6 @@ namespace Voron.Impl
 #if DEBUG
         //overflowPageId, Parent
         private readonly Dictionary<long, long> _overflowPagesToBeRemoved = new();
-        private EnvironmentStateRecord _envRecord;
 
         [Conditional("DEBUG")]
         private void ValidateOverflowPagesRemoval()
