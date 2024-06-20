@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
-using FastTests.Utils;
 using FastTests.Voron;
 using FastTests.Voron.FixedSize;
 using Raven.Server.Documents;
@@ -16,7 +15,6 @@ using Voron.Impl.Paging;
 using Xunit;
 using Voron.Global;
 using Xunit.Abstractions;
-using Page = Elastic.Clients.Elasticsearch.MachineLearning.Page;
 
 namespace FastTests.Sparrow
 {
@@ -35,7 +33,7 @@ namespace FastTests.Sparrow
 
                 var (pager, state) = Pager2.Create(options, new Pager2.OpenFileOptions { File = Path.Combine(DataDir, "Raven.Voron"), Encrypted = true });
                 using var _ = pager;
-                Pager2.PagerTransactionState txState = default;
+                Pager2.PagerTransactionState txState = new(){IsWriteTransaction = true};
                 try
                 {
                     pager.EnsureContinuous(ref state, 17, 1); // We're gonna try to read and write to page 17
@@ -46,6 +44,7 @@ namespace FastTests.Sparrow
                     header->Flags = PageFlags.Single | PageFlags.FixedSizeTreePage;
 
                     Memory.Set(pagePointer + PageHeader.SizeOf, (byte)'X', Constants.Storage.PageSize - PageHeader.SizeOf);
+                    txState.InvokeBeforeCommitFinalization(pager, state, ref txState);
                 }
                 finally
                 {
@@ -61,6 +60,7 @@ namespace FastTests.Sparrow
                     Assert.True(pagePointer[PageHeader.SizeOf] == 'X');
                     Assert.True(pagePointer[666] == 'X');
                     Assert.True(pagePointer[1039] == 'X');
+                    txState.InvokeBeforeCommitFinalization(pager, state, ref txState);
                 }
                 finally
                 {
@@ -208,7 +208,7 @@ namespace FastTests.Sparrow
                 var (pager, state) = Pager2.Create(options, new Pager2.OpenFileOptions { File = Path.Combine(DataDir, "Raven.Voron"), Encrypted = true });
                 using var _ = pager;
 
-                Pager2.PagerTransactionState txState = default;
+                Pager2.PagerTransactionState txState = new(){IsWriteTransaction = true};
                 try
                 {
                     var overflowSize = 4 * Constants.Storage.PageSize + 100;
@@ -222,6 +222,7 @@ namespace FastTests.Sparrow
                     header->OverflowSize = overflowSize;
 
                     Memory.Set(pagePointer + PageHeader.SizeOf, (byte)'X', overflowSize);
+                    txState.InvokeBeforeCommitFinalization(pager, state, ref txState);
                 }
                 finally
                 {
@@ -237,6 +238,7 @@ namespace FastTests.Sparrow
                     Assert.True(pagePointer[PageHeader.SizeOf] == 'X');
                     Assert.True(pagePointer[666] == 'X');
                     Assert.True(pagePointer[1039] == 'X');
+                    txState.InvokeBeforeCommitFinalization(pager, state, ref txState);
                 }
                 finally
                 {
@@ -253,7 +255,7 @@ namespace FastTests.Sparrow
                 options.Encryption.MasterKey = Sodium.GenerateRandomBuffer((int)Sodium.crypto_aead_xchacha20poly1305_ietf_keybytes());
                 var (pager, state) = Pager2.Create(options, new Pager2.OpenFileOptions { File = Path.Combine(DataDir, "Raven.Voron"), Encrypted = true });
                 using var _ = pager;
-                Pager2.PagerTransactionState txState = default;
+                Pager2.PagerTransactionState txState = new(){IsWriteTransaction = true};
                 try
                 {
                     var overflowSize = 4 * Constants.Storage.PageSize + 100;
@@ -271,8 +273,7 @@ namespace FastTests.Sparrow
                     Assert.True(PageExistsInCache(txState, pager, 26, out var usages));
                     Assert.Equal(1, usages);
 
-                    Assert.True(1 == DateTime.UtcNow.Ticks, "implement me!");
-                    //cryptoPager.TryReleasePage(tx, 26);
+                    pager.TryReleasePage(ref txState, 26);
 
                     Assert.True(PageExistsInCache(txState, pager, 26, out usages));
                     Assert.Equal(1, usages);
@@ -281,6 +282,7 @@ namespace FastTests.Sparrow
 
                     Assert.True(PageExistsInCache(txState, pager, 26, out usages));
                     Assert.Equal(2, usages);
+                    txState.InvokeBeforeCommitFinalization(pager, state, ref txState);
                 }
                 finally
                 {
@@ -305,17 +307,16 @@ namespace FastTests.Sparrow
                     Assert.True(PageExistsInCache(txState, pager, 26, out usages));
                     Assert.Equal(2, usages);
 
-                    Assert.True(1 == DateTime.UtcNow.Ticks, "implement me!");
-                    //cryptoPager.TryReleasePage(tx, 26);
+                    pager.TryReleasePage(ref txState, 26);
 
                     Assert.True(PageExistsInCache(txState, pager, 26, out usages));
                     Assert.Equal(1, usages);
 
-                    Assert.True(1 == DateTime.UtcNow.Ticks, "implement me!");
-                    //cryptoPager.TryReleasePage(tx, 26);
+                    pager.TryReleasePage(ref txState, 26);
 
                     Assert.False(PageExistsInCache(txState, pager, 26, out usages));
                     Assert.Equal(0, usages);
+                    txState.InvokeBeforeCommitFinalization(pager, state, ref txState);
                 }
                 finally
                 {
