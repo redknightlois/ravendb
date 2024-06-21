@@ -1807,9 +1807,9 @@ namespace Voron.Impl.Journal
                     int diffPageSize = txPage.NumberOfPages * Constants.Storage.PageSize;
                     pagesEncountered += txPage.NumberOfPages;
                     Debug.Assert(pagesEncountered <= pagesCountIncludingAllOverflowPages);
-                    if (txPage.PreviousVersion != null)
+                    if (txPage.PreviousVersion.IsValid)
                     {
-                        _diffPage.ComputeDiff(txPage.PreviousVersion.Value.Pointer, scratchPage, diffPageSize);
+                        _diffPage.ComputeDiff(txPage.PreviousVersion.Pointer, scratchPage, diffPageSize);
                     }
                     else
                     {
@@ -1818,7 +1818,7 @@ namespace Voron.Impl.Journal
 
                     write += _diffPage.OutputSize;
                     transactionHeaderPageInfo.Size = _diffPage.OutputSize == 0 ? 0 : diffPageSize;
-                    transactionHeaderPageInfo.IsNewDiff = txPage.PreviousVersion == null;
+                    transactionHeaderPageInfo.IsNewDiff = txPage.PreviousVersion.IsValid == false;
                     transactionHeaderPageInfo.DiffSize = _diffPage.IsDiff ? _diffPage.OutputSize : 0;
                     Debug.Assert(Math.Max(transactionHeaderPageInfo.Size, transactionHeaderPageInfo.DiffSize) <= diffPageSize);
                 }

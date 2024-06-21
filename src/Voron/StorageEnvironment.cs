@@ -1728,14 +1728,16 @@ namespace Voron
         
         public void UpdateStateOnCommit(LowLevelTransaction tx)
         {
+            var pagerStates = tx.GetReferencedPagerStates();
+            long transactionId = tx.Id;
             while (true)
             {
-                
                 var currentState = _currentStateRecordRecord!;
+                Debug.Assert(currentState.TransactionId == transactionId - 1);
                 var updatedState = currentState with
                 {
-                    TransactionId = tx.Id,
-                    StatesStrongRefs = tx.GetReferencedPagerStates()
+                    TransactionId = transactionId,
+                    StatesStrongRefs = pagerStates
                 };
                 if (Interlocked.CompareExchange(ref _currentStateRecordRecord, updatedState, currentState) == currentState)
                     break;

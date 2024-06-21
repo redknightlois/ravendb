@@ -661,7 +661,7 @@ namespace Voron.Impl
             VerifyNoDuplicateScratchPages();
 #endif
                 var pageFromScratchBuffer = _env.ScratchBufferPool.Allocate(this, numberOfPages);
-                pageFromScratchBuffer.PreviousVersion = previousVersion;
+                pageFromScratchBuffer.PreviousVersion = previousVersion ?? new Page();
                 var newPage = pageFromScratchBuffer.Page with
                 {
                     Flags = PageFlags.Single

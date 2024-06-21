@@ -35,6 +35,6 @@ namespace Voron.Impl.Scratch
         int Size
     )
     {
-        public Page? PreviousVersion;
+        public Page PreviousVersion = new();
     }
 }
