@@ -619,9 +619,6 @@ namespace Voron.Impl.Journal
 
             public void ApplyLogsToDataFile(CancellationToken token, TimeSpan timeToWait)
             {
-                if (DateTime.UtcNow.Ticks != 2)
-                    return;
-
                 if (token.IsCancellationRequested)
                     return;
 
