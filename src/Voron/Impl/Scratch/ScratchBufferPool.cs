@@ -28,7 +28,7 @@ namespace Voron.Impl.Scratch
     /// This class relies on external synchronization and is not meant to be used in multiple
     /// threads at the same time
     /// </summary>
-    public sealed unsafe class ScratchBufferPool : ILowMemoryHandler, IDisposable
+    public sealed class ScratchBufferPool : ILowMemoryHandler, IDisposable
     {
         private readonly StorageEnvironment _env;
         // Immutable state. 
@@ -302,22 +302,9 @@ namespace Voron.Impl.Scratch
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public PageFromScratchBuffer ShrinkOverflowPage(PageFromScratchBuffer value, int newNumberOfPages)
         {
-            var item = GetScratchBufferFile(value.ScratchFileNumber);
-
-            return item.File.ShrinkOverflowPage(value, newNumberOfPages);
+            return value.File.ShrinkOverflowPage(value, newNumberOfPages);
         }
         
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal ScratchBufferItem GetScratchBufferFile(int scratchNumber)
-        {
-            var currentScratchFile = _current;
-            if (scratchNumber == currentScratchFile.Number)
-                return currentScratchFile;
-            // if we can avoid the dictionary lookup for the common case of 
-            // looking at the latest scratch, that is great
-            return _scratchBuffers[scratchNumber];
-        }
-
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void AddScratchBufferFile(ScratchBufferItem scratch)
         {
@@ -591,7 +578,7 @@ namespace Voron.Impl.Scratch
                     {
                         NumberOfPages = allocatedPage.NumberOfPages,
                         PositionInScratchBuffer = allocatedPage.PositionInScratchBuffer,
-                        ScratchFileNumber = allocatedPage.ScratchFileNumber,
+                        ScratchFileNumber = allocatedPage.File.Number,
                         Size = allocatedPage.Size
                     });
                 }
@@ -620,6 +607,11 @@ namespace Voron.Impl.Scratch
         public void LowMemoryOver()
         {
             _lowMemoryFlag.Lower();
+        }
+
+        public ScratchBufferFile GetScratchBufferFile(int number)
+        {
+            return _scratchBuffers.TryGetValue(number, out var item) ? item.File : null;
         }
     }
 }
