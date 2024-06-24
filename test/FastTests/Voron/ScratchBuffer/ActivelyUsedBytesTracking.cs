@@ -31,11 +31,11 @@ namespace FastTests.Voron.ScratchBuffer
                 {
                     Assert.False(file.HasActivelyUsedBytes(2));
                     
-                    file.Allocate(tx.LowLevelTransaction, 1, 1, 8);
-                    file.Allocate(tx.LowLevelTransaction, 1, 1, 9);
-                    file.Allocate(tx.LowLevelTransaction, 1, 1, 10);
-                    file.Allocate(tx.LowLevelTransaction, 1, 1, 11);
-                    file.Allocate(tx.LowLevelTransaction, 1, 1, 12);
+                    file.Allocate(tx.LowLevelTransaction, 1, 1, 8, default);
+                    file.Allocate(tx.LowLevelTransaction, 1, 1, 9, default);
+                    file.Allocate(tx.LowLevelTransaction, 1, 1, 10, default);
+                    file.Allocate(tx.LowLevelTransaction, 1, 1, 11, default);
+                    file.Allocate(tx.LowLevelTransaction, 1, 1, 12, default);
 
                     file.Free(tx.LowLevelTransaction, 0);
                     file.Free(tx.LowLevelTransaction, 1);
