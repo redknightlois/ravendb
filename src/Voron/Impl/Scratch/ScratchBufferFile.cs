@@ -137,11 +137,11 @@ namespace Voron.Impl.Scratch
 
         public ScratchFileDebugInfo DebugInfo { get; }
 
-        public PageFromScratchBuffer Allocate(LowLevelTransaction tx, int numberOfPages, int sizeToAllocate, long pageNumber)
+        public PageFromScratchBuffer Allocate(LowLevelTransaction tx, int numberOfPages, int sizeToAllocate, long pageNumber, Page previousVersion)
         {
             _scratchPager.EnsureContinuous(ref _scratchPagerState, _lastUsedPage, sizeToAllocate, tx.Id);
             
-            var result = new PageFromScratchBuffer(this,_scratchPagerState, tx.Id, _lastUsedPage, pageNumber, numberOfPages, sizeToAllocate);
+            var result = new PageFromScratchBuffer(this,_scratchPagerState, tx.Id, _lastUsedPage, pageNumber, numberOfPages, sizeToAllocate, previousVersion);
 
             _allocatedPagesCount += numberOfPages;
             _allocatedPages.Add(_lastUsedPage, result);
@@ -150,7 +150,7 @@ namespace Voron.Impl.Scratch
             return result;
         }
 
-        public bool TryGettingFromAllocatedBuffer(LowLevelTransaction tx, int numberOfPages, int size, long pageNumber, out PageFromScratchBuffer result)
+        public bool TryGettingFromAllocatedBuffer(LowLevelTransaction tx, int numberOfPages, int size, long pageNumber, Page previousVersion, out PageFromScratchBuffer result)
         {
             result = null;
 
@@ -169,7 +169,7 @@ namespace Voron.Impl.Scratch
 #endif
 
                 
-                result = new PageFromScratchBuffer(this,_scratchPagerState, tx.Id, freeAndAvailablePageNumber, pageNumber, numberOfPages,   size);
+                result = new PageFromScratchBuffer(this,_scratchPagerState, tx.Id, freeAndAvailablePageNumber, pageNumber, numberOfPages, size, previousVersion);
 
                 _allocatedPagesCount += numberOfPages;
                 _allocatedPages.Add(freeAndAvailablePageNumber, result);
@@ -195,7 +195,7 @@ namespace Voron.Impl.Scratch
             _scratchPager.UnprotectPageRange(freePageBySizePointer, freePageBySizeSize, true);
 #endif
 
-            result = new PageFromScratchBuffer(this, _scratchPagerState, tx.Id, val.Page, pageNumber, numberOfPages,  size);
+            result = new PageFromScratchBuffer(this, _scratchPagerState, tx.Id, val.Page, pageNumber, numberOfPages,  size, previousVersion);
 
             _allocatedPagesCount += numberOfPages;
             _allocatedPages.Add(val.Page, result);

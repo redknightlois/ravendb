@@ -878,9 +878,7 @@ namespace Voron.Impl.Journal
                 var scratchBufferPool = _waj._env.ScratchBufferPool;
                 foreach (var (_, pageFromScratchBuffer) in flushedRecord.ScratchPagesTable)
                 {
-                    if(pageFromScratchBuffer.AllocatedInTransactionId <= lastFlushed.TransactionId)
-                        continue; // already freed in a previous flush, since it is 
-                    scratchBufferPool.Free(txw, pageFromScratchBuffer.File.Number, pageFromScratchBuffer.PositionInScratchBuffer);
+                      scratchBufferPool.Free(txw, pageFromScratchBuffer.File.Number, pageFromScratchBuffer.PositionInScratchBuffer);
                 }
             }
 

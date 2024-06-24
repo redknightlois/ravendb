@@ -35,11 +35,10 @@ namespace Voron.Impl.Scratch
         long PositionInScratchBuffer,
         long PageNumberInDataFile,
         int NumberOfPages,
-        int Size
+        int Size,
+        Page PreviousVersion
     )
     {
-        public Page PreviousVersion = new();
-
         public unsafe Page ReadPage(LowLevelTransaction tx)
         {
             return new Page(Read(ref tx.PagerTransactionState));

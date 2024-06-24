@@ -161,7 +161,7 @@ namespace Voron.Impl.Scratch
             return item;
         }
 
-        public PageFromScratchBuffer Allocate(LowLevelTransaction tx, int numberOfPages, long pageNumber)
+        public PageFromScratchBuffer Allocate(LowLevelTransaction tx, int numberOfPages, long pageNumber, Page previousVersion)
         {
             if (tx == null)
                 throw new ArgumentNullException(nameof(tx));
@@ -169,18 +169,18 @@ namespace Voron.Impl.Scratch
 
             var current = _current;
 
-            if (current.File.TryGettingFromAllocatedBuffer(tx, numberOfPages, size, pageNumber, out PageFromScratchBuffer result))
+            if (current.File.TryGettingFromAllocatedBuffer(tx, numberOfPages, size, pageNumber, previousVersion, out PageFromScratchBuffer result))
                 return result;
 
             // we can allocate from the end of the file directly
             if (current.File.LastUsedPage + size <= current.File.NumberOfAllocatedPages)
-                return current.File.Allocate(tx, numberOfPages, size, pageNumber);
+                return current.File.Allocate(tx, numberOfPages, size, pageNumber, previousVersion);
 
             if (current.File.Size < _options.MaxScratchBufferSize)
             {
                 var numberOfPagesBeforeAllocate = current.File.NumberOfAllocatedPages;
 
-                var page = current.File.Allocate(tx, numberOfPages, size, pageNumber);
+                var page = current.File.Allocate(tx, numberOfPages, size, pageNumber, previousVersion);
 
                 if (current.File.NumberOfAllocatedPages > numberOfPagesBeforeAllocate)
                     _scratchSpaceMonitor.Increase((current.File.NumberOfAllocatedPages - numberOfPagesBeforeAllocate) * Constants.Storage.PageSize);
@@ -195,7 +195,7 @@ namespace Voron.Impl.Scratch
 
             try
             {
-                return current.File.Allocate(tx, numberOfPages, size, pageNumber);
+                return current.File.Allocate(tx, numberOfPages, size, pageNumber, previousVersion);
             }
             finally
             {
@@ -298,12 +298,6 @@ namespace Voron.Impl.Scratch
             public DateTime RecycledAt;
         }
 
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public PageFromScratchBuffer ShrinkOverflowPage(PageFromScratchBuffer value, int newNumberOfPages)
-        {
-            return value.File.ShrinkOverflowPage(value, newNumberOfPages);
-        }
         
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void AddScratchBufferFile(ScratchBufferItem scratch)
