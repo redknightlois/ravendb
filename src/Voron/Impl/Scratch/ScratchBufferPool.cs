@@ -573,7 +573,6 @@ namespace Voron.Impl.Scratch
                         NumberOfPages = allocatedPage.NumberOfPages,
                         PositionInScratchBuffer = allocatedPage.PositionInScratchBuffer,
                         ScratchFileNumber = allocatedPage.File.Number,
-                        Size = allocatedPage.Size
                     });
                 }
 
