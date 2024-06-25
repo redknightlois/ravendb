@@ -1708,22 +1708,22 @@ namespace Voron
         {
             var pagesInScratch = tx.GetPagesInScratch();
             // ensure that we have disjointed sets and not a case of both free & used at once
-            long transactionId = tx.Id;
-            long txFlushedToJournal = tx.FlushedToJournal;
-            if (txFlushedToJournal == 0)
+            var (txId, txFlushedToJournal) = tx.FlushedToJournal switch
             {
-                txFlushedToJournal = tx.CurrentStateRecord.FlushedToJournal;
-            }
+                // we may want to update the state of the transaction (scratch table, data pager state, etc)
+                // without incrementing the transaction id, since we didn't commit a transaction to the journal
+                -1 => (tx.CurrentStateRecord.TransactionId, tx.CurrentStateRecord.FlushedToJournal),
+                _ => (tx.Id, tx.FlushedToJournal)
+            };
             long nextPageNumber = tx.GetNextPageNumber();
             var rootObjectsState = tx.RootObjects.State;
             Debug.Assert(ReferenceEquals(rootObjectsState, tx.CurrentStateRecord.Root));
             while (true)
             {
                 var currentState = _currentStateRecordRecord!;
-                Debug.Assert(currentState.TransactionId == transactionId - 1);
                 var updatedState = currentState with
                 {
-                    TransactionId = transactionId,
+                    TransactionId = txId,
                     ScratchPagesTable = pagesInScratch,
                     FlushedToJournal = txFlushedToJournal,
                     NextPageNumber = nextPageNumber,
