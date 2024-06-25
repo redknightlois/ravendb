@@ -29,7 +29,7 @@ namespace SlowTests.Voron.Issues
 
             using (var tx = Env.WriteTransaction())
             {
-                tx.LowLevelTransaction.State.NextPageNumber = 10;
+                tx.LowLevelTransaction.TestOnly_SetLocalTxNextPageNumber(10 - Env.NextPageNumber);
 
                 tx.LowLevelTransaction.AllocatePage(1, 3);
                 tx.LowLevelTransaction.AllocatePage(1, 4);

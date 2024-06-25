@@ -90,7 +90,7 @@ namespace FastTests.Voron.Trees
 
             using (var tx = Env.WriteTransaction())
             {
-                tx.LowLevelTransaction.State.NextPageNumber = maxPageNumber + 1;
+                tx.LowLevelTransaction.TestOnly_SetLocalTxNextPageNumber(maxPageNumber + 1 - Env.CurrentStateRecord.NextPageNumber);
 
                 tx.Commit();
             }
@@ -146,7 +146,7 @@ namespace FastTests.Voron.Trees
 
             using (var tx = Env.WriteTransaction())
             {
-                tx.LowLevelTransaction.State.NextPageNumber = maxPageNumber + 1;
+                tx.LowLevelTransaction.TestOnly_SetLocalTxNextPageNumber(maxPageNumber + 1 - Env.CurrentStateRecord.NextPageNumber);
 
                 tx.Commit();
             }

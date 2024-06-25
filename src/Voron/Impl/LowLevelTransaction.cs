@@ -141,8 +141,6 @@ namespace Voron.Impl
 
         private const int RevertedScratchPageMarker = -0xDEAD;
 
-        private readonly StorageEnvironmentState _state;
-
         private CommitStats _requestedCommitStats;
         private JournalFile.UpdatePageTranslationTableAndUnusedPagesAction? _updatePageTranslationTableAndUnusedPages;
 
@@ -156,8 +154,6 @@ namespace Voron.Impl
         public bool Committed { get; private set; }
 
         public bool RolledBack { get; private set; }
-
-        public StorageEnvironmentState State => _state;
 
         public ByteStringContext Allocator => _allocator;
 
@@ -194,8 +190,6 @@ namespace Voron.Impl
 
             _pageLocator = transactionPersistentContext.AllocatePageLocator(this);
 
-            _state = previous._state.Clone();
-
             InitializeRoots();
         }
 
@@ -215,7 +209,7 @@ namespace Voron.Impl
             Debug.Assert((PlatformDetails.Is32Bits || env.Options.ForceUsing32BitsPager) == false,
                 $"Async commit isn't supported in 32bits environments. We don't carry 32 bits state from previous tx");
 
-            FlushInProgressLockTaken = previous.FlushInProgressLockTaken;
+            _flushInProgressLockTaken = previous._flushInProgressLockTaken;
             CurrentTransactionHolder = previous.CurrentTransactionHolder;
             TxStartTime = DateTime.UtcNow;
             DataPager = previous.DataPager;
@@ -242,8 +236,6 @@ namespace Voron.Impl
             
             _transactionPages = new HashSet<PageFromScratchBuffer>(PageFromScratchBufferEqualityComparer.Instance);
             _pagesToFreeOnCommit = new Stack<long>();
-
-            _state = previous._state.Clone();
 
             _pageLocator = PersistentContext.AllocatePageLocator(this);
             InitializeRoots();
@@ -277,8 +269,6 @@ namespace Voron.Impl
 
             if (flags != TransactionFlags.ReadWrite)
             {
-                _state = env.State.Clone();
-
                 InitializeRoots();
 
                 return;
@@ -291,7 +281,6 @@ namespace Voron.Impl
             _transactionPages = new HashSet<PageFromScratchBuffer>(PageFromScratchBufferEqualityComparer.Instance);
             _pagesToFreeOnCommit = new Stack<long>();
 
-            _state = env.State.Clone();
             InitializeRoots();
             InitTransactionHeader();
         }
@@ -299,19 +288,19 @@ namespace Voron.Impl
         internal void UpdateRootsIfNeeded(Tree root)
         {
             //can only happen during initial transaction that creates Root and FreeSpaceRoot trees
-            if (State.Root != null)
+            if (_envRecord.Root != null)
                 return;
 
-            State.Root = root.State;
+            _envRecord = _envRecord with { Root = root.State };
 
             _root = root;
         }
 
         private void InitializeRoots()
         {
-            if (_state.Root != null)
+            if (_envRecord.Root != null)
             {
-                _root = new Tree(this, null, Constants.RootTreeNameSlice, _state.Root);
+                _root = new Tree(this, null, Constants.RootTreeNameSlice, _envRecord.Root);
             }
         }
 
@@ -323,11 +312,11 @@ namespace Voron.Impl
             _txHeader = (TransactionHeader*)_txHeaderMemory.Ptr;
             _txHeader->HeaderMarker = Constants.TransactionHeaderMarker;
 
-            if (_envRecord.TransactionId > 1 && _state.NextPageNumber <= 1)
+            if (_envRecord.TransactionId > 1 && _envRecord.NextPageNumber <= 1)
                 ThrowNextPageNumberCannotBeSmallerOrEqualThanOne();
 
             _txHeader->TransactionId = _envRecord.TransactionId;
-            _txHeader->NextPageNumber = _state.NextPageNumber;
+            _txHeader->NextPageNumber = _envRecord.NextPageNumber;
             _txHeader->LastPageNumber = -1;
             _txHeader->PageCount = -1;
             _txHeader->Hash = 0;
@@ -526,9 +515,16 @@ namespace Voron.Impl
                 return pageNumber.Value;
 
             // allocate from end of file
-            var eof = State.NextPageNumber;
-            State.NextPageNumber += numberOfPages;
+            var eof = _envRecord.NextPageNumber + _localTxNextPageNumber;
+            _localTxNextPageNumber += numberOfPages;
             return eof;
+        }
+
+        public long GetNextPageNumber() => _envRecord.NextPageNumber + _localTxNextPageNumber;
+
+        internal void TestOnly_SetLocalTxNextPageNumber(long n)
+        {
+            _localTxNextPageNumber = n;
         }
 
         [Conditional("DEBUG")]
@@ -571,7 +567,7 @@ namespace Voron.Impl
                     ThrowQuotaExceededException(pageNumber, maxAvailablePageNumber);
 
 
-                Debug.Assert(pageNumber < State.NextPageNumber);
+                Debug.Assert(pageNumber < _envRecord.NextPageNumber);
 
 #if VALIDATE
             VerifyNoDuplicateScratchPages();
@@ -1007,11 +1003,11 @@ namespace Voron.Impl
                 FreePage(_pagesToFreeOnCommit.Pop());
             }
 
-            if (_state.NextPageNumber <= 1)
+            if (_envRecord.NextPageNumber <= 1)
                 ThrowNextPageNumberCannotBeSmallerOrEqualThanOne();
 
-            _txHeader->LastPageNumber = _state.NextPageNumber - 1;
-            _state.Root.CopyTo(&_txHeader->Root);
+            _txHeader->LastPageNumber = _envRecord.NextPageNumber - 1;
+            _envRecord.Root.CopyTo(&_txHeader->Root);
 
             _txHeader->TxMarker |= TransactionMarker.Commit;
 
@@ -1021,7 +1017,7 @@ namespace Voron.Impl
         [DoesNotReturn]
         private static void ThrowNextPageNumberCannotBeSmallerOrEqualThanOne([CallerMemberName] string caller = null)
         {
-            throw new InvalidOperationException($"{nameof(StorageEnvironmentState.NextPageNumber)} cannot be <= 1 on {caller}.");
+            throw new InvalidOperationException($"{nameof(_envRecord.NextPageNumber)} cannot be <= 1 on {caller}.");
         }
 
         private void CommitStage3_DisposeTransactionResources()
@@ -1116,9 +1112,10 @@ namespace Voron.Impl
             return _txStatus.ToString();
         }
 
-        internal bool FlushInProgressLockTaken;
+        internal bool _flushInProgressLockTaken;
         private ByteString _txHeaderMemory;
-        private readonly EnvironmentStateRecord _envRecord;
+        private EnvironmentStateRecord _envRecord;
+        private long _localTxNextPageNumber;
         public DateTime TxStartTime;
         public bool IsCloned;
         internal long? LocalPossibleOldestReadTransaction;
@@ -1170,7 +1167,7 @@ namespace Voron.Impl
                 return;
             }
             
-            if (_state.Root.PageCount < pageId)
+            if (_envRecord.Root.PageCount < pageId)
                 return;
             
             var page = GetPage(pageId);

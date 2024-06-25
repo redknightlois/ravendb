@@ -125,8 +125,6 @@ namespace Voron
 
         public Guid DbId { get; set; }
 
-        public StorageEnvironmentState State { get; private set; }
-
         public event Action OnLogsApplied;
 
         internal readonly long[] _validPagesAfterLoad;
@@ -151,7 +149,9 @@ namespace Voron
                     dataPagerState,
                     0,
                     FrozenDictionary<long, PageFromScratchBuffer>.Empty,
-                    0);
+                    0,
+                    null, 
+                    -1);
                 
                 _lastValidPageAfterLoad = dataPagerState.NumberOfAllocatedPages;
                 Debug.Assert(_lastValidPageAfterLoad != 0);
@@ -313,15 +313,11 @@ namespace Voron
 
             var entry = _headerAccessor.CopyHeader();
             var nextPageNumber = (header->TransactionId == 0 ? entry.LastPageNumber : header->LastPageNumber) + 1;
-            State = new StorageEnvironmentState(null, nextPageNumber)
-            {
-                NextPageNumber = nextPageNumber,
-                Options = Options
-            };
-
+            
             _currentStateRecordRecord = _currentStateRecordRecord with
             {
-                TransactionId = header->TransactionId == 0 ? entry.TransactionId : header->TransactionId
+                TransactionId = header->TransactionId == 0 ? entry.TransactionId : header->TransactionId,
+                NextPageNumber = nextPageNumber
             };
             var transactionPersistentContext = new TransactionPersistentContext(true);
             using (var tx = NewLowLevelTransaction(transactionPersistentContext, TransactionFlags.ReadWrite))
@@ -456,11 +452,7 @@ namespace Voron
 
         private void CreateNewDatabase()
         {
-            const int initialNextPageNumber = 0;
-            State = new StorageEnvironmentState(null, initialNextPageNumber)
-            {
-                Options = Options
-            };
+            _currentStateRecordRecord = _currentStateRecordRecord with { NextPageNumber = 0 };
 
             if (Options.SimulateFailureOnDbCreation)
                 ThrowSimulateFailureOnDbCreation();
@@ -492,7 +484,7 @@ namespace Voron
 
         public HeaderAccessor HeaderAccessor => _headerAccessor;
 
-        public long NextPageNumber => State.NextPageNumber;
+        public long NextPageNumber => _currentStateRecordRecord.NextPageNumber;
 
         public StorageEnvironmentOptions Options => _options;
 
@@ -734,7 +726,7 @@ namespace Voron
                     tx = new LowLevelTransaction(this, transactionPersistentContext, flags, _freeSpaceHandling,
                         context)
                     {
-                        FlushInProgressLockTaken = flushInProgressReadLockTaken,
+                        _flushInProgressLockTaken = flushInProgressReadLockTaken,
                     };
 
                     if (flags == TransactionFlags.ReadWrite)
@@ -902,20 +894,6 @@ namespace Voron
             return new ExitWriteLock(_txCreation);
         }
 
-        internal bool IsInPreventNewTransactionsMode => _txCreation.IsWriteLockHeld;
-
-        internal bool TryPreventNewTransactions(TimeSpan timeout, out IDisposable exitWriteLock)
-        {
-            if (_txCreation.TryEnterWriteLock(timeout))
-            {
-                exitWriteLock = new ExitWriteLock(_txCreation);
-                return true;
-            }
-
-            exitWriteLock = null;
-            return false;
-        }
-
         public struct ExitWriteLock : IDisposable
         {
             private readonly ReaderWriterLockSlim _rwls;
@@ -952,8 +930,6 @@ namespace Voron
                 {
                     UpdateStateOnCommit(tx);
                 }
-
-                State = tx.State;
 
                 Journal.Applicator.OnTransactionCommitted(tx);
 
@@ -992,7 +968,7 @@ namespace Voron
 
                 Journal.Applicator.OnTransactionCompleted();
 
-                if (tx.FlushInProgressLockTaken)
+                if (tx._flushInProgressLockTaken)
                     FlushInProgressLock.ExitReadLock();
             }
             finally
@@ -1477,14 +1453,14 @@ namespace Voron
             var transactionPersistentContext = new TransactionPersistentContext();
             using (var tx = NewLowLevelTransaction(transactionPersistentContext, TransactionFlags.Read))
             {
-                var numberOfAllocatedPages = Math.Max(tx.DataPagerState.NumberOfAllocatedPages, State.NextPageNumber - 1); // async apply to data file task
+                var numberOfAllocatedPages = Math.Max(tx.DataPagerState.NumberOfAllocatedPages, _currentStateRecordRecord.NextPageNumber - 1); // async apply to data file task
 
                 return new EnvironmentStats
                 {
                     FreePagesOverhead = FreeSpaceHandling.GetFreePagesOverhead(tx),
                     RootPages = tx.RootObjects.State.PageCount,
                     UnallocatedPagesAtEndOfFile = tx.DataPagerState.NumberOfAllocatedPages - NextPageNumber,
-                    UsedDataFileSizeInBytes = (State.NextPageNumber - 1) * Constants.Storage.PageSize,
+                    UsedDataFileSizeInBytes = (_currentStateRecordRecord.NextPageNumber - 1) * Constants.Storage.PageSize,
                     AllocatedDataFileSizeInBytes = numberOfAllocatedPages * Constants.Storage.PageSize,
                     CommittedTransactionId = CurrentReadTransactionId,
                 };
@@ -1753,6 +1729,8 @@ namespace Voron
             var pagesInScratch = tx.GetPagesInScratch();
             // ensure that we have disjointed sets and not a case of both free & used at once
             long transactionId = tx.Id;
+            long txFlushedToJournal = tx.FlushedToJournal;
+            long nextPageNumber = tx.GetNextPageNumber();
             while (true)
             {
                 var currentState = _currentStateRecordRecord!;
@@ -1761,7 +1739,8 @@ namespace Voron
                 {
                     TransactionId = transactionId,
                     ScratchPagesTable = pagesInScratch,
-                    FlushedToJournal = tx.FlushedToJournal
+                    FlushedToJournal = txFlushedToJournal,
+                    NextPageNumber = nextPageNumber
                 };
                 if (Interlocked.CompareExchange(ref _currentStateRecordRecord, updatedState, currentState) == currentState)
                 {
