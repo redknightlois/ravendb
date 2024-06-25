@@ -1731,6 +1731,8 @@ namespace Voron
             long transactionId = tx.Id;
             long txFlushedToJournal = tx.FlushedToJournal;
             long nextPageNumber = tx.GetNextPageNumber();
+            var rootObjectsState = tx.RootObjects.State;
+            Debug.Assert(ReferenceEquals(rootObjectsState, tx.CurrentStateRecord.Root));
             while (true)
             {
                 var currentState = _currentStateRecordRecord!;
@@ -1740,7 +1742,8 @@ namespace Voron
                     TransactionId = transactionId,
                     ScratchPagesTable = pagesInScratch,
                     FlushedToJournal = txFlushedToJournal,
-                    NextPageNumber = nextPageNumber
+                    NextPageNumber = nextPageNumber,
+                    Root = rootObjectsState
                 };
                 if (Interlocked.CompareExchange(ref _currentStateRecordRecord, updatedState, currentState) == currentState)
                 {

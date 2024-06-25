@@ -285,6 +285,8 @@ namespace Voron.Impl
             InitTransactionHeader();
         }
 
+        public EnvironmentStateRecord CurrentStateRecord => _envRecord;
+
         internal void UpdateRootsIfNeeded(Tree root)
         {
             //can only happen during initial transaction that creates Root and FreeSpaceRoot trees
@@ -312,11 +314,12 @@ namespace Voron.Impl
             _txHeader = (TransactionHeader*)_txHeaderMemory.Ptr;
             _txHeader->HeaderMarker = Constants.TransactionHeaderMarker;
 
-            if (_envRecord.TransactionId > 1 && _envRecord.NextPageNumber <= 1)
+            long nextPageNumber = GetNextPageNumber();
+            if (_envRecord.TransactionId > 1 && nextPageNumber <= 1)
                 ThrowNextPageNumberCannotBeSmallerOrEqualThanOne();
 
             _txHeader->TransactionId = _envRecord.TransactionId;
-            _txHeader->NextPageNumber = _envRecord.NextPageNumber;
+            _txHeader->NextPageNumber = nextPageNumber;
             _txHeader->LastPageNumber = -1;
             _txHeader->PageCount = -1;
             _txHeader->Hash = 0;
@@ -567,7 +570,7 @@ namespace Voron.Impl
                     ThrowQuotaExceededException(pageNumber, maxAvailablePageNumber);
 
 
-                Debug.Assert(pageNumber < _envRecord.NextPageNumber);
+                Debug.Assert(pageNumber < GetNextPageNumber());
 
 #if VALIDATE
             VerifyNoDuplicateScratchPages();
@@ -1003,10 +1006,10 @@ namespace Voron.Impl
                 FreePage(_pagesToFreeOnCommit.Pop());
             }
 
-            if (_envRecord.NextPageNumber <= 1)
+            if (GetNextPageNumber() <= 1)
                 ThrowNextPageNumberCannotBeSmallerOrEqualThanOne();
 
-            _txHeader->LastPageNumber = _envRecord.NextPageNumber - 1;
+            _txHeader->LastPageNumber = GetNextPageNumber() - 1;
             _envRecord.Root.CopyTo(&_txHeader->Root);
 
             _txHeader->TxMarker |= TransactionMarker.Commit;
