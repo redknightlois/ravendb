@@ -926,7 +926,7 @@ namespace Voron
 
             using (PreventNewTransactions())
             {
-                if (tx.Committed && tx.FlushedToJournal >= 0)
+                if (tx.Committed)
                 {
                     UpdateStateOnCommit(tx);
                 }
@@ -1703,26 +1703,6 @@ namespace Voron
                     break;
             }
         }
-
-        public void UpdateScratchTable(LowLevelTransaction tx)
-        {
-            Debug.Assert(tx.FlushedToJournal <0 && 
-                         tx.Committed && 
-                         tx.Flags == TransactionFlags.ReadWrite,
-                "Attempt to directly update the scratch table when not in a commited write transaction that skipped writing to the disk");
-            
-            var pagesInScratch = tx.GetPagesInScratch();
-            while (true)
-            {
-                var currentState = _currentStateRecordRecord!;
-                Debug.Assert(currentState.TransactionId == tx.Id- 1);
-                var updatedState = currentState with { ScratchPagesTable = pagesInScratch };
-                if (Interlocked.CompareExchange(ref _currentStateRecordRecord, updatedState, currentState) == currentState)
-                {
-                    break;
-                }
-            }
-        }
         
         private void UpdateStateOnCommit(LowLevelTransaction tx)
         {
@@ -1730,6 +1710,10 @@ namespace Voron
             // ensure that we have disjointed sets and not a case of both free & used at once
             long transactionId = tx.Id;
             long txFlushedToJournal = tx.FlushedToJournal;
+            if (txFlushedToJournal == 0)
+            {
+                txFlushedToJournal = tx.CurrentStateRecord.FlushedToJournal;
+            }
             long nextPageNumber = tx.GetNextPageNumber();
             var rootObjectsState = tx.RootObjects.State;
             Debug.Assert(ReferenceEquals(rootObjectsState, tx.CurrentStateRecord.Root));
