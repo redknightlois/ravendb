@@ -1,3 +1,4 @@
+using System;
 using Sparrow;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
@@ -36,7 +37,8 @@ namespace Voron.Impl.Scratch
         long PageNumberInDataFile,
         int NumberOfPages,
         int Size,
-        Page PreviousVersion
+        Page PreviousVersion,
+        bool IsDeleted = false
     )
     {
         public unsafe Page ReadPage(LowLevelTransaction tx)
@@ -46,7 +48,9 @@ namespace Voron.Impl.Scratch
         
         public unsafe byte* Read(ref Pager2.PagerTransactionState txState)
         {
-            return File.Pager.AcquirePagePointerWithOverflowHandling(State, ref txState, PositionInScratchBuffer);
+            if (IsDeleted == false) 
+                return File.Pager.AcquirePagePointerWithOverflowHandling(State, ref txState, PositionInScratchBuffer);
+            throw new InvalidOperationException($"Attempt to read page {PageNumberInDataFile} that was deleted");
         }
     }
 }

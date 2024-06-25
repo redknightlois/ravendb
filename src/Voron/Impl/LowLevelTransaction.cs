@@ -475,6 +475,7 @@ namespace Voron.Impl
         {
             var inScratches = Flags switch
             {
+                // here we explicitly don't care about PageFromScratchFile.IsDeleted
                 TransactionFlags.Read => _envRecord.ScratchPagesTable.ContainsKey(pageNumber),
                 TransactionFlags.ReadWrite => _env.WriteTransactionPool.ScratchPagesInUse.ContainsKey(pageNumber),
                 _ => throw new ArgumentOutOfRangeException(nameof(Flags))
