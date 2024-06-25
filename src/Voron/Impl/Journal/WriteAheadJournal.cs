@@ -729,7 +729,7 @@ namespace Voron.Impl.Journal
 
                         try
                         {
-                            UpdateJournalStateUnderWriteTransactionLock(txw, flushedRecord, journalSnapshots);
+                            UpdateJournalStateUnderWriteTransactionLock(txw, lastFlushed, flushedRecord, journalSnapshots);
 
                             if (_waj._logger.IsInfoEnabled)
                                 _waj._logger.Info($"Updated journal state under write tx lock (txId: {txw.Id}) after waiting for {sp.Elapsed}");
@@ -840,6 +840,7 @@ namespace Voron.Impl.Journal
             }
 
             private void UpdateJournalStateUnderWriteTransactionLock(LowLevelTransaction txw, 
+                LastFlushState lastFlushState,
                 EnvironmentStateRecord flushedRecord,
                 List<JournalSnapshot> journalSnapshots)
             {
@@ -876,7 +877,10 @@ namespace Voron.Impl.Journal
                 var scratchBufferPool = _waj._env.ScratchBufferPool;
                 foreach (var (_, pageFromScratchBuffer) in flushedRecord.ScratchPagesTable)
                 {
-                      scratchBufferPool.Free(txw, pageFromScratchBuffer.File.Number, pageFromScratchBuffer.PositionInScratchBuffer);
+                    if(pageFromScratchBuffer.AllocatedInTransaction <= lastFlushState.TransactionId)
+                        continue;
+                    
+                    scratchBufferPool.Free(txw, pageFromScratchBuffer.File.Number, pageFromScratchBuffer.PositionInScratchBuffer);
                 }
             }
 
@@ -1263,8 +1267,11 @@ namespace Voron.Impl.Journal
                     Pager2.PagerTransactionState txState = default;
                     foreach (var (_, pageValue) in record.ScratchPagesTable)
                     {
-                        if(pageValue.IsDeleted)
+                        if (pageValue.IsDeleted)
+                        {
+                            //dataPager.ZeroPage() - hole punching
                             continue;
+                        }
                         
                         var pageHeader = (PageHeader*)pageValue.Read(ref txState);
 
@@ -1288,6 +1295,7 @@ namespace Voron.Impl.Journal
                         {
                             numberOfPages = Pager.GetNumberOfOverflowPages(pageHeader->OverflowSize);
                         }
+                        
                         const int adjustPageSize = (Constants.Storage.PageSize) / (4 * Constants.Size.Kilobyte);
                         dataPager.DirectWrite(ref dataPagerState, ref txState, record.TransactionId,
                             pageHeader->PageNumber * adjustPageSize, 
