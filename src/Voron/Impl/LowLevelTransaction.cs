@@ -450,16 +450,19 @@ namespace Voron.Impl
                 TransactionFlags.Read => _envRecord.ScratchPagesTable.TryGetValue(pageNumber, out value),
                 _ => throw new ArgumentOutOfRangeException(nameof(Flags))
             };
-            Page p = modifiedPage switch
+            Page p;
+            if (modifiedPage is false)
             {
-                true => value.ReadPage(this),
-                false => new Page(DataPager.AcquirePagePointerWithOverflowHandling(DataPagerState, ref PagerTransactionState, pageNumber))
-            };
+                p = new Page(DataPager.AcquirePagePointerWithOverflowHandling(DataPagerState, ref PagerTransactionState, pageNumber));
+                if (_env.Options.Encryption.IsEnabled == false)// When encryption is off, we do validation by checksum
+                    _env.ValidatePageChecksum(pageNumber, (PageHeader*)p.Pointer);
+            }
+            else // if we are reading from the scratch, we don't need to validate, we wrote it in this process run anyway
+            {
+                p = value.ReadPage(this);
+            }
             
             Debug.Assert(p.PageNumber == pageNumber, $"Requested ReadOnly page #{pageNumber}. Got #{p.PageNumber} from data file");
-
-            if (_env.Options.Encryption.IsEnabled == false)// When encryption is off, we do validation by checksum
-                _env.ValidatePageChecksum(pageNumber, (PageHeader*)p.Pointer);
 
             TrackReadOnlyPage(p);
 
@@ -1409,7 +1412,8 @@ namespace Voron.Impl
                 return; 
             }
 
-            if (value != existing)
+            Debug.Assert(value.PageNumberInDataFile == existing.PageNumberInDataFile);
+            if (value.AllocatedInTransaction != existing.AllocatedInTransaction)
                 return; // transaction scratch page is different
 
             _env.WriteTransactionPool.ScratchPagesInUse.Remove(value.PageNumberInDataFile);
