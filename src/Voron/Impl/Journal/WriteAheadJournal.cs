@@ -244,7 +244,7 @@ namespace Voron.Impl.Journal
 
                         lastProcessedJournal = journalNumber;
 
-                        journalReader.Complete(ref dataPagerState, ref txState, lastFlushedTxId);
+                        journalReader.Complete(ref dataPagerState, ref txState);
                             
                         if (journalReader.RequireHeaderUpdate) //this should prevent further load of transactions
                         {
@@ -318,7 +318,7 @@ namespace Voron.Impl.Journal
                         }
                         finally
                         {
-                            state.InvokeDispose(dataPager, dataPagerState, ref state, lastFlushedTxId);
+                            state.InvokeDispose(dataPager, dataPagerState, ref state);
                         }
                     }
 
@@ -532,6 +532,7 @@ namespace Voron.Impl.Journal
 
         public sealed class JournalApplicator : IDisposable
         {
+            private readonly List<PageFromScratchBuffer> _bufferOfPageFromScratchBuffersToFree = new();
             private readonly ConcurrentDictionary<long, JournalFile> _journalsToDelete = new ConcurrentDictionary<long, JournalFile>();
             private readonly object _flushingLock = new object();
             private readonly SemaphoreSlim _fsyncLock = new SemaphoreSlim(1);
@@ -653,10 +654,15 @@ namespace Voron.Impl.Journal
                     // RavenDB-13302: we need to force a re-check this before we make decisions here
                     _waj._env.ActiveTransactions.ForceRecheckingOldestTransactionByFlusherThread();
 
-                    if (_waj._env.GetLatestTransactionToFlush(uptoTxId: _waj._env.ActiveTransactions.OldestTransaction, out var record) == false || 
-                        record.ScratchPagesTable.Count == 0)
+                    if (_waj._env.GetLatestTransactionToFlush(
+                            uptoTxId: _waj._env.ActiveTransactions.OldestTransaction,
+                            _bufferOfPageFromScratchBuffersToFree,
+                            out var record) == false)
+                    {
+                        Debug.Assert(_bufferOfPageFromScratchBuffersToFree.Count == 0);
                         return; // nothing to do
-                    
+                    }
+
                     var jrnls = GetJournalSnapshots();
                     
                     var currentTotalCommittedSinceLastFlushPages = TotalCommittedSinceLastFlushPages;
@@ -694,6 +700,7 @@ namespace Voron.Impl.Journal
                 }
                 finally
                 {
+                    _bufferOfPageFromScratchBuffersToFree.Clear();
                     byteStringContext?.Dispose();
                     if (lockTaken)
                         Monitor.Exit(_flushingLock);
@@ -704,7 +711,7 @@ namespace Voron.Impl.Journal
 
             private void ApplyJournalStateAfterFlush(CancellationToken token,
                 LastFlushState lastFlushed,
-                EnvironmentStateRecord flushedRecord,
+                EnvironmentStateRecord record,
                 List<JournalSnapshot> journalSnapshots,
                 ByteStringContext byteStringContext)
             {
@@ -730,7 +737,7 @@ namespace Voron.Impl.Journal
 
                         try
                         {
-                            UpdateJournalStateUnderWriteTransactionLock(txw, lastFlushed, flushedRecord, journalSnapshots);
+                            UpdateJournalStateUnderWriteTransactionLock(txw,lastFlushed, record, journalSnapshots);
 
                             if (_waj._logger.IsInfoEnabled)
                                 _waj._logger.Info($"Updated journal state under write tx lock (txId: {txw.Id}) after waiting for {sp.Elapsed}");
@@ -876,11 +883,8 @@ namespace Voron.Impl.Journal
                     _waj.CurrentFile = null;
 
                 var scratchBufferPool = _waj._env.ScratchBufferPool;
-                foreach (var (_, pageFromScratchBuffer) in flushedRecord.ScratchPagesTable)
+                foreach (var pageFromScratchBuffer in _bufferOfPageFromScratchBuffersToFree)
                 {
-                    if(pageFromScratchBuffer.AllocatedInTransaction <= lastFlushState.TransactionId)
-                        continue;
-                    
                     scratchBufferPool.Free(txw, pageFromScratchBuffer.File.Number, pageFromScratchBuffer.PositionInScratchBuffer);
                 }
             }
@@ -1287,7 +1291,7 @@ namespace Voron.Impl.Journal
                             }
                             finally
                             {
-                                tempTxState.InvokeDispose(dataPager, dataPagerState, ref tempTxState, record.TransactionId);
+                                tempTxState.InvokeDispose(dataPager, dataPagerState, ref tempTxState);
                             }
                         }
 
@@ -1298,7 +1302,7 @@ namespace Voron.Impl.Journal
                         }
                         
                         const int adjustPageSize = (Constants.Storage.PageSize) / (4 * Constants.Size.Kilobyte);
-                        dataPager.DirectWrite(ref dataPagerState, ref txState, record.TransactionId,
+                        dataPager.DirectWrite(ref dataPagerState, ref txState,
                             pageHeader->PageNumber * adjustPageSize, 
                             numberOfPages * adjustPageSize, 
                             pageValue.Read(ref txState));
@@ -1306,9 +1310,9 @@ namespace Voron.Impl.Journal
                         written += numberOfPages * Constants.Storage.PageSize;
                     }
 
-                    txState.Sync?.Invoke(dataPager, dataPagerState, ref txState, record.TransactionId);
+                    txState.Sync?.Invoke(dataPager, dataPagerState, ref txState);
                         
-                    txState.InvokeDispose(dataPager, dataPagerState, ref txState, record.TransactionId);
+                    txState.InvokeDispose(dataPager, dataPagerState, ref txState);
                         
                     _waj._env.UpdateDataPagerState(dataPagerState);
                     meter.SetFileSize(dataPagerState.TotalAllocatedSize);
@@ -1565,7 +1569,7 @@ namespace Voron.Impl.Journal
                 }
                 finally
                 {
-                    tempTxState.InvokeDispose(_compressionPager, _compressionPagerState, ref tempTxState, tx.Id);
+                    tempTxState.InvokeDispose(_compressionPager, _compressionPagerState, ref tempTxState);
                 }
             }
         }
@@ -1596,7 +1600,7 @@ namespace Voron.Impl.Journal
 
             try
             {
-                _compressionPager.EnsureContinuous(ref _compressionPagerState, 0, pagesRequired, tx.Id);
+                _compressionPager.EnsureContinuous(ref _compressionPagerState, 0, pagesRequired);
             }
             catch (InsufficientMemoryException)
             {
@@ -1693,7 +1697,7 @@ namespace Voron.Impl.Journal
 
                 try
                 {
-                    _compressionPager.EnsureContinuous(ref _compressionPagerState, pagesWritten, outputBufferInPages, tx.Id);
+                    _compressionPager.EnsureContinuous(ref _compressionPagerState, pagesWritten, outputBufferInPages);
                 }
                 catch (InsufficientMemoryException)
                 {
