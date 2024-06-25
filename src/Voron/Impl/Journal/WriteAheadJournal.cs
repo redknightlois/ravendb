@@ -729,7 +729,7 @@ namespace Voron.Impl.Journal
 
                         try
                         {
-                            UpdateJournalStateUnderWriteTransactionLock(txw,lastFlushed, flushedRecord, journalSnapshots);
+                            UpdateJournalStateUnderWriteTransactionLock(txw, flushedRecord, journalSnapshots);
 
                             if (_waj._logger.IsInfoEnabled)
                                 _waj._logger.Info($"Updated journal state under write tx lock (txId: {txw.Id}) after waiting for {sp.Elapsed}");
@@ -840,7 +840,6 @@ namespace Voron.Impl.Journal
             }
 
             private void UpdateJournalStateUnderWriteTransactionLock(LowLevelTransaction txw, 
-                LastFlushState lastFlushed,
                 EnvironmentStateRecord flushedRecord,
                 List<JournalSnapshot> journalSnapshots)
             {
@@ -1264,6 +1263,9 @@ namespace Voron.Impl.Journal
                     Pager2.PagerTransactionState txState = default;
                     foreach (var (_, pageValue) in record.ScratchPagesTable)
                     {
+                        if(pageValue.IsDeleted)
+                            continue;
+                        
                         var pageHeader = (PageHeader*)pageValue.Read(ref txState);
 
                         if (_waj._env.Options.Encryption.IsEnabled == false)
