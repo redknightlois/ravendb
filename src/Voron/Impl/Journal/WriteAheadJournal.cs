@@ -61,7 +61,6 @@ namespace Voron.Impl.Journal
 
         private readonly DiffPages _diffPage = new DiffPages();
         private readonly Logger _logger;
-        private List<JournalSnapshot> _snapshotCache;
 
         private readonly object _writeLock = new object();
         private int _maxNumberOfPagesRequiredForCompressionBuffer;
@@ -481,37 +480,6 @@ namespace Voron.Impl.Journal
         public JournalInfo GetCurrentJournalInfo()
         {
             return _headerAccessor.Get(ptr => ptr->Journal);
-        }
-
-        public List<JournalSnapshot> GetSnapshots()
-        {
-            return _snapshotCache;
-        }
-
-        public void UpdateCacheForJournalSnapshots()
-        {
-            var items = new List<JournalSnapshot>(_files.Count);
-            // ReSharper disable once LoopCanBeConvertedToQuery
-            foreach (var journalFile in _files)
-            {
-                var journalSnapshot = journalFile.GetSnapshot();
-                // we have to hold a reference to the journals for the lifetime of the cache
-                // this call is prevented from running concurrently with GetSnapshots()
-                journalSnapshot.FileInstance.AddRef();
-                items.Add(journalSnapshot);
-            }
-
-            ValidateNoDuplicateJournals(items);
-
-            var old = _snapshotCache;
-            _snapshotCache = items;
-            if (old == null)
-                return;
-
-            foreach (var journalSnapshot in old)
-            {
-                journalSnapshot.FileInstance.Release();// free the old cache reference
-            }
         }
 
         [Conditional("DEBUG")]

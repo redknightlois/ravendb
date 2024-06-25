@@ -956,7 +956,6 @@ namespace Voron
                 State = tx.State;
 
                 Journal.Applicator.OnTransactionCommitted(tx);
-                Journal.UpdateCacheForJournalSnapshots();
 
                 tx.OnAfterCommitWhenNewTransactionsPrevented();
             }
