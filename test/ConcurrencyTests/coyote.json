@@ -1,0 +1,10 @@
+{
+    "AssembliesPath": "bin/Debug/net8.0",
+    "OutputPath": "bin/Debug/net8.0",
+    "Assemblies": [
+        "Sparrow.dll",
+        "Sparrow.Server.dll",
+        "Voron.dll",
+        "ConcurrencyTests.dll"
+    ]
+}
