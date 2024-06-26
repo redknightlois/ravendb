@@ -148,7 +148,7 @@ namespace Voron
                 _currentStateRecordRecord = new EnvironmentStateRecord(
                     dataPagerState,
                     0,
-                    FrozenDictionary<long, PageFromScratchBuffer>.Empty,
+                    new Dictionary<long, PageFromScratchBuffer>(),
                     0,
                     null, 
                     -1);

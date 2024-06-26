@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Frozen;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.CompilerServices;
@@ -1393,9 +1394,9 @@ namespace Voron.Impl
             return _dirtyPages.Contains(p);
         }
 
-        public FrozenDictionary<long, PageFromScratchBuffer> GetPagesInScratch()
+        public Dictionary<long, PageFromScratchBuffer> GetPagesInScratch()
         {
-            return  _env.WriteTransactionPool.ScratchPagesInUse.ToFrozenDictionary();
+            return new Dictionary<long, PageFromScratchBuffer>(_env.WriteTransactionPool.ScratchPagesInUse);
         }
 
         public void ForgetAboutScratchPage(PageFromScratchBuffer value)
