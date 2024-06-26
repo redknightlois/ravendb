@@ -1712,7 +1712,7 @@ namespace Voron
             {
                 // we may want to update the state of the transaction (scratch table, data pager state, etc)
                 // without incrementing the transaction id, since we didn't commit a transaction to the journal
-                -1 => (tx.CurrentStateRecord.TransactionId, tx.CurrentStateRecord.FlushedToJournal),
+                -1 => (tx.CurrentStateRecord.TransactionId - 1, tx.CurrentStateRecord.FlushedToJournal),
                 _ => (tx.Id, tx.FlushedToJournal)
             };
             long nextPageNumber = tx.GetNextPageNumber();
@@ -1731,7 +1731,12 @@ namespace Voron
                 };
                 if (Interlocked.CompareExchange(ref _currentStateRecordRecord, updatedState, currentState) == currentState)
                 {
-                    _transactionsToFlush.Enqueue(updatedState);
+                    // We only want to flush to data pager transactions that have been flushed to the journal.
+                    // Transactions that _haven't_ been flushed are mostly book-keeping (updating scratch table, etc)
+                    if (tx.FlushedToJournal >= 0)  
+                    {
+                        _transactionsToFlush.Enqueue(updatedState);
+                    }
                     break;
                 }
             }

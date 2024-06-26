@@ -218,6 +218,7 @@ namespace Voron.Impl
             {
                 TransactionId = previous._envRecord.TransactionId + 1
             };
+            _localTxNextPageNumber = previous._localTxNextPageNumber;
             
             _env = env;
             _journal = env.Journal;
