@@ -330,7 +330,7 @@ namespace Voron.Impl
         {
             if (_envRecord.Root != null)
             {
-                _root = new Tree(this, null, Constants.RootTreeNameSlice, _envRecord.Root);
+                _root = Tree.GetRoot(this, Constants.RootTreeNameSlice, _envRecord.Root);
             }
         }
 
