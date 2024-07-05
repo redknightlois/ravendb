@@ -37,7 +37,7 @@ using Constants = Voron.Global.Constants;
 
 namespace Voron.Impl
 {
-    public sealed unsafe class LowLevelTransaction : IDisposable, IDisposableQueryable
+    public sealed unsafe class LowLevelTransaction : IDisposable, IDisposableQueryable, INotifyAllocationFailure
     {
         public readonly Pager2 DataPager;
         private readonly StorageEnvironment _env;
@@ -190,7 +190,7 @@ namespace Voron.Impl
             _envRecord = previous._envRecord;
             _freeSpaceHandling = previous._freeSpaceHandling;
             _allocator = allocator ?? new ByteStringContext(SharedMultipleUseFlag.None);
-            _allocator.AllocationFailed += MarkTransactionAsFailed;
+            _allocator.RegisterListener(this);
             _disposeAllocator = allocator == null;
 
             Flags = TransactionFlags.Read;
@@ -238,7 +238,7 @@ namespace Voron.Impl
 
             _allocator = new ByteStringContext(SharedMultipleUseFlag.None);
             _disposeAllocator = true;
-            _allocator.AllocationFailed += MarkTransactionAsFailed;
+            _allocator.RegisterListener(this);
 
             Flags = TransactionFlags.ReadWrite;
 
@@ -274,7 +274,7 @@ namespace Voron.Impl
             _freeSpaceHandling = freeSpaceHandling;
 
             _allocator = context ?? new ByteStringContext(SharedMultipleUseFlag.None);
-            _allocator.AllocationFailed += MarkTransactionAsFailed;
+            _allocator.RegisterListener(this);
             _disposeAllocator = context == null;
 
             _disposeAllocator = context == null;
@@ -744,7 +744,7 @@ namespace Voron.Impl
 
                 _disposableScope.Dispose();
 
-                _allocator.AllocationFailed -= MarkTransactionAsFailed;
+                _allocator.UnregisterListener(this);
               
                 if (_disposeAllocator)
                 {
@@ -760,9 +760,14 @@ namespace Voron.Impl
             }
         }
 
-        public void MarkTransactionAsFailed()
+        internal void MarkTransactionAsFailed()
         {
             _txStatus |= TxStatus.Errored;
+        }
+
+        void INotifyAllocationFailure.OnAllocationFailure<TAllocator>(ByteStringContext<TAllocator> context)
+        {
+            MarkTransactionAsFailed();
         }
 
         internal void FreePageOnCommit(long pageNumber)
