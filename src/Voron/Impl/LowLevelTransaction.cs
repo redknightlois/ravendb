@@ -25,6 +25,8 @@ using Voron.Impl.Paging;
 using Voron.Impl.Scratch;
 using Voron.Debugging;
 using Voron.Util;
+using static Sparrow.DisposableExceptions;
+using static Sparrow.PortableExceptions;
 
 #if DEBUG
 using System.Linq; // Needed in DEBUG
@@ -440,7 +442,7 @@ namespace Voron.Impl
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public Page GetPage(long pageNumber)
         {
-            if (_txStatus != TxStatus.None)
+            if (IsValid == false)
                 ThrowObjectDisposed();
 
             if (_pageLocator.TryGetReadOnlyPage(pageNumber, out Page result))
@@ -456,7 +458,7 @@ namespace Voron.Impl
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public Page GetPageWithoutCache(long pageNumber)
         {
-            if (_txStatus != TxStatus.None)
+            if (IsValid == false)
                 ThrowObjectDisposed();
 
             return GetPageInternal(pageNumber);
@@ -513,13 +515,9 @@ namespace Voron.Impl
 
         private void ThrowObjectDisposed()
         {
-            if (_txStatus.HasFlag(TxStatus.Disposed))
-                throw new ObjectDisposedException("Transaction is already disposed");
-
-            if (_txStatus.HasFlag(TxStatus.Errored))
-                throw new InvalidDataException("The transaction is in error state, and cannot be used further");
-
-            throw new ObjectDisposedException("Transaction state is invalid: " + _txStatus);
+            ThrowIf<ObjectDisposedException>(IsDisposed, "Transaction is already disposed");
+            ThrowIf<InvalidDataException>(HasErrors, "The transaction is in error state, and cannot be used further");
+            Throw<ObjectDisposedException>($"Transaction state is invalid: {_txStatus}");
         }
 
         public Page AllocatePage(int numberOfPages, long? pageNumber = null, Page? previousPage = null, bool zeroPage = true)
@@ -590,7 +588,7 @@ namespace Voron.Impl
 
         private Page AllocatePageImpl(int numberOfPages, long pageNumber, Page? previousVersion, bool zeroPage)
         {
-            if (_txStatus != TxStatus.None)
+            if (IsValid == false)
                 ThrowObjectDisposed();
 
             try
@@ -655,7 +653,7 @@ namespace Voron.Impl
 
         internal void ShrinkOverflowPage(long pageNumber, int newSize, TreeMutableState treeState)
         {
-            if (_txStatus != TxStatus.None)
+            if (IsValid == false)
                 ThrowObjectDisposed();
 
             if (_env.WriteTransactionPool.ScratchPagesInUse.TryGetValue(pageNumber, out PageFromScratchBuffer value) == false)
@@ -705,9 +703,11 @@ namespace Voron.Impl
 
 
         public bool IsValid => _txStatus == TxStatus.None;
-        
+
         public bool IsDisposed => _txStatus.HasFlag(TxStatus.Disposed);
 
+        public bool HasErrors => _txStatus.HasFlag(TxStatus.Errored);
+        
         public int CurrentTransactionIdHolder { get; set; }
         
         public PageLocator PageLocator => _pageLocator;
@@ -722,7 +722,7 @@ namespace Voron.Impl
 
         public void Dispose()
         {
-            if (_txStatus.HasFlag(TxStatus.Disposed))
+            if (IsDisposed)
                 return;
 
             EnsureDisposeOfWriteTxIsOnTheSameThreadThatCreatedIt();
@@ -793,7 +793,7 @@ namespace Voron.Impl
 
         public void FreePage(long pageNumber)
         {
-            if (_txStatus != TxStatus.None)
+            if (IsValid == false)
                 ThrowObjectDisposed();
 
             try
@@ -1018,7 +1018,7 @@ namespace Voron.Impl
 
         private void CommitStage1_CompleteTransaction()
         {
-            if (_txStatus != TxStatus.None)
+            if (IsValid == false)
                 ThrowObjectDisposed();
 
             if (Committed)
@@ -1106,9 +1106,8 @@ namespace Voron.Impl
         public void Rollback()
         {
             // here we allow rolling back of errored transaction
-            if (_txStatus.HasFlag(TxStatus.Disposed))
+            if (IsDisposed)
                 ThrowObjectDisposed();
-
 
             if (Committed || RolledBack || Flags != (TransactionFlags.ReadWrite))
                 return;
