@@ -5,6 +5,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using Sparrow;
 
 namespace Voron.Data.BTrees
@@ -73,27 +74,75 @@ namespace Voron.Data.BTrees
             Unsafe.CopyBlock(ref pathSequence[0], in MemoryMarshal.Cast<long, byte>(cursorPath)[0], (uint)cursorPath.Length * sizeof(long));
         }
 
-        public int CompareFirstKey(ReadOnlySpan<byte> key)
+        private static ReadOnlySpan<byte> LoadTable256 => new byte[]
         {
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        };
+
+        public int CompareFirstKey(ReadOnlySpan<byte> key, Vector256<byte> fingerprint)
+        {
+            ref readonly byte firstKeyStart = ref KeyStorage[0];
+
             int x1Length = key.Length;
             int y1Length = FirstKeyLength;
+            var length = Math.Min(x1Length, y1Length);
+            if (length <= Vector256<byte>.Count)
+            {
+                var lengthMask = Vector256.LoadUnsafe(in MemoryMarshal.AsRef<byte>(LoadTable256), (uint)(Vector256<byte>.Count - length));
 
-            ref readonly byte firstKeyStart = ref KeyStorage[0];
-            ref readonly byte keyStart = ref key[0];
-            var r = Memory.CompareInline(in keyStart, in firstKeyStart, Math.Min(x1Length, y1Length));
+                var storageFingerprint = Vector256.BitwiseAnd(Vector256.LoadUnsafe(in firstKeyStart), lengthMask);
+                fingerprint = Vector256.BitwiseAnd(fingerprint, lengthMask);
+                
+                var matches = (uint)PortableIntrinsics.MoveMask(
+                    Vector256.Equals(fingerprint, storageFingerprint)
+                );
 
+                if (matches == uint.MaxValue)
+                    return 0;
+                
+                // We invert matches to find differences, which are found in the bit-flag.
+                // We then add offset of first difference to the keys in order to check that specific byte.
+                var bytesToAdvance = BitOperations.TrailingZeroCount(~matches);
+                return key[bytesToAdvance] - KeyStorage[bytesToAdvance];
+            }
+
+            var r = Memory.CompareInline(in key[0], in firstKeyStart, length);
             return r != 0 ? r : x1Length - y1Length;
         }
 
-        public int CompareLastKey(ReadOnlySpan<byte> key)
+        public int CompareLastKey(ReadOnlySpan<byte> key, Vector256<byte> fingerprint)
         {
             int x1Length = key.Length;
             int y1Length = LastKeyLength;
 
-            ref readonly byte firstKeyStart = ref KeyStorage[FirstKeyLength];
+            ref readonly byte lastKeyStart = ref KeyStorage[FirstKeyLength];
             ref readonly byte keyStart = ref key[0];
-            var r = Memory.CompareInline(in keyStart, in firstKeyStart, Math.Min(x1Length, y1Length));
+            
+            var length = Math.Min(x1Length, y1Length);
+            if (length < Vector256<byte>.Count)
+            {
+                var lengthMask = Vector256.LoadUnsafe(in MemoryMarshal.AsRef<byte>(LoadTable256), (uint)(Vector256<byte>.Count - length));
 
+                var storageFingerprint = Vector256.BitwiseAnd(Vector256.LoadUnsafe(in lastKeyStart), lengthMask);
+                fingerprint = Vector256.BitwiseAnd(fingerprint, lengthMask);
+
+                var matches = (uint)PortableIntrinsics.MoveMask(
+                    Vector256.Equals(fingerprint, storageFingerprint)
+                );
+
+                if (matches == uint.MaxValue)
+                    return 0;
+
+                // We invert matches to find differences, which are found in the bit-flag.
+                // We then add offset of first difference to the keys in order to check that specific byte.
+                var bytesToAdvance = BitOperations.TrailingZeroCount(~matches);
+                return key[bytesToAdvance] - KeyStorage[FirstKeyLength + bytesToAdvance];
+            }
+
+            var r = Memory.CompareInline(in keyStart, in lastKeyStart, length);
             return r != 0 ? r : x1Length - y1Length;
         }
     }
@@ -115,17 +164,95 @@ namespace Voron.Data.BTrees
 
         public bool TryFind(Slice key, out FoundTreePageDescriptor foundPage)
         {
-            return TryFind(key.Options, key.AsReadOnlySpan(), out foundPage);
+            Debug.Assert(_currentGeneration > 0);
+            Debug.Assert(_pageDescriptors.Length == CacheSize);
+
+            // We do not require to initialize this.
+            Unsafe.SkipInit(out foundPage);
+
+            uint location = FindMatchingByGeneration(_currentGeneration);
+            if (location == 0)
+                return false; // Early skip, we don't need to do anything
+
+            var keyOption = key.Options;
+            if (keyOption == SliceOptions.Key)
+            {
+                Vector256<byte> fingerprint;
+                
+                // We are going to look at the actual memory allocated, if it is big enough
+                // we are going to use the fingerprint method anyways, even if it is garbage
+                var physicalSize = key.Content.Length;
+                var physicalPtr = key.Content.Ptr;
+                if (physicalSize >= Vector256<byte>.Count)
+                {
+                    // We are loading the fingerprint into a register directly
+                    fingerprint = Vector256.Load(physicalPtr);
+                }
+                else if (physicalSize >= Vector128<byte>.Count)
+                {
+                    int loadShift = physicalSize - Vector128<byte>.Count;
+                    fingerprint = Vector256.Create(
+                        Vector128.Load(physicalPtr),
+                        Vector128.ShiftLeft(Vector128.Load(physicalPtr + loadShift), Vector128<byte>.Count - loadShift)
+                    ); 
+                }
+                else
+                {
+                    // We are screwed. We need to do some work for longer keys. 
+                    // PERF: We may be able to do something when AVX512 is available though using Masked Loads.
+                    var storage = stackalloc byte[Vector128<byte>.Count];
+                    for (int i = 0; i < Vector128<byte>.Count; i++)
+                    {
+                        // PERF: The idea is to maybe get the JIT to emit cmov operations here. 
+                        storage[i] = i < physicalSize ? *(physicalPtr + int.Min(i, physicalSize)) : (byte)0;
+                    }
+                    fingerprint = Vector256.Create(
+                        Vector128.Load(storage),
+                        Vector128<byte>.Zero
+                    );
+                }
+
+                return TryFindWithKey(location, key, fingerprint, out foundPage);
+            }
+
+            return TryFindNoKey(location, keyOption, out foundPage);
         }
 
-        public bool TryFind(SliceOptions keyOption, ReadOnlySpan<byte> key, out FoundTreePageDescriptor foundPage)
+        private bool TryFindWithKey(uint location, ReadOnlySpan<byte> key, Vector256<byte> fingerprint, out FoundTreePageDescriptor foundPage)
+        {
+            var descriptors = _pageDescriptors;
+
+            int i = -1;
+            while (location != 0)
+            {
+                // We will find the next matching item in the cache and advance the pointer to its rightful place.
+                int advance = BitOperations.TrailingZeroCount(location) + 1;
+                i += advance;
+
+                // We will advance the bitmask to the location. If there are no more, it will be zero and fail
+                // the re-entry check on the while loop. 
+                location >>= advance;
+
+                ref var current = ref descriptors[i];
+                if (current.FirstKeyOptions != SliceOptions.BeforeAllKeys && current.CompareFirstKey(key, fingerprint) < 0)
+                    continue;
+                if (current.LastKeyOptions != SliceOptions.AfterAllKeys && current.CompareLastKey(key, fingerprint) > 0)
+                    continue;
+
+                foundPage = current;
+                return true;
+            }
+
+            Unsafe.SkipInit(out foundPage);
+            return false;
+        }
+        
+        private bool TryFindNoKey(uint location, SliceOptions keyOption, out FoundTreePageDescriptor foundPage)
         {
             Debug.Assert(_currentGeneration > 0);
             Debug.Assert(_pageDescriptors.Length == CacheSize);
 
             var descriptors = _pageDescriptors;
-
-            uint location = FindMatchingByGeneration(_currentGeneration);
 
             int i = -1;
             while (location != 0)
@@ -140,31 +267,17 @@ namespace Voron.Data.BTrees
 
                 ref var current = ref descriptors[i];
 
-                switch (keyOption)
-                {
-                    case SliceOptions.Key:
-                        if (current.FirstKeyOptions != SliceOptions.BeforeAllKeys && current.CompareFirstKey(key) < 0)
-                            break;
-                        if (current.LastKeyOptions != SliceOptions.AfterAllKeys && current.CompareLastKey(key) > 0)
-                            break;
+                var firstKeyOption = current.FirstKeyOptions;
+                var lastKeyOption = current.LastKeyOptions;
 
+                switch (keyOption, firstKeyOption, lastKeyOption)
+                {
+                    case (SliceOptions.BeforeAllKeys, SliceOptions.BeforeAllKeys, _):
+                    case (SliceOptions.AfterAllKeys, _, SliceOptions.AfterAllKeys):
                         foundPage = current;
                         return true;
-                    case SliceOptions.BeforeAllKeys:
-                        if (current.FirstKeyOptions == SliceOptions.BeforeAllKeys)
-                        {
-                            foundPage = current;
-                            return true;
-                        }
-                        break;
-                    case SliceOptions.AfterAllKeys:
-                        if (current.LastKeyOptions == SliceOptions.AfterAllKeys)
-                        {
-                            foundPage = current;
-                            return true;
-                        }
-
-                        break;
+                    default:
+                        continue;
                 }
             }
 
