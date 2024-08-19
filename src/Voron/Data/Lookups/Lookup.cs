@@ -10,6 +10,7 @@ using Sparrow.Server;
 using Voron.Data.BTrees;
 using Voron.Data.CompactTrees;
 using Voron.Debugging;
+using Voron.Exceptions;
 using Voron.Global;
 using Voron.Impl;
 namespace Voron.Data.Lookups;
@@ -579,18 +580,31 @@ public sealed unsafe partial class Lookup<TLookupKey> : IPrepareForCommit
         }
     }
     
+    private const int ThresholdForMultiHopDetection = 1000000;
+    
     private (long key, long childValue) GetFirstActualKeyAndValue(LookupPageHeader* src)
     {
         Debug.Assert(src->IsBranch,"destination->IsBranch");
 
         DecodeEntry(src, 0, out _, out var childValue);
 
+        int depth = 0;
+        
         var child = src;
         while (child->IsBranch)
         {
             DecodeEntry(src, 0, out _, out var pg);
             var childPage = _llt.GetPage(pg);
-            child = (LookupPageHeader*)childPage.Pointer;
+
+            var childPageHeader = (LookupPageHeader*)childPage.Pointer;
+            if (childPageHeader->PageNumber == child->PageNumber)
+                VoronUnrecoverableErrorException.Raise(_llt, "Child page number cannot be the same as parent, there is a loop.");
+            if (depth > ThresholdForMultiHopDetection)
+                VoronUnrecoverableErrorException.Raise(_llt, "The depth of the tree is so big that the only explanation is a multi-hop loop in the data.");
+            
+            child = childPageHeader;
+
+            depth++;
         }
         DecodeEntry(child, 0, out var key, out _);
 

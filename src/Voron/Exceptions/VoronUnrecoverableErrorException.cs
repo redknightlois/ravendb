@@ -56,7 +56,7 @@ namespace Voron.Exceptions
                 throw;
             }
         }
-
+        
         public static void Raise(StorageEnvironment env, string message, Exception inner)
         {
             try
