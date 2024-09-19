@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using Raven.Server.Routing;
 using Sparrow;
 using Sparrow.Server.Utils;
 using Xunit;
@@ -16,15 +17,16 @@ namespace FastTests.Sparrow
         [Fact]
         public void CanComputeNoDifference()
         {
-
             var fst = new byte[4096];
             var sec = new byte[4096];
+            var trd = new byte[4096];
 
             new Random().NextBytes(fst);
             Buffer.BlockCopy(fst, 0, sec, 0, fst.Length);
 
             fixed (byte* one = fst)
             fixed (byte* two = sec)
+            fixed (byte* tri = trd)
             fixed (byte* tmp = new byte[4096])
             {
                 var diffPages = new DiffPages
@@ -36,6 +38,18 @@ namespace FastTests.Sparrow
 
                 Assert.True(diffPages.IsDiff);
                 Assert.Equal(0, diffPages.OutputSize);
+
+                Memory.Copy(tri, one, 4096);
+                new DiffApplier
+                {
+                    Destination = tri,
+                    Diff = tmp,
+                    Size = 4096,
+                    DiffSize = diffPages.OutputSize
+                }.Apply(false);
+
+                var result = Memory.Compare(tri, two, 4096);
+                Assert.Equal(0, result);
             }
         }
 
@@ -44,15 +58,18 @@ namespace FastTests.Sparrow
         {
             var fst = new byte[4096];
             var sec = new byte[4096];
+            var trd = new byte[4096];
 
             new Random().NextBytes(fst);
             Buffer.BlockCopy(fst, 0, sec, 0, fst.Length);
+            Buffer.BlockCopy(fst, 0, trd, 0, fst.Length);
 
-            sec[12] ++;
+            sec[12]++;
             sec[433]++;
 
             fixed (byte* one = fst)
             fixed (byte* two = sec)
+            fixed (byte* tri = trd)
             fixed (byte* tmp = new byte[4096])
             {
                 var diffPages = new DiffPages
@@ -62,7 +79,18 @@ namespace FastTests.Sparrow
 
                 diffPages.ComputeDiff(one, two, 4096);
 
-                Assert.Equal(96, diffPages.OutputSize);
+                Assert.True(diffPages.IsDiff);
+
+                new DiffApplier
+                {
+                    Destination = tri,
+                    Diff = tmp,
+                    Size = 4096,
+                    DiffSize = diffPages.OutputSize
+                }.Apply(false);
+
+                var result = Memory.Compare(tri, two, 4096);
+                Assert.Equal(0, result);
             }
         }
 
@@ -99,6 +127,7 @@ namespace FastTests.Sparrow
 
             new Random().NextBytes(fst);
             Buffer.BlockCopy(fst, 0, sec, 0, fst.Length);
+            Buffer.BlockCopy(fst, 0, trd, 0, fst.Length);
 
             sec[12]++;
             sec[433]++;
@@ -116,7 +145,6 @@ namespace FastTests.Sparrow
                 diffPages.ComputeDiff(one, two, 4096);
                 Assert.True(diffPages.IsDiff);
 
-                Memory.Copy(tri, one, 4096);
                 new DiffApplier
                 {
                     Destination = tri,
@@ -155,12 +183,15 @@ namespace FastTests.Sparrow
         [MemberData(nameof(ChangedBytes))]
         public void CanComputeSmallDifference_AndThenApplyOnBig(int value)
         {
-            var fst = new byte[4096 * 4];
-            var sec = new byte[4096 * 4];
-            var trd = new byte[4096 * 4];
+            const int Size = 4096 * 4;
+            
+            var fst = new byte[Size];
+            var sec = new byte[Size];
+            var trd = new byte[Size];
 
             new Random().NextBytes(fst);
-            Buffer.BlockCopy(fst, 0, sec, 0, fst.Length);
+            Buffer.BlockCopy(fst, 0, sec, 0, Size);
+            Buffer.BlockCopy(fst, 0, trd, 0, Size);
 
             sec[value]++;
 
@@ -174,19 +205,18 @@ namespace FastTests.Sparrow
                     Output = tmp,
                 };
 
-                diffPages.ComputeDiff(one, two, 4096);
+                diffPages.ComputeDiff(one, two, Size);
                 Assert.True(diffPages.IsDiff);
 
-                Memory.Copy(tri, one, 4096);
                 new DiffApplier
                 {
                     Destination = tri,
                     Diff = tmp,
-                    Size = 4096,
+                    Size = Size,
                     DiffSize = diffPages.OutputSize
                 }.Apply(false);
 
-                var result = Memory.Compare(tri, two, 4096);
+                var result = Memory.Compare(tri, two, Size);
                 Assert.Equal(0, result);
             }
         }
@@ -202,7 +232,8 @@ namespace FastTests.Sparrow
 
             var rnd = new Random(1337);
             rnd.NextBytes(fst);
-            Buffer.BlockCopy(fst, 0, sec, 0, fst.Length);
+            Buffer.BlockCopy(fst, 0, sec, 0, Size);
+            Buffer.BlockCopy(fst, 0, trd, 0, Size);
 
             fixed (byte* one = fst)
             fixed (byte* two = sec)
@@ -220,12 +251,9 @@ namespace FastTests.Sparrow
                         Output = tmp,
                     };
 
-                    Memory.Set(tri, 0, Size);
                     Memory.Set(tmp, 0, Size);
 
                     diffPages.ComputeDiff(one, two, Size);
-                    if (!diffPages.IsDiff)
-                        return;
 
                     Memory.Copy(tri, one, Size);
                     new DiffApplier

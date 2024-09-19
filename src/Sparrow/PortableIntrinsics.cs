@@ -1,10 +1,13 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading.Tasks;
+using System.Numerics;
+using System.Runtime.CompilerServices;
+using Sparrow.Json;
 
 #if NET6_0_OR_GREATER     
 using System.Runtime.Intrinsics;
@@ -39,13 +42,13 @@ namespace Sparrow
         ///   version with the same behavior on Intel and ARM; even if it is at the expense of performance in this case.
         /// </remarks>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static int MoveMask(in Vector256<byte> input)
+        public static uint MoveMask(in Vector256<byte> input)
         {
             if (Avx2.IsSupported)
-                return Avx2.MoveMask(input);
+                return (uint)Avx2.MoveMask(input);
             
             if (AdvSimd.IsSupported)
-                return MoveMaskAdvSimd(in input);
+                return (uint)MoveMaskAdvSimd(in input);
             
             throw new NotSupportedException($"{nameof(MoveMask)} is not supported on this architecture");
         }
@@ -118,6 +121,7 @@ namespace Sparrow
 
         private static readonly Vector128<sbyte> Shift128 = Vector128.Create(-7, -6, -5, -4, -3, -2, -1, 0, -7, -6, -5, -4, -3, -2, -1, 0);
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static int MoveMaskAdvSimd(in Vector128<byte> input)
         {
             Debug.Assert(AdvSimd.IsSupported);
@@ -139,8 +143,90 @@ namespace Sparrow
             output |= reduced32.GetElement(1) << 8;
             return (int)output;
         }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static bool TestZ(Vector128<byte> i1, Vector128<byte> i2)
+        {
+            if (Sse41.IsSupported)
+                return Sse41.TestZ(i1, i2);
+
+            if (AdvSimd.IsSupported)
+            {
+                // Perform bitwise AND
+                Vector128<byte> andResult = AdvSimd.And(i1, i2);
+
+                // Check if all elements in andLower and andUpper are zero
+                return AdvSimd.Arm64.AddAcross(andResult).ToScalar() == 0;
+            }
+
+            throw new NotSupportedException($"{nameof(MoveMask)} is not supported on this architecture");
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static bool TestZ(Vector256<byte> i1, Vector256<byte> i2)
+        {
+            if (Avx.IsSupported)
+                return Avx.TestZ(i1, i2);
+
+            if (AdvSimd.IsSupported)
+            {
+                // Perform bitwise AND
+                Vector128<byte> andLower = AdvSimd.And(i1.GetLower(), i2.GetLower());
+                Vector128<byte> andUpper = AdvSimd.And(i1.GetUpper(), i2.GetUpper());
+
+                // Check if all elements in andLower and andUpper are zero
+                int result = AdvSimd.Arm64.AddAcross(andLower).ToScalar() + AdvSimd.Arm64.AddAcross(andUpper).ToScalar();
+                return result == 0;
+            }
+
+            throw new NotSupportedException($"{nameof(MoveMask)} is not supported on this architecture");
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static unsafe void Prefetch0(byte* originalPtr)
+        {
+            if (Sse.IsSupported)
+                Sse.Prefetch0(originalPtr);
+        }
 #endif
 
+#if NET8_0_OR_GREATER
+        /// <summary>
+        /// Computes a mask from the most significant bits of the bytes in the input vector.
+        /// The mask is formed by taking the most significant bit of each byte in the input vector
+        /// and setting the corresponding bit in the result. 
+        /// </summary>
+        /// <param name="input">The input vector of bytes.</param>
+        /// <returns>An integer where each bit represents the most significant bit of the corresponding byte in the input vector.</returns>
+        /// <exception cref="NotSupportedException">Thrown if neither SSE2 nor AdvSimd is supported on the current architecture.</exception>
+        /// <remarks>
+        /// This method relies on specific CPU instructions for efficient computation of the mask:
+        /// 1. If AVX2 is supported, the __mm256_movemask_epi8 method is used.
+        /// 2. If AdvSimd (Advanced SIMD) is supported, the emulation method is used.
+        /// 
+        /// Assumptions and Limitations:
+        /// - The input vector is assumed to be 512 bits (64 bytes) long.
+        /// - The input vector gets converted into 2x256 bits and use the uint MoveMask
+        /// - The implementation for AdvSimd is limited by the vector size and performance of pairwise
+        ///   widening operations which might not be optimal for all architectures
+        /// - While it could be possible to avoid the usage of the shift operation, we are looking into a portable
+        ///   version with the same behavior on Intel and ARM; even if it is at the expense of performance in this case.
+        /// </remarks>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static ulong MoveMask(in Vector512<byte> input)
+        {
+            // Split the Vector512 into two Vector256
+            Vector256<byte> lower = input.GetLower();
+            Vector256<byte> upper = input.GetUpper();
 
+            return ((ulong)MoveMask(upper) << 32) | MoveMask(lower);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static bool TestZ(Vector512<byte> i1, Vector512<byte> i2)
+        {
+            return TestZ(i1.GetLower(), i2.GetLower()) && TestZ(i1.GetUpper(), i2.GetUpper());
+        }
+#endif
     }
 }

@@ -20,6 +20,7 @@ using Microsoft.Diagnostics.Tracing.Parsers.MicrosoftAntimalwareEngine;
 using NLog;
 using RachisTests;
 using SlowTests.SlowTests.MailingList;
+using FastTests.Voron.Journal;
 
 namespace Tryouts;
 
@@ -41,16 +42,17 @@ public static class Program
             try
             {
                 using (var testOutputHelper = new ConsoleTestOutputHelper())
-                using (var test = new Jalchr3(testOutputHelper))
+                using (var test = new AdvDiffPagesTests(testOutputHelper))
                 {
                     DebuggerAttachedTimeout.DisableLongTimespan = true;
                    
-                    test.Streaming_documents_will_respect_the_sorting_order(
-                        new RavenTestParameters
-                        {
-                            DatabaseMode = RavenDatabaseMode.Single, 
-                            SearchEngine = RavenSearchEngineMode.Lucene
-                        });
+                    test.ComputeAndThenApplyRandomized();
+                    //test.Streaming_documents_will_respect_the_sorting_order(
+                    //    new RavenTestParameters
+                    //    {
+                    //        DatabaseMode = RavenDatabaseMode.Single, 
+                    //        SearchEngine = RavenSearchEngineMode.Lucene
+                    //    });
                 }
             }
             catch (Exception e)

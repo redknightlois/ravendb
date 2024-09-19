@@ -159,6 +159,16 @@ namespace Sparrow.Compression
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static unsafe (T, T) Read2<T>(byte* buffer, out int len, int pos = 0) where T : unmanaged
+        {
+            T one = Read<T>(buffer + pos, out int fst);
+            T two = Read<T>(buffer + pos + fst, out int snd);
+
+            len = fst + snd;
+            return (one, two);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static unsafe T Read<T>(byte* input, out int offset, out bool success) where T : unmanaged
         {
             if (typeof(T) == typeof(sbyte) || typeof(T) == typeof(byte) || typeof(T) == typeof(bool))

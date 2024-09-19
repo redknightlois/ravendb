@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Runtime.Intrinsics.X86;
 using BenchmarkDotNet.Running;
+using Micro.Benchmark.Benchmarks.Hardware;
 using Micro.Benchmark.Benchmarks.LZ4;
 
 namespace Micro.Benchmark
@@ -17,9 +18,15 @@ namespace Micro.Benchmark
             Console.WriteLine($"{nameof(Avx)} support: {Avx.IsSupported}");
             Console.WriteLine($"{nameof(Avx2)} support: {Avx2.IsSupported}");
 
-            var test = new ZstdPageBenchmark();
+
+            var test = new DiffNonZeroes();
             test.Setup();
-            test.Zstd();
+            Console.WriteLine($"AdvDiff: {test.Current_AdvDiff()}");
+            Console.WriteLine($"Diff: {test.Current_Sequential()}");
+            //for (int i = 0; i < 100000; i++)
+            //{
+            //    test.Current_Sequential();
+            //}
 
             BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(args);
         }

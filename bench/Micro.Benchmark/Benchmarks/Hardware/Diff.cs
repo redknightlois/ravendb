@@ -16,6 +16,7 @@ using Sparrow;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
 using Sparrow.Server.Utils;
+using Voron.Impl.Journal;
 using NativeMemory = Sparrow.Utils.NativeMemory;
 
 namespace Micro.Benchmark.Benchmarks.Hardware
@@ -32,7 +33,7 @@ namespace Micro.Benchmark.Benchmarks.Hardware
                 {
                     Environment =
                     {
-                        Runtime = CoreRuntime.Core22,
+                        Runtime = CoreRuntime.Core80,
                         Platform = Platform.X64,
                         Jit = Jit.RyuJit
                     }
@@ -107,249 +108,257 @@ namespace Micro.Benchmark.Benchmarks.Hardware
             };
         }
 
-        [Benchmark]
-        public void Current_Sequential()
+        [Benchmark(Baseline = true)]
+        public long Current_Sequential()
         {
             _current.ComputeDiff(source, modified, size);
+            return _current.OutputSize;
         }
 
         [Benchmark]
-        public void Naive_Sequential()
+        public long Current_AdvDiff()
         {
-            original.ComputeNaive_Diff(source, modified, size);
+            var diff = new AdvPageDiff();
+            return diff.ComputeDiff(source, modified, destination, size, out _);
         }
 
-        [Benchmark]
-        public void Naive_8bytes_Sequential()
-        {
-            original.ComputeNaive_8Bytes_Diff(source, modified, size);
-        }
+        //[Benchmark]
+        //public void Naive_Sequential()
+        //{
+        //    original.ComputeNaive_Diff(source, modified, size);
+        //}
 
-        [Benchmark]
-        public void Naive_16bytes_Sequential()
-        {
-            original.ComputeNaive_16Bytes_Diff(source, modified, size);
-        }
+        //[Benchmark]
+        //public void Naive_8bytes_Sequential()
+        //{
+        //    original.ComputeNaive_8Bytes_Diff(source, modified, size);
+        //}
 
-        [Benchmark]
-        public void Naive_32bytes_Sequential()
-        {
-            original.ComputeNaive_32Bytes_Diff(source, modified, size);
-        }
+        //[Benchmark]
+        //public void Naive_16bytes_Sequential()
+        //{
+        //    original.ComputeNaive_16Bytes_Diff(source, modified, size);
+        //}
 
-        [Benchmark]
-        public void Naive_32bytes_WithPrefetch_Sequential()
-        {
-            original.ComputeNaive_32Bytes_WithPrefetch_Diff(source, modified, size);
-        }
+        //[Benchmark]
+        //public void Naive_32bytes_Sequential()
+        //{
+        //    original.ComputeNaive_32Bytes_Diff(source, modified, size);
+        //}
 
-        [Benchmark]
-        public void Naive_32bytes_WithPrefetch_Indirect_Sequential()
-        {
-            original.ComputeWord_32Bytes_WithPrefetch_Indirect_Diff(source, modified, size);
-        }
+        //[Benchmark]
+        //public void Naive_32bytes_WithPrefetch_Sequential()
+        //{
+        //    original.ComputeNaive_32Bytes_WithPrefetch_Diff(source, modified, size);
+        //}
 
-        [Benchmark]
-        public void Naive_32bytes_WithPrefetch_Alt_Indirect_Sequential()
-        {
-            original.ComputeWord_32Bytes_WithPrefetch_Alt_Indirect_Diff(source, modified, size);
-        }
+        //[Benchmark]
+        //public void Naive_32bytes_WithPrefetch_Indirect_Sequential()
+        //{
+        //    original.ComputeWord_32Bytes_WithPrefetch_Indirect_Diff(source, modified, size);
+        //}
 
-        [Benchmark]
-        public void ComputeWord_32Bytes_WithPrefetch_Indirect_WholeBlock_Diff()
-        {
-            original.ComputeWord_32Bytes_WithPrefetch_Indirect_WholeBlock_Diff(source, modified, size);
-        }
+        //[Benchmark]
+        //public void Naive_32bytes_WithPrefetch_Alt_Indirect_Sequential()
+        //{
+        //    original.ComputeWord_32Bytes_WithPrefetch_Alt_Indirect_Diff(source, modified, size);
+        //}
 
-        [Benchmark]
-        public void Naive_32bytes_WithPrefetch_Indirect_NoCount_Sequential()
-        {
-            original.ComputeWord_32Bytes_WithPrefetch_Indirect_NoCount_Diff(source, modified, size);
-        }
+        //[Benchmark]
+        //public void ComputeWord_32Bytes_WithPrefetch_Indirect_WholeBlock_Diff()
+        //{
+        //    original.ComputeWord_32Bytes_WithPrefetch_Indirect_WholeBlock_Diff(source, modified, size);
+        //}
 
-        [Benchmark]
-        public void Naive_32bytes_WithPrefetch_Indirect_NoCount_StreamedLayout_Sequential()
-        {
-            original.ComputeWord_32Bytes_WithPrefetch_Indirect_NoCount_StreamedLayout_Diff(source, modified, size);
-        }
+        //[Benchmark]
+        //public void Naive_32bytes_WithPrefetch_Indirect_NoCount_Sequential()
+        //{
+        //    original.ComputeWord_32Bytes_WithPrefetch_Indirect_NoCount_Diff(source, modified, size);
+        //}
 
-        [Benchmark(Baseline = true)]
-        public void Naive_32Bytes_WithPrefetch_Indirect_NoCount_StreamedLayout_While_Diff()
-        {
-            original.ComputeWord_32Bytes_WithPrefetch_Indirect_NoCount_StreamedLayout_While_Diff(source, modified, size);
-        }
+        //[Benchmark]
+        //public void Naive_32bytes_WithPrefetch_Indirect_NoCount_StreamedLayout_Sequential()
+        //{
+        //    original.ComputeWord_32Bytes_WithPrefetch_Indirect_NoCount_StreamedLayout_Diff(source, modified, size);
+        //}
 
-        [Benchmark]
-        public void Naive_32Bytes_WithPrefetch_Indirect_NoCount_StreamedLayout_While_NonTemporal_Diff()
-        {
-            original.ComputeWord_32Bytes_WithPrefetch_Indirect_NoCount_StreamedLayout_While_NonTemporal_Diff(source, modified, size);
-        }
+        //[Benchmark]
+        //public void Naive_32Bytes_WithPrefetch_Indirect_NoCount_StreamedLayout_While_Diff()
+        //{
+        //    original.ComputeWord_32Bytes_WithPrefetch_Indirect_NoCount_StreamedLayout_While_Diff(source, modified, size);
+        //}
 
-        [Benchmark]
-        public void ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Avx_Layout_NoFastPath_WithPrefetch_Sequential()
-        {
-            original.ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Avx_Layout_NoFastPath_WithPrefetch(source, modified, size);
-        }
+        //[Benchmark]
+        //public void Naive_32Bytes_WithPrefetch_Indirect_NoCount_StreamedLayout_While_NonTemporal_Diff()
+        //{
+        //    original.ComputeWord_32Bytes_WithPrefetch_Indirect_NoCount_StreamedLayout_While_NonTemporal_Diff(source, modified, size);
+        //}
 
-        [Benchmark]
-        public void ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Avx_Layout_NoFastPath_NonTemporalRead_Sequential()
-        {
-            original.ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Avx_Layout_NoFastPath_NonTemporalRead(source, modified, size);
-        }
+        //[Benchmark]
+        //public void ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Avx_Layout_NoFastPath_WithPrefetch_Sequential()
+        //{
+        //    original.ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Avx_Layout_NoFastPath_WithPrefetch(source, modified, size);
+        //}
 
-        [Benchmark]
-        public void ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Avx_Layout_NoFastPath_WithPrefetch_NonTemporalRead_Sequential()
-        {
-            original.ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Avx_Layout_NoFastPath_WithPrefetch_NonTemporalRead(source, modified, size);
-        }
+        //[Benchmark]
+        //public void ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Avx_Layout_NoFastPath_NonTemporalRead_Sequential()
+        //{
+        //    original.ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Avx_Layout_NoFastPath_NonTemporalRead(source, modified, size);
+        //}
 
-        [Benchmark]
-        public void Naive_CopyBlock_Sequential()
-        {
-            original.ComputeNaive_CopyBlock_Diff(source, modified, size);
-        }
+        //[Benchmark]
+        //public void ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Avx_Layout_NoFastPath_WithPrefetch_NonTemporalRead_Sequential()
+        //{
+        //    original.ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Avx_Layout_NoFastPath_WithPrefetch_NonTemporalRead(source, modified, size);
+        //}
 
-        [Benchmark]
-        public void PointerOffset_Sequential()
-        {
-            original.ComputeDiffPointerOffset(source, modified, size);
-        }
+        //[Benchmark]
+        //public void Naive_CopyBlock_Sequential()
+        //{
+        //    original.ComputeNaive_CopyBlock_Diff(source, modified, size);
+        //}
 
-        [Benchmark]
-        public void PointerOffsetWithRefs_Sequential()
-        {
-            original.ComputeDiffPointerOffsetWithRefs(source, modified, size);
-        }
+        //[Benchmark]
+        //public void PointerOffset_Sequential()
+        //{
+        //    original.ComputeDiffPointerOffset(source, modified, size);
+        //}
 
-
-        [Benchmark]
-        public void CacheAware_Sequential()
-        {
-            original.ComputeCacheAware(source, modified, size);
-        }
-
-        [Benchmark]
-        public void CacheAware_MagicMult_Sequential()
-        {
-            original.ComputeCacheAware_MagicMult(source, modified, size);
-        }
-
-        [Benchmark]
-        public void ComputeCacheAware_Blocks_Sequential()
-        {
-            original.ComputeCacheAware_Blocks(source, modified, size);
-        }
-
-        [Benchmark]
-        public void ComputeCacheAware_BlocksInBytes_Sequential()
-        {
-            original.ComputeCacheAware_BlocksInBytes(source, modified, size);
-        }
-
-        [Benchmark]
-        public void ComputeCacheAware_Branchless_Sequential()
-        {
-            original.ComputeCacheAware_Branchless(source, modified, size);
-        }
-
-        [Benchmark]
-        public void ComputeCacheAware_Branchless_LessRegisters_Sequential()
-        {
-            original.ComputeCacheAware_Branchless_LessRegisters(source, modified, size);
-        }
+        //[Benchmark]
+        //public void PointerOffsetWithRefs_Sequential()
+        //{
+        //    original.ComputeDiffPointerOffsetWithRefs(source, modified, size);
+        //}
 
 
-        [Benchmark]
-        public void ComputeCacheAware_Branchless_LessRegisters_WithPrefetching_Sequential()
-        {
-            original.ComputeCacheAware_Branchless_LessRegisters_WithPrefetching(source, modified, size);
-        }
+        //[Benchmark]
+        //public void CacheAware_Sequential()
+        //{
+        //    original.ComputeCacheAware(source, modified, size);
+        //}
 
-        [Benchmark]
-        public void ComputeCacheAware_SingleBody_Sequential()
-        {
-            original.ComputeCacheAware_SingleBody(source, modified, size);
-        }
+        //[Benchmark]
+        //public void CacheAware_MagicMult_Sequential()
+        //{
+        //    original.ComputeCacheAware_MagicMult(source, modified, size);
+        //}
 
-        [Benchmark]
-        public void ComputeCacheAware_SingleBody_NoInnerLoop_Numerics_Sequential()
-        {
-            original.ComputeCacheAware_SingleBody_NoInnerLoop_Numerics(source, modified, size);
-        }
+        //[Benchmark]
+        //public void ComputeCacheAware_Blocks_Sequential()
+        //{
+        //    original.ComputeCacheAware_Blocks(source, modified, size);
+        //}
 
-        [Benchmark]
-        public void ComputeCacheAware_SingleBody_InvertedBuffer_Sequential()
-        {
-            original.ComputeCacheAware_SingleBody_InvertedBuffer(source, modified, size);
-        }
+        //[Benchmark]
+        //public void ComputeCacheAware_BlocksInBytes_Sequential()
+        //{
+        //    original.ComputeCacheAware_BlocksInBytes(source, modified, size);
+        //}
 
+        //[Benchmark]
+        //public void ComputeCacheAware_Branchless_Sequential()
+        //{
+        //    original.ComputeCacheAware_Branchless(source, modified, size);
+        //}
 
-        [Benchmark]
-        public void ComputeCacheAware_SingleBody_InvertedBuffer_Prefetch_Sequential()
-        {
-            original.ComputeCacheAware_SingleBody_InvertedBuffer_WithPrefetch(source, modified, size);
-        }
-
-        [Benchmark]
-        public void ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Sequential()
-        {
-            original.ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch(source, modified, size);
-        }
-
-        [Benchmark]
-        public void Numerics32_Sequential()
-        {
-            _numerics.ComputeDiff(source, modified, size);
-        }
-
-        [Benchmark]
-        public void ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Numerics_Sequential()
-        {
-            original.ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Numerics(source, modified, size);
-        }
-
-        [Benchmark]
-        public void ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Numerics_Layout_Sequential()
-        {
-            original.ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Numerics_Layout(source, modified, size);
-        }
-
-        [Benchmark]
-        public void ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Sse_Layout_NoFastPath_Sequential()
-        {
-            original.ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Sse_Layout_NoFastPath(source, modified, size);
-        }
-
-        [Benchmark]
-        public void ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Numerics_Layout_NoFastPath_WithPrefetch_Sequential()
-        {
-            original.ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Numerics_Layout_NoFastPath_WithPrefetch(source, modified, size);
-        }
-
-        [Benchmark]
-        public void ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Sse4_Layout_NoFastPath_WithPrefetch_Sequential()
-        {
-            original.ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Sse4_Layout_NoFastPath_WithPrefetch(source, modified, size);
-        }
-
-        [Benchmark]
-        public void ComputeCacheAware_SingleBody_Avx_NonTemporal_Sequential()
-        {
-            original.ComputeCacheAware_SingleBody_Avx_NonTemporal(source, modified, size);
-        }
-
-        [Benchmark]
-        public void ComputeCacheAware_SingleBody_Avx_Temporal_Sequential()
-        {
-            original.ComputeCacheAware_SingleBody_Avx_Temporal(source, modified, size);
-        }
+        //[Benchmark]
+        //public void ComputeCacheAware_Branchless_LessRegisters_Sequential()
+        //{
+        //    original.ComputeCacheAware_Branchless_LessRegisters(source, modified, size);
+        //}
 
 
-        [Benchmark]
-        public void Numerics64_Sequential()
-        {
-            _numerics.ComputeDiff2(source, modified, size);
-        }
+        //[Benchmark]
+        //public void ComputeCacheAware_Branchless_LessRegisters_WithPrefetching_Sequential()
+        //{
+        //    original.ComputeCacheAware_Branchless_LessRegisters_WithPrefetching(source, modified, size);
+        //}
+
+        //[Benchmark]
+        //public void ComputeCacheAware_SingleBody_Sequential()
+        //{
+        //    original.ComputeCacheAware_SingleBody(source, modified, size);
+        //}
+
+        //[Benchmark]
+        //public void ComputeCacheAware_SingleBody_NoInnerLoop_Numerics_Sequential()
+        //{
+        //    original.ComputeCacheAware_SingleBody_NoInnerLoop_Numerics(source, modified, size);
+        //}
+
+        //[Benchmark]
+        //public void ComputeCacheAware_SingleBody_InvertedBuffer_Sequential()
+        //{
+        //    original.ComputeCacheAware_SingleBody_InvertedBuffer(source, modified, size);
+        //}
+
+
+        //[Benchmark]
+        //public void ComputeCacheAware_SingleBody_InvertedBuffer_Prefetch_Sequential()
+        //{
+        //    original.ComputeCacheAware_SingleBody_InvertedBuffer_WithPrefetch(source, modified, size);
+        //}
+
+        //[Benchmark]
+        //public void ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Sequential()
+        //{
+        //    original.ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch(source, modified, size);
+        //}
+
+        //[Benchmark]
+        //public void Numerics32_Sequential()
+        //{
+        //    _numerics.ComputeDiff(source, modified, size);
+        //}
+
+        //[Benchmark]
+        //public void ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Numerics_Sequential()
+        //{
+        //    original.ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Numerics(source, modified, size);
+        //}
+
+        //[Benchmark]
+        //public void ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Numerics_Layout_Sequential()
+        //{
+        //    original.ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Numerics_Layout(source, modified, size);
+        //}
+
+        //[Benchmark]
+        //public void ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Sse_Layout_NoFastPath_Sequential()
+        //{
+        //    original.ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Sse_Layout_NoFastPath(source, modified, size);
+        //}
+
+        //[Benchmark]
+        //public void ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Numerics_Layout_NoFastPath_WithPrefetch_Sequential()
+        //{
+        //    original.ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Numerics_Layout_NoFastPath_WithPrefetch(source, modified, size);
+        //}
+
+        //[Benchmark]
+        //public void ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Sse4_Layout_NoFastPath_WithPrefetch_Sequential()
+        //{
+        //    original.ComputeCacheAware_SingleBody_InvertedBuffer_WithBranch_Sse4_Layout_NoFastPath_WithPrefetch(source, modified, size);
+        //}
+
+        //[Benchmark]
+        //public void ComputeCacheAware_SingleBody_Avx_NonTemporal_Sequential()
+        //{
+        //    original.ComputeCacheAware_SingleBody_Avx_NonTemporal(source, modified, size);
+        //}
+
+        //[Benchmark]
+        //public void ComputeCacheAware_SingleBody_Avx_Temporal_Sequential()
+        //{
+        //    original.ComputeCacheAware_SingleBody_Avx_Temporal(source, modified, size);
+        //}
+
+
+        //[Benchmark]
+        //public void Numerics64_Sequential()
+        //{
+        //    _numerics.ComputeDiff2(source, modified, size);
+        //}
 
 
         public class NumericsDiff
@@ -3712,10 +3721,10 @@ namespace Micro.Benchmark.Benchmarks.Hardware
             }
         }
 
-        [Benchmark(Baseline = true)]
-        public void Original_Sequential()
-        {
-            original.ComputeDiff(source, modified, size);
-        }
+        //[Benchmark]
+        //public void Original_Sequential()
+        //{
+        //    original.ComputeDiff(source, modified, size);
+        //}
     }
 }
