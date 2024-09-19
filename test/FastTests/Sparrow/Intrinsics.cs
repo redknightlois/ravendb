@@ -28,26 +28,26 @@ namespace FastTests.Sparrow
         [RavenFact(RavenTestCategory.Core | RavenTestCategory.Intrinsics)]
         public void MoveMask256()
         {
-            Assert.Equal(0, PortableIntrinsics.MoveMask(Vector256<byte>.Zero));
-            Assert.Equal(-1, PortableIntrinsics.MoveMask(Vector256<byte>.AllBitsSet));
+            Assert.Equal((uint)0, PortableIntrinsics.MoveMask(Vector256<byte>.Zero));
+            Assert.Equal(unchecked((uint)-1), PortableIntrinsics.MoveMask(Vector256<byte>.AllBitsSet));
 
-            Assert.Equal(1073741824, PortableIntrinsics.MoveMask(Vector256.Create(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF).AsByte()));
-            Assert.Equal(1073758208, PortableIntrinsics.MoveMask(Vector256.Create(0, 0, 0, 0, 0, 0, 0, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0xFF).AsByte()));
-            Assert.Equal(1077937152, PortableIntrinsics.MoveMask(Vector256.Create(0, 0, 0, 0, 0, 0xFF, 0, 0, 0, 0, 0, 0xFF, 0, 0, 0, 0xFF).AsByte()));
-            Assert.Equal(1073741829, PortableIntrinsics.MoveMask(Vector256.Create(0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF).AsByte()));
-            Assert.Equal(1073741844, PortableIntrinsics.MoveMask(Vector256.Create(0, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF).AsByte()));
-            Assert.Equal(4214784, PortableIntrinsics.MoveMask(Vector256.Create(0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0, 0xFF, 0, 0, 0, 0).AsByte()));
-            Assert.Equal(268435456, PortableIntrinsics.MoveMask(Vector256.Create(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0).AsByte()));
-            Assert.Equal(1, PortableIntrinsics.MoveMask(Vector256.Create(0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0).AsByte()));
+            Assert.Equal((uint)1073741824, PortableIntrinsics.MoveMask(Vector256.Create(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF).AsByte()));
+            Assert.Equal((uint)1073758208, PortableIntrinsics.MoveMask(Vector256.Create(0, 0, 0, 0, 0, 0, 0, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0xFF).AsByte()));
+            Assert.Equal((uint)1077937152, PortableIntrinsics.MoveMask(Vector256.Create(0, 0, 0, 0, 0, 0xFF, 0, 0, 0, 0, 0, 0xFF, 0, 0, 0, 0xFF).AsByte()));
+            Assert.Equal((uint)1073741829, PortableIntrinsics.MoveMask(Vector256.Create(0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF).AsByte()));
+            Assert.Equal((uint)1073741844, PortableIntrinsics.MoveMask(Vector256.Create(0, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF).AsByte()));
+            Assert.Equal((uint)4214784, PortableIntrinsics.MoveMask(Vector256.Create(0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0, 0xFF, 0, 0, 0, 0).AsByte()));
+            Assert.Equal((uint)268435456, PortableIntrinsics.MoveMask(Vector256.Create(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0).AsByte()));
+            Assert.Equal((uint)1, PortableIntrinsics.MoveMask(Vector256.Create(0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0).AsByte()));
 
-            Assert.Equal(-2147483648, PortableIntrinsics.MoveMask(Vector256.Create(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF00).AsByte()));
-            Assert.Equal(-2147450880, PortableIntrinsics.MoveMask(Vector256.Create(0, 0, 0, 0, 0, 0, 0, 0xFF00, 0, 0, 0, 0, 0, 0, 0, 0xFF00).AsByte()));
-            Assert.Equal(-2139092992, PortableIntrinsics.MoveMask(Vector256.Create(0, 0, 0, 0, 0, 0xFF00, 0, 0, 0, 0, 0, 0xFF00, 0, 0, 0, 0xFF00).AsByte()));
-            Assert.Equal(-2147483638, PortableIntrinsics.MoveMask(Vector256.Create(0xFF00, 0xFF00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF00).AsByte()));
-            Assert.Equal(-2147483608, PortableIntrinsics.MoveMask(Vector256.Create(0, 0xFF00, 0xFF00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF00).AsByte()));
-            Assert.Equal(8429568, PortableIntrinsics.MoveMask(Vector256.Create(0, 0, 0, 0, 0, 0, 0xFF00, 0xFF00, 0, 0, 0, 0xFF00, 0, 0, 0, 0).AsByte()));
-            Assert.Equal(536870912, PortableIntrinsics.MoveMask(Vector256.Create(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF00, 0).AsByte()));
-            Assert.Equal(2, PortableIntrinsics.MoveMask(Vector256.Create(0xFF00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0).AsByte()));
+            Assert.Equal(unchecked((uint)-2147483648), PortableIntrinsics.MoveMask(Vector256.Create(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF00).AsByte()));
+            Assert.Equal(unchecked((uint)-2147450880), PortableIntrinsics.MoveMask(Vector256.Create(0, 0, 0, 0, 0, 0, 0, 0xFF00, 0, 0, 0, 0, 0, 0, 0, 0xFF00).AsByte()));
+            Assert.Equal(unchecked((uint)-2139092992), PortableIntrinsics.MoveMask(Vector256.Create(0, 0, 0, 0, 0, 0xFF00, 0, 0, 0, 0, 0, 0xFF00, 0, 0, 0, 0xFF00).AsByte()));
+            Assert.Equal(unchecked((uint)-2147483638), PortableIntrinsics.MoveMask(Vector256.Create(0xFF00, 0xFF00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF00).AsByte()));
+            Assert.Equal(unchecked((uint)-2147483608), PortableIntrinsics.MoveMask(Vector256.Create(0, 0xFF00, 0xFF00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF00).AsByte()));
+            Assert.Equal((uint)8429568, PortableIntrinsics.MoveMask(Vector256.Create(0, 0, 0, 0, 0, 0, 0xFF00, 0xFF00, 0, 0, 0, 0xFF00, 0, 0, 0, 0).AsByte()));
+            Assert.Equal((uint)536870912, PortableIntrinsics.MoveMask(Vector256.Create(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF00, 0).AsByte()));
+            Assert.Equal((uint)2, PortableIntrinsics.MoveMask(Vector256.Create(0xFF00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0).AsByte()));
         }
     }
 }

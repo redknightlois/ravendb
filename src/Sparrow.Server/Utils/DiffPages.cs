@@ -1,6 +1,9 @@
 ﻿using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
+using System.Threading;
 
 namespace Sparrow.Server.Utils
 {
@@ -237,6 +240,12 @@ namespace Sparrow.Server.Utils
             long size = Size;
             byte* diffPtr = Diff;
             byte* destPtr = Destination;
+
+            if (diffSize == size)
+            {
+                Memory.Copy(destPtr, diffPtr, size);
+                return;
+            }
 
             if (isNewDiff)
                 Memory.Set(destPtr, 0, size);
