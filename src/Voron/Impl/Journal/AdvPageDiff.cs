@@ -108,17 +108,21 @@ namespace Voron.Impl.Journal
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void ExtractAndWriteChangedBytes(Vector512<byte> vector, ulong bitmap, ref byte* outputPtr)
         {
-            // Extract bytes corresponding to the set bits in the bitmap
-            int index = 0;
-            for (int i = 0; i < 64; i++)
+            // Process only the set bits in the bitmap
+            while (bitmap != 0)
             {
-                if (((bitmap >>> i) & 1) == 0) 
-                    continue;
-                
-                byte value = vector.GetElement(i);
-                outputPtr[index++] = value;
+                // Find the position of the least significant set bit
+                int bitPos = BitOperations.TrailingZeroCount(bitmap);
+
+                // Extract the byte at the found position
+                byte value = vector.GetElement(bitPos);
+
+                // Write the byte to the output
+                *outputPtr++ = value;
+
+                // Clear the processed bit
+                bitmap &= bitmap - 1;
             }
-            outputPtr += index;
         }
 
 

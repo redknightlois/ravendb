@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading.Tasks;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 
 #if NET6_0_OR_GREATER     
 using System.Runtime.Intrinsics;
@@ -40,7 +41,7 @@ namespace Sparrow
         ///   version with the same behavior on Intel and ARM; even if it is at the expense of performance in this case.
         /// </remarks>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static int MoveMask(in Vector256<byte> input)
+        public static uint MoveMask(in Vector256<byte> input)
         {
             if (Avx2.IsSupported)
                 return (uint)Avx2.MoveMask(input);
@@ -119,6 +120,7 @@ namespace Sparrow
 
         private static readonly Vector128<sbyte> Shift128 = Vector128.Create(-7, -6, -5, -4, -3, -2, -1, 0, -7, -6, -5, -4, -3, -2, -1, 0);
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static int MoveMaskAdvSimd(in Vector128<byte> input)
         {
             Debug.Assert(AdvSimd.IsSupported);
@@ -141,6 +143,7 @@ namespace Sparrow
             return (int)output;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool TestZ(Vector128<byte> i1, Vector128<byte> i2)
         {
             if (Sse41.IsSupported)
@@ -158,6 +161,7 @@ namespace Sparrow
             throw new NotSupportedException($"{nameof(MoveMask)} is not supported on this architecture");
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool TestZ(Vector256<byte> i1, Vector256<byte> i2)
         {
             if (Avx.IsSupported)
@@ -200,6 +204,7 @@ namespace Sparrow
         /// - While it could be possible to avoid the usage of the shift operation, we are looking into a portable
         ///   version with the same behavior on Intel and ARM; even if it is at the expense of performance in this case.
         /// </remarks>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static ulong MoveMask(in Vector512<byte> input)
         {
             // Split the Vector512 into two Vector256
@@ -209,6 +214,7 @@ namespace Sparrow
             return ((ulong)MoveMask(upper) << 32) | MoveMask(lower);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool TestZ(Vector512<byte> i1, Vector512<byte> i2)
         {
             return TestZ(i1.GetLower(), i2.GetLower()) && TestZ(i1.GetUpper(), i2.GetUpper());
