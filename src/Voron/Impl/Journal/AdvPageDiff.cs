@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using Sparrow.Compression;
 
 namespace Voron.Impl.Journal
 {
@@ -31,15 +32,19 @@ namespace Voron.Impl.Journal
             long totalBlocks = size / BlockSize;
 
             byte* originalPtr = originalBuffer;
-            byte* modifiedPtr = modifiedBuffer;
             byte* outputPtr = outputBuffer;
             byte* outputEnd = outputBuffer + size;
+
+            ulong ptrOffset = (ulong)modifiedBuffer - (ulong)originalBuffer;
 
             for (int blockIdx = 0; blockIdx < totalBlocks; blockIdx++)
             {
                 // Load 64 bytes from original and modified buffers
                 Vector512<byte> originalVector = Vector512.Load(originalPtr);
-                Vector512<byte> modifiedVector = Vector512.Load(modifiedPtr);
+                Vector512<byte> modifiedVector = Vector512.Load(originalPtr + ptrOffset);
+
+                // No difference, move to next block
+                originalPtr += BlockSize;
 
                 // Compute the difference vector
                 Vector512<byte> diffVector = Vector512.Xor(originalVector, modifiedVector);
@@ -47,31 +52,14 @@ namespace Voron.Impl.Journal
                 // Check if the blocks are equal
                 bool blocksEqual = PortableIntrinsics.TestZ(diffVector, diffVector);
                 if (blocksEqual)
-                {
-                    // No difference, move to next block
-                    originalPtr += BlockSize;
-                    modifiedPtr += BlockSize;
                     continue;
-                }
-
-                diffVector = Vector512.GreaterThan(diffVector, Vector512<byte>.Zero);
-                
-                // Generate changed bitmap
-                ulong changedBitmap = PortableIntrinsics.MoveMask(diffVector);
-
-                // Generate zeroes bitmap
-                Vector512<byte> zeroMaskVector = Vector512.Equals(modifiedVector, Vector512<byte>.Zero);
-                ulong zeroesBitmap = PortableIntrinsics.MoveMask(zeroMaskVector);
-                
-                // Calculate the number of changed bytes excluding zeros
-                int numChangedBytes = BitOperations.PopCount(changedBitmap & ~zeroesBitmap);
 
                 // Calculate required size
-                int requiredSize = sizeof(int)     // Block index
-                                 + sizeof(ulong)   // Changed bitmap
-                                 + sizeof(ulong)   // Zeroes bitmap
-                                 + numChangedBytes // Changed bytes
-                                 + 1;              // Tombstone to ensure we won't mistake a whole buffer with a diff when decoding.
+                int requiredSize = sizeof(int)       // Block index
+                                   + sizeof(ulong)   // Changed bitmap
+                                   + sizeof(ulong)   // Zeroes bitmap
+                                   + BlockSize       // We could use the changed bytes, but it is better for this to be a single value.
+                                   + 1;              // Tombstone to ensure we won't mistake a whole buffer with a diff when decoding.
 
                 if (outputPtr + requiredSize > outputEnd)
                 {
@@ -81,24 +69,26 @@ namespace Voron.Impl.Journal
                     return size;
                 }
 
-                // Write block index
-                Unsafe.WriteUnaligned(outputPtr, blockIdx);
-                outputPtr += sizeof(int);
+                diffVector = Vector512.GreaterThan(diffVector, Vector512<byte>.Zero);
+                
+                // Generate changed bitmap
+                ulong changedBitmap = PortableIntrinsics.MoveMask(diffVector);
+
+                // Generate zeroes bitmap
+                ulong zeroesBitmap = PortableIntrinsics.MoveMask(
+                                    Vector512.Equals(modifiedVector, Vector512<byte>.Zero));
 
                 // Write changed bitmap
-                Unsafe.WriteUnaligned(outputPtr, changedBitmap);
-                outputPtr += sizeof(ulong);
+                outputPtr += ZigZagEncoding.Encode(outputPtr, (long)changedBitmap);
 
                 // Write zeroes bitmap
-                Unsafe.WriteUnaligned(outputPtr, zeroesBitmap & changedBitmap);
-                outputPtr += sizeof(ulong);
+                outputPtr += ZigZagEncoding.Encode(outputPtr, (long)(zeroesBitmap & changedBitmap));
+
+                // Write block index
+                outputPtr += VariableSizeEncoding.Write(outputPtr, blockIdx);
 
                 // Extract and write changed bytes (excluding zeros)
                 ExtractAndWriteChangedBytes(modifiedVector, changedBitmap & ~zeroesBitmap, ref outputPtr);
-
-                // Move to next block
-                originalPtr += BlockSize;
-                modifiedPtr += BlockSize;
             }
 
             isDiff = true;
@@ -148,31 +138,25 @@ namespace Voron.Impl.Journal
             if (isNewDiff)
                 Unsafe.InitBlockUnaligned(buffer, 0, (uint)bufferSize); // Initialize destination buffer to zeros
 
-            byte* destPtr = buffer;
             byte* inputPtr = diff;
             byte* inputEnd = diff + diffSize;
 
             while (inputPtr < inputEnd)
             {
-                if (inputPtr + sizeof(int) + sizeof(ulong) * 2 > inputEnd)
-                {
+                // Read changed and zeroes bitmap
+                var (changedBitmap, zeroesBitmap) = ZigZagEncoding.Decode2<long>(inputPtr, out var len);
+                inputPtr += len;
+                if (inputPtr > inputEnd)
                     throw new InvalidOperationException("Invalid diff format.");
-                }
-
+                
                 // Read block index
-                int blockIdx = Unsafe.ReadUnaligned<int>(inputPtr);
-                inputPtr += sizeof(int);
-
-                // Read changed bitmap
-                ulong changedBitmap = Unsafe.ReadUnaligned<ulong>(inputPtr);
-                inputPtr += sizeof(ulong);
-
-                // Read zeroes bitmap
-                ulong zeroesBitmap = Unsafe.ReadUnaligned<ulong>(inputPtr);
-                inputPtr += sizeof(ulong);
+                int blockIdx = VariableSizeEncoding.Read<int>(inputPtr, out len);
+                inputPtr += len;
+                if (inputPtr > inputEnd)
+                    throw new InvalidOperationException("Invalid diff format.");
 
                 // Calculate number of changed bytes
-                ulong changedNonZeroBitmap = changedBitmap & ~zeroesBitmap;
+                ulong changedNonZeroBitmap = (ulong)changedBitmap & ~(ulong)zeroesBitmap;
                 int numChangedBytes = BitOperations.PopCount(changedNonZeroBitmap);
 
                 if (inputPtr + numChangedBytes > inputEnd)
@@ -186,7 +170,7 @@ namespace Voron.Impl.Journal
                 Vector512<byte> destVector = Vector512.Load(destBlockPtr);
 
                 // Apply zeroes bitmap
-                Vector512<byte> zeroMaskVector = CreateMaskVector(zeroesBitmap);
+                Vector512<byte> zeroMaskVector = CreateMaskVector((ulong)zeroesBitmap);
                 destVector = Vector512.AndNot(destVector, zeroMaskVector); // Clear bytes where zeroMaskVector is set
 
                 // Apply changed bytes
