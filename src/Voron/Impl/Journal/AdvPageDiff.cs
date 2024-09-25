@@ -37,12 +37,22 @@ namespace Voron.Impl.Journal
 
             byte* originalPtr = originalBuffer;
             byte* outputPtr = outputBuffer;
-            byte* outputEnd = outputBuffer + size;
+
+            // Calculate the worst case required space.
+            int requiredSize = sizeof(ulong)     // Changed bitmap
+                               + sizeof(ulong)   // Zeroes bitmap
+                               + BlockSize       // We could use the changed bytes, but it is better for this to be a single value.
+                               + 1;              // Tombstone to ensure we won't mistake a whole buffer with a diff when decoding.
+            
+            byte* outputEnd = outputBuffer + size - requiredSize;
 
             ulong ptrOffset = (ulong)modifiedBuffer - (ulong)originalBuffer;
 
             for (int pageIdx = 0; pageIdx < totalPages; pageIdx++)
             {
+                if (outputPtr > outputEnd)
+                    goto CopyFullBuffer;
+
                 // Remember the start of this page's output
                 byte* pageOutputStart = outputPtr;
 
@@ -53,9 +63,7 @@ namespace Voron.Impl.Journal
 
                 ulong pageBitmap = 0; // 64 bits, one bit per block in the page
 
-                int blockIdx = BlockSize;
-                while(blockIdx-- > 0)
-                //for (int blockIdx = 0; blockIdx < BlockSize; blockIdx++)
+                for (int blockIdx = 0; blockIdx < BlockSize; blockIdx++)
                 {
                     // Load 64 bytes from original and modified buffers
                     Vector512<byte> originalVector = Vector512.Load(originalPtr);
@@ -75,19 +83,8 @@ namespace Voron.Impl.Journal
                     // Mark the block as changed in the page bitmap
                     pageBitmap |= 1UL << blockIdx;
 
-                    // Calculate required size
-                    int requiredSize = sizeof(ulong)   // Changed bitmap
-                                       + sizeof(ulong)   // Zeroes bitmap
-                                       + BlockSize       // We could use the changed bytes, but it is better for this to be a single value.
-                                       + 1;              // Tombstone to ensure we won't mistake a whole buffer with a diff when decoding.
-
-                    if (outputPtr + requiredSize > outputEnd)
-                    {
-                        // Not enough space, copy the modified buffer in full
-                        Unsafe.CopyBlockUnaligned(outputBuffer, modifiedBuffer, (uint)size);
-                        isDiff = false;
-                        return size;
-                    }
+                    if (outputPtr > outputEnd)
+                        goto CopyFullBuffer;
 
                     diffVector = Vector512.GreaterThan(diffVector, Vector512<byte>.Zero);
 
@@ -133,6 +130,14 @@ namespace Voron.Impl.Journal
 
             isDiff = true;
             return (long)((ulong)outputPtr - (ulong)outputBuffer);
+
+            CopyFullBuffer:
+            {
+                // Not enough space, copy the modified buffer in full
+                Unsafe.CopyBlockUnaligned(outputBuffer, modifiedBuffer, (uint)size);
+                isDiff = false;
+                return size;
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
