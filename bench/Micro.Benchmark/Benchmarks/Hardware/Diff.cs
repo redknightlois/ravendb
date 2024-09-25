@@ -109,16 +109,17 @@ namespace Micro.Benchmark.Benchmarks.Hardware
         }
 
         [Benchmark(Baseline = true)]
-        public void Current_Sequential()
+        public long Current_Sequential()
         {
             _current.ComputeDiff(source, modified, size);
+            return _current.OutputSize;
         }
 
         [Benchmark]
-        public void Current_AdvDiff()
+        public long Current_AdvDiff()
         {
             var diff = new AdvPageDiff();
-            diff.ComputeDiff(source, modified, destination, size, out _);
+            return diff.ComputeDiff(source, modified, destination, size, out _);
         }
 
         //[Benchmark]
