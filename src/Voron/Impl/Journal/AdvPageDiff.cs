@@ -23,6 +23,8 @@ namespace Voron.Impl.Journal
     {
         const int BlockSize = 64; // Size of Vector512<byte>
         const int PageSize = 64 * BlockSize;
+        const int FullBlockThreshold = 48;
+        const int FullBlockTombstone = 0;
 
         /// <summary>
         /// Computes the diff between the original and modified buffers and writes it to the output buffer.
@@ -51,7 +53,9 @@ namespace Voron.Impl.Journal
 
                 ulong pageBitmap = 0; // 64 bits, one bit per block in the page
 
-                for (int blockIdx = 0; blockIdx < BlockSize; blockIdx++)
+                int blockIdx = BlockSize;
+                while(blockIdx-- > 0)
+                //for (int blockIdx = 0; blockIdx < BlockSize; blockIdx++)
                 {
                     // Load 64 bytes from original and modified buffers
                     Vector512<byte> originalVector = Vector512.Load(originalPtr);
@@ -89,6 +93,18 @@ namespace Voron.Impl.Journal
 
                     // Generate changed bitmap
                     ulong changedBitmap = PortableIntrinsics.MoveMask(diffVector);
+
+                    // Count the number of changed bits
+                    int changedBitsCount = BitOperations.PopCount(changedBitmap);
+                    if (changedBitsCount >= FullBlockThreshold)
+                    {
+                        // Write the full block (FullBlockTombstone indicates full block change)
+                        // The tombstone which is 0 can be used because an empty block would have been processed anyway.
+                        outputPtr += VariableSizeEncoding.Write<ulong>(outputPtr, FullBlockTombstone);
+                        modifiedVector.Store(outputPtr);
+                        outputPtr += BlockSize;
+                        continue;
+                    }
 
                     // Generate zeroes bitmap
                     ulong zeroesBitmap = PortableIntrinsics.MoveMask(
@@ -195,11 +211,34 @@ namespace Voron.Impl.Journal
                     // Clear the processed bit
                     blocksBitmap &= blocksBitmap - 1;
 
-                    // Read changed and zeroes bitmap
-                    var (changedBitmap, zeroesBitmap) = VariableSizeEncoding.Read2<ulong>(inputPtr, out len);
+                    // Read changed bitmap
+                    ulong changedBitmap = VariableSizeEncoding.Read<ulong>(inputPtr, out len);
                     inputPtr += len;
                     if (inputPtr > inputEnd)
                         throw new InvalidOperationException("Invalid diff format.");
+
+                    byte* destBlockPtr = currentPagePtr + blockIdx * BlockSize;
+                    
+                    if (changedBitmap == FullBlockTombstone)
+                    {
+                        // Entire block has changed
+                        if (inputPtr + BlockSize > inputEnd)
+                            throw new InvalidOperationException("Invalid diff format.");
+
+                        // Overwrite the entire block with the modified data from the diff
+                        Vector512.Load(inputPtr)
+                                 .StoreAligned(destBlockPtr);
+                        
+                        inputPtr += BlockSize;
+                        continue;
+                    }
+
+                    // Read zeroes bitmap
+                    ulong zeroesBitmap = VariableSizeEncoding.Read<ulong>(inputPtr, out len);
+                    inputPtr += len;
+                    if (inputPtr > inputEnd)
+                        throw new InvalidOperationException("Invalid diff format.");
+                    
 
                     // Calculate number of changed bytes
                     ulong changedNonZeroBitmap = (ulong)changedBitmap & ~(ulong)zeroesBitmap;
@@ -210,7 +249,6 @@ namespace Voron.Impl.Journal
                         throw new InvalidOperationException("Invalid diff format.");
                     }
 
-                    byte* destBlockPtr = currentPagePtr + blockIdx * BlockSize;
 
                     // Load the current block
                     Vector512<byte> destVector = Vector512.Load(destBlockPtr);

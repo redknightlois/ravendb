@@ -7,6 +7,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using Sparrow.Json;
 
 #if NET6_0_OR_GREATER     
 using System.Runtime.Intrinsics;
@@ -180,6 +181,13 @@ namespace Sparrow
 
             throw new NotSupportedException($"{nameof(MoveMask)} is not supported on this architecture");
         }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static unsafe void Prefetch0(byte* originalPtr)
+        {
+            if (Sse.IsSupported)
+                Sse.Prefetch0(originalPtr);
+        }
 #endif
 
 #if NET8_0_OR_GREATER
@@ -220,6 +228,5 @@ namespace Sparrow
             return TestZ(i1.GetLower(), i2.GetLower()) && TestZ(i1.GetUpper(), i2.GetUpper());
         }
 #endif
-
     }
 }
