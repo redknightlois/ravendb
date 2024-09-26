@@ -24,7 +24,7 @@ namespace Voron.Impl.Journal
         const int BlockSize = 64; // Size of Vector512<byte>
         const int PageSize = 64 * BlockSize;
         const int FullBlockThreshold = 48;
-        const int FullBlockTombstone = 0;
+        const byte FullBlockTombstone = 0;
 
         /// <summary>
         /// Computes the diff between the original and modified buffers and writes it to the output buffer.
@@ -48,6 +48,7 @@ namespace Voron.Impl.Journal
 
             ulong ptrOffset = (ulong)modifiedBuffer - (ulong)originalBuffer;
 
+            var zero = Vector512<byte>.Zero;
             for (int pageIdx = 0; pageIdx < totalPages; pageIdx++)
             {
                 if (outputPtr > outputEnd)
@@ -65,6 +66,9 @@ namespace Voron.Impl.Journal
 
                 for (int blockIdx = 0; blockIdx < BlockSize; blockIdx++)
                 {
+                    if (outputPtr > outputEnd)
+                        goto CopyFullBuffer;
+                    
                     // Load 64 bytes from original and modified buffers
                     Vector512<byte> originalVector = Vector512.Load(originalPtr);
                     Vector512<byte> modifiedVector = Vector512.Load(originalPtr + ptrOffset);
@@ -75,31 +79,27 @@ namespace Voron.Impl.Journal
                     // Compute the difference vector
                     Vector512<byte> diffVector = Vector512.Xor(originalVector, modifiedVector);
 
-                    // Check if the blocks are equal
-                    bool blocksEqual = PortableIntrinsics.TestZ(diffVector, diffVector);
-                    if (blocksEqual)
+                    // Compute the changed bitmap by checking which bytes are non-zero
+                    Vector512<byte> greaterThanZero = Vector512.GreaterThan(diffVector, zero);
+
+                    // Determine if blocks are equal based on changedBitmap
+                    ulong changedBitmap = PortableIntrinsics.MoveMask(greaterThanZero);
+                    if (changedBitmap == 0)
                         continue;
-
-                    // Mark the block as changed in the page bitmap
-                    pageBitmap |= 1UL << blockIdx;
-
-                    if (outputPtr > outputEnd)
-                        goto CopyFullBuffer;
-
-                    diffVector = Vector512.GreaterThan(diffVector, Vector512<byte>.Zero);
-
-                    // Generate changed bitmap
-                    ulong changedBitmap = PortableIntrinsics.MoveMask(diffVector);
 
                     // Count the number of changed bits
                     int changedBitsCount = BitOperations.PopCount(changedBitmap);
+                    
+                    // Mark the block as changed in the page bitmap
+                    pageBitmap |= 1UL << blockIdx;
+
                     if (changedBitsCount >= FullBlockThreshold)
                     {
                         // Write the full block (FullBlockTombstone indicates full block change)
                         // The tombstone which is 0 can be used because an empty block would have been processed anyway.
-                        outputPtr += VariableSizeEncoding.Write<ulong>(outputPtr, FullBlockTombstone);
+                        *outputPtr = FullBlockTombstone;
                         modifiedVector.Store(outputPtr);
-                        outputPtr += BlockSize;
+                        outputPtr += BlockSize + 1;
                         continue;
                     }
 
@@ -143,26 +143,25 @@ namespace Voron.Impl.Journal
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private int ExtractAndWriteChangedBytes(Vector512<byte> vector, ulong bitmap, byte* outputPtr)
         {
+            // Obtain a byte pointer to the Vector512<byte> data
+            byte* vectorBytes = (byte*)&vector;
+            byte* destPtr = outputPtr;
+
             // Process only the set bits in the bitmap
-            int i = 0;
             while (bitmap != 0)
             {
                 // Find the position of the least significant set bit
                 int bitPos = BitOperations.TrailingZeroCount(bitmap);
 
-                // Extract the byte at the found position
-                byte value = vector.GetElement(bitPos);
-
-                // Write the byte to the output
-                outputPtr[i] = value;
+                // Extract the byte at the found position directly via pointer arithmetic
+                *destPtr++ = vectorBytes[bitPos];
 
                 // Clear the processed bit
                 bitmap &= bitmap - 1;
-                
-                i++;
             }
 
-            return i;
+            // Return the number of bytes written
+            return (int)(destPtr - outputPtr);
         }
 
 
