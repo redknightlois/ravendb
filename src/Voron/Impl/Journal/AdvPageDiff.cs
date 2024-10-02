@@ -113,7 +113,6 @@ namespace Voron.Impl.Journal
                 inputBlockPtr = inputPtr;
                 bitmapPtr = bitmap;
 
-                int skipLength = 0;
                 while (bitmapPtr < bitmapEnd)
                 {
                     // This loop should be able to be implemented with just back-jumps.
@@ -129,12 +128,10 @@ namespace Voron.Impl.Journal
 
                         bitmapPtr += 1;
 
-                        // We increment the counter of how many blocks we have to ignore.
-                        skipLength += n;
+                        // We increment the block pointer to ignore these blocks.
+                        inputBlockPtr += n;
                     }
 
-                    // We apply the ignore blocks into the blocks pointer.
-                    inputBlockPtr += skipLength;
                     
                     // If we are done, we just bail out.
                     if (bitmapPtr >= bitmapEnd && bitmapValue == 0)
@@ -148,24 +145,25 @@ namespace Voron.Impl.Journal
                     // For our purposes the zero runs take precedence in the selection because they are the most efficient to store.
                     // It is possible that no block is written, and therefore we would just not increment the output pointer.
                     runHeaderPtr->Offset = (inputBlockPtr - modifiedBuffer);
-
+                    byte* inputBlockPtrRunStart = inputBlockPtr;
+                    
                     // Check invariants
                     Debug.Assert(runHeaderPtr->Offset % n == 0);
 
-                    Console.WriteLine(runHeaderPtr->Offset);
+                    //Console.WriteLine(runHeaderPtr->Offset);
 
                     // By the time we arrive here, we are either finished with this bitmap OR we are starting a run.
                     // and therefore we need to load the data before being able to move forward. 
                     Vector512<ulong> m0 = Vector512.Load((ulong*)(inputBlockPtr));
-                    
+                    inputBlockPtr += n;
+                    bitmapPtr += 1;
+
                     bool isZeroRun = Vector512.EqualsAll(m0, Vector512<ulong>.Zero);
 
                     // If any of the block bytes are different to zero, then we will start writing blocks.
                     // However, if they are zeroes we will write zero blocks for as long as we can. 
                     if (isZeroRun)
                     {
-                        var runLength = n;
-
                         // Now if this 'start' is a zero-run, then m0 is going to be full of zeroes, which also mean that
                         // we can just loop until there are no zeroes.
                         while (bitmapPtr < bitmapEnd)
@@ -177,33 +175,33 @@ namespace Voron.Impl.Journal
                             if (bitmapValue == 0)
                                 break;
 
-                            m0 = Vector512.Load((ulong*)(inputBlockPtr + runLength));
+                            m0 = Vector512.Load((ulong*)(inputBlockPtr));
                             if (Vector512.EqualsAll(m0, Vector512<ulong>.Zero) == false)
                                 break; // We are done, we need to find a new run now. 
 
+                            inputBlockPtr += n;
                             bitmapPtr += 1;
-                            runLength += n;
                         }
 
+                        long runLength = inputBlockPtr - inputBlockPtrRunStart;
                         runHeaderPtr->Count = -runLength;
-                        inputBlockPtr += runLength;
 
                         // Since zeroes are very efficient to store we are just incrementing the output by the size of the header.
                         outputPtr += sizeof(RunHeader);
                     }
                     else
                     {
-                        // We know this is not a zero run, therefore we have to store blocks with it's data.
+                        // We know this is not a zero run, therefore we have to store blocks data.
+                        if (runStoragePtr + n >= outputEnd)
+                            goto CopyFullBuffer;
 
                         // The first block could have leading non changed bytes, therefore we had already skipped them
                         // on the offset. A shift left operation have to be performed in order to store only the trailing
                         // bytes and increment the offset accordingly.
 
                         Vector512.Store(m0.AsByte(), runStoragePtr);
-                        bitmapPtr += 1;
-                        
-                        var runLength = n;
-                        
+                        runStoragePtr += n;
+
                         // Now if this 'start' is a zero-run, then m0 is going to be full of zeroes, which also mean that
                         // we can just loop until there are no changes.
                         while (bitmapPtr < bitmapEnd)
@@ -214,33 +212,32 @@ namespace Voron.Impl.Journal
                             // start scanning again. 
                             if (bitmapValue == 0)
                                 break;
-
-                            var storeLocation = runStoragePtr + runLength;
-                            if (storeLocation + n >= outputEnd)
+                            
+                            if (runStoragePtr + n >= outputEnd)
                                 goto CopyFullBuffer;
 
-                            m0 = Vector512.Load((ulong*)(inputBlockPtr + runLength));
-                            Vector512.Store(m0.AsByte(), storeLocation);
+                            m0 = Vector512.Load((ulong*)(inputBlockPtr));
+                            Vector512.Store(m0.AsByte(), runStoragePtr);
 
                             bitmapPtr += 1;
-                            runLength += n;
+                            inputBlockPtr += n;
+                            runStoragePtr += n;
                         }
 
                         // We could technically fix the count if in the last block there are unchanged values (we can know
                         // using the bitmap values corresponding to that particular block).
+                        long runLength = inputBlockPtr - inputBlockPtrRunStart;
                         runHeaderPtr->Count = runLength;
-                        inputBlockPtr += runLength;
 
                         // Since we wrote many blocks we have to add those bytes to the output.
                         outputPtr += sizeof(RunHeader) + runHeaderPtr->Count;
                     }
                 }
 
-                //inputPtr = inputBlockPtr;
                 inputPtr += BlockSize;
             }
 
-            Console.WriteLine($"Done. {((ulong)outputPtr - (ulong)outputBuffer)}");
+            //Console.WriteLine($"Done. {((ulong)outputPtr - (ulong)outputBuffer)}");
             
             isDiff = true;
             return (long)((ulong)outputPtr - (ulong)outputBuffer);
