@@ -19,9 +19,10 @@ namespace Micro.Benchmark
             Console.WriteLine($"{nameof(Avx2)} support: {Avx2.IsSupported}");
 
 
-
             var test = new DiffNonZeroes();
             test.Setup();
+            Console.WriteLine($"AdvDiff: {test.Current_AdvDiff()}");
+            Console.WriteLine($"Diff: {test.Current_Sequential()}");
             //for (int i = 0; i < 100000; i++)
             //{
             //    test.Current_Sequential();

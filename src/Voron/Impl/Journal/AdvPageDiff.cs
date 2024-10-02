@@ -1,11 +1,13 @@
 using Sparrow;
 using System;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using Sparrow.Compression;
-using static Sparrow.Server.Utils.ThreadNames.ThreadDetails;
 
 namespace Voron.Impl.Journal
 {
@@ -21,113 +23,225 @@ namespace Voron.Impl.Journal
     /// </summary>
     public unsafe struct AdvPageDiff
     {
-        const int BlockSize = 64; // Size of Vector512<byte>
-        const int PageSize = 64 * BlockSize;
-        const int FullBlockThreshold = 48;
-        const byte FullBlockTombstone = 0;
+        // The block size is the amount of bytes we are going to process in a single loop. The rationale here is that
+        // multiple different architectures may need a different <block> processing. For now, it is a constant, but we will
+        // certainly optimize this based on architecture eventually as a JIT constant. 
+        // The block size has to be smaller than twice the capability of the L1 because we have 2 data streams.
+        // For example in the AMD Zen3 architecture the L1 is a 32Kb, 8-way, 64 sets, 64B line. And has a latency of 4 clocks.
+        const int BlockSize = 256;
+        const int PageSize = 4096; // This is always 4096 because we are ensuring that every page is at least a multiple of 4K
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        private struct RunHeader
+        {
+            public long Offset;
+            public long Count;
+        }
 
         /// <summary>
         /// Computes the diff between the original and modified buffers and writes it to the output buffer.
         /// </summary>
+        [SkipLocalsInit]
         public long ComputeDiff(byte* originalBuffer, byte* modifiedBuffer, byte* outputBuffer, long size, out bool isDiff)
         {
-            Debug.Assert(size % 4096 == 0);
+            const int n = 64;
+            
+            Debug.Assert(size % PageSize == 0, "Size must be a multiple of PageSize");
 
-            long totalPages = (int)(size / PageSize);
-
-            byte* originalPtr = originalBuffer;
+            byte* inputPtr = modifiedBuffer;
             byte* outputPtr = outputBuffer;
 
-            // Calculate the worst case required space.
-            int requiredSize = sizeof(ulong)     // Changed bitmap
-                               + sizeof(ulong)   // Zeroes bitmap
-                               + BlockSize       // We could use the changed bytes, but it is better for this to be a single value.
-                               + 1;              // Tombstone to ensure we won't mistake a whole buffer with a diff when decoding.
-            
-            byte* outputEnd = outputBuffer + size - requiredSize;
+            byte* inputEnd = inputPtr + size;
+            byte* outputEnd = outputBuffer + size;
+            nuint offset = (nuint)(originalBuffer - modifiedBuffer); // Pointer offsetting for efficient addressing using LEA instructions
 
-            ulong ptrOffset = (ulong)modifiedBuffer - (ulong)originalBuffer;
+            // Each bit of the bitmap will essentially represent the resulting comparison of 8 bytes (ulong).
+            // A single byte would store the comparison of 8 packets of 8 bytes = 64 bytes.
+            const int BitmapSize = BlockSize / 64;
 
-            var zero = Vector512<byte>.Zero;
-            for (int pageIdx = 0; pageIdx < totalPages; pageIdx++)
+            // Validate configuration
+            PortableExceptions.ThrowIf<InvalidOperationException>(PageSize % BitmapSize != 0,
+                $"Invalid configuration. {nameof(PageSize)} must be divisible by {nameof(BitmapSize)}");
+
+            byte* bitmap = stackalloc byte[BitmapSize];
+            byte* bitmapEnd = bitmap + BitmapSize;
+
+            // Buffer-level loop: process the entire buffer directly without page-level looping
+            while (inputPtr < inputEnd)
             {
+                Debug.Assert(inputPtr <= inputEnd - BlockSize, "Block processing exceeds buffer size");
+
                 if (outputPtr > outputEnd)
                     goto CopyFullBuffer;
 
-                // Remember the start of this page's output
-                byte* pageOutputStart = outputPtr;
+                // Initialize bitmap for the current group of blocks
+                byte* inputBlockEnd = inputPtr + BlockSize;
+                byte* inputBlockPtr = inputPtr;
+                byte* bitmapPtr = bitmap;
 
-                // Write the page index ( it may get ignored at the end )
-                outputPtr += VariableSizeEncoding.Write<int>(outputPtr, pageIdx);
-                ulong* pageBitmapPtr = (ulong*)outputPtr;
-                outputPtr += sizeof(ulong);
+                Debug.Assert((ulong)(inputBlockPtr - modifiedBuffer) % BlockSize == 0);
 
-                ulong pageBitmap = 0; // 64 bits, one bit per block in the page
-
-                for (int blockIdx = 0; blockIdx < BlockSize; blockIdx++)
+                // Block-level loop: unroll processing to handle multiple blocks per iteration
+                while (bitmapPtr < bitmapEnd)
                 {
-                    if (outputPtr > outputEnd)
-                        goto CopyFullBuffer;
+                    Debug.Assert(inputBlockPtr <= inputBlockEnd - 2 * n);
+
+                    // We know that a single load of a 512 bits vector will fill a byte. So we can add as many as we need as long as
+                    // they are multiples of BlockSize to minimize the amount of housekeeping logic. 
+
+                    Vector512<ulong> m0 = Vector512.Load((ulong*)(inputBlockPtr + 0 * n));
+                    Vector512<ulong> o0 = Vector512.Load((ulong*)(inputBlockPtr + offset + 0 * n));
+
+                    Vector512<ulong> m1 = Vector512.Load((ulong*)(inputBlockPtr + 1 * n));
+                    Vector512<ulong> o1 = Vector512.Load((ulong*)(inputBlockPtr + offset + 1 * n));
+
+                    var b0 = (byte)~Vector512.Equals(o0, m0).ExtractMostSignificantBits();
+                    var b1 = (byte)~Vector512.Equals(o1, m1).ExtractMostSignificantBits();
                     
-                    // Load 64 bytes from original and modified buffers
-                    Vector512<byte> originalVector = Vector512.Load(originalPtr);
-                    Vector512<byte> modifiedVector = Vector512.Load(originalPtr + ptrOffset);
-
-                    // No difference, move to next block
-                    originalPtr += BlockSize;
-
-                    // Compute the difference vector
-                    Vector512<byte> diffVector = Vector512.Xor(originalVector, modifiedVector);
-
-                    // Compute the changed bitmap by checking which bytes are non-zero
-                    Vector512<byte> greaterThanZero = Vector512.GreaterThan(diffVector, zero);
-
-                    // Determine if blocks are equal based on changedBitmap
-                    ulong changedBitmap = PortableIntrinsics.MoveMask(greaterThanZero);
-                    if (changedBitmap == 0)
-                        continue;
-
-                    // Count the number of changed bits
-                    int changedBitsCount = BitOperations.PopCount(changedBitmap);
+                    bitmapPtr[0] = b0;
+                    bitmapPtr[1] = b1;
                     
-                    // Mark the block as changed in the page bitmap
-                    pageBitmap |= 1UL << blockIdx;
+                    inputBlockPtr += 2 * n;
+                    bitmapPtr += 2;
+                }
 
-                    if (changedBitsCount >= FullBlockThreshold)
+                // Check invariants
+                Debug.Assert(inputPtr == inputBlockPtr - BlockSize);
+                Debug.Assert(bitmapPtr == bitmapEnd);
+
+                // We need to reset the block pointer to start again because we need to just move toward the end on the modified buffer.
+                inputBlockPtr = inputPtr;
+                bitmapPtr = bitmap;
+
+                int skipLength = 0;
+                while (bitmapPtr < bitmapEnd)
+                {
+                    // This loop should be able to be implemented with just back-jumps.
+                    byte bitmapValue = 0;
+                    while(bitmapPtr < bitmapEnd)
                     {
-                        // Write the full block (FullBlockTombstone indicates full block change)
-                        // The tombstone which is 0 can be used because an empty block would have been processed anyway.
-                        *outputPtr = FullBlockTombstone;
-                        modifiedVector.Store(outputPtr);
-                        outputPtr += BlockSize + 1;
-                        continue;
+                        // Load bitmap value
+                        bitmapValue = *bitmapPtr;
+
+                        // We bail if the bitmap value is not 0;
+                        if (bitmapValue != 0)
+                            break;
+
+                        bitmapPtr += 1;
+
+                        // We increment the counter of how many blocks we have to ignore.
+                        skipLength += n;
                     }
 
-                    // Generate zeroes bitmap
-                    ulong zeroesBitmap = PortableIntrinsics.MoveMask(
-                        Vector512.Equals(modifiedVector, Vector512<byte>.Zero));
+                    // We apply the ignore blocks into the blocks pointer.
+                    inputBlockPtr += skipLength;
+                    
+                    // If we are done, we just bail out.
+                    if (bitmapPtr >= bitmapEnd && bitmapValue == 0)
+                        break;
+                    
+                    // Since we are going to write a data block. We need to store the pointer where that data is going to be store.
+                    var runHeaderPtr = (RunHeader*)outputPtr;
+                    var runStoragePtr = outputPtr + sizeof(RunHeader);
 
-                    // Write changed bitmap
-                    outputPtr += VariableSizeEncoding.Write<ulong>(outputPtr, changedBitmap);
+                    // We store the currently known block location before we even decide if we are going to write zero blocks or not.
+                    // For our purposes the zero runs take precedence in the selection because they are the most efficient to store.
+                    // It is possible that no block is written, and therefore we would just not increment the output pointer.
+                    runHeaderPtr->Offset = (inputBlockPtr - modifiedBuffer);
 
-                    // Write zeroes bitmap
-                    outputPtr += VariableSizeEncoding.Write<ulong>(outputPtr, zeroesBitmap & changedBitmap);
+                    // Check invariants
+                    Debug.Assert(runHeaderPtr->Offset % n == 0);
 
-                    // Extract and write changed bytes (excluding zeros)
-                    outputPtr += ExtractAndWriteChangedBytes(modifiedVector, changedBitmap & ~zeroesBitmap, outputPtr);
+                    Console.WriteLine(runHeaderPtr->Offset);
+
+                    // By the time we arrive here, we are either finished with this bitmap OR we are starting a run.
+                    // and therefore we need to load the data before being able to move forward. 
+                    Vector512<ulong> m0 = Vector512.Load((ulong*)(inputBlockPtr));
+                    
+                    bool isZeroRun = Vector512.EqualsAll(m0, Vector512<ulong>.Zero);
+
+                    // If any of the block bytes are different to zero, then we will start writing blocks.
+                    // However, if they are zeroes we will write zero blocks for as long as we can. 
+                    if (isZeroRun)
+                    {
+                        var runLength = n;
+
+                        // Now if this 'start' is a zero-run, then m0 is going to be full of zeroes, which also mean that
+                        // we can just loop until there are no zeroes.
+                        while (bitmapPtr < bitmapEnd)
+                        {
+                            bitmapValue = *bitmapPtr;
+
+                            // If there are no changes in this run, then we are done, and therefore we need to
+                            // start scanning again. 
+                            if (bitmapValue == 0)
+                                break;
+
+                            m0 = Vector512.Load((ulong*)(inputBlockPtr + runLength));
+                            if (Vector512.EqualsAll(m0, Vector512<ulong>.Zero) == false)
+                                break; // We are done, we need to find a new run now. 
+
+                            bitmapPtr += 1;
+                            runLength += n;
+                        }
+
+                        runHeaderPtr->Count = -runLength;
+                        inputBlockPtr += runLength;
+
+                        // Since zeroes are very efficient to store we are just incrementing the output by the size of the header.
+                        outputPtr += sizeof(RunHeader);
+                    }
+                    else
+                    {
+                        // We know this is not a zero run, therefore we have to store blocks with it's data.
+
+                        // The first block could have leading non changed bytes, therefore we had already skipped them
+                        // on the offset. A shift left operation have to be performed in order to store only the trailing
+                        // bytes and increment the offset accordingly.
+
+                        Vector512.Store(m0.AsByte(), runStoragePtr);
+                        bitmapPtr += 1;
+                        
+                        var runLength = n;
+                        
+                        // Now if this 'start' is a zero-run, then m0 is going to be full of zeroes, which also mean that
+                        // we can just loop until there are no changes.
+                        while (bitmapPtr < bitmapEnd)
+                        {
+                            bitmapValue = *bitmapPtr;
+
+                            // If there are no changes in this run, then we are done, and therefore we need to
+                            // start scanning again. 
+                            if (bitmapValue == 0)
+                                break;
+
+                            var storeLocation = runStoragePtr + runLength;
+                            if (storeLocation + n >= outputEnd)
+                                goto CopyFullBuffer;
+
+                            m0 = Vector512.Load((ulong*)(inputBlockPtr + runLength));
+                            Vector512.Store(m0.AsByte(), storeLocation);
+
+                            bitmapPtr += 1;
+                            runLength += n;
+                        }
+
+                        // We could technically fix the count if in the last block there are unchanged values (we can know
+                        // using the bitmap values corresponding to that particular block).
+                        runHeaderPtr->Count = runLength;
+                        inputBlockPtr += runLength;
+
+                        // Since we wrote many blocks we have to add those bytes to the output.
+                        outputPtr += sizeof(RunHeader) + runHeaderPtr->Count;
+                    }
                 }
 
-                // If there is no change, we would just continue to the next page. 
-                if (pageBitmap == 0)
-                {
-                    // No blocks changed in this page; reset outputPtr back to pageOutputStart
-                    outputPtr = pageOutputStart;
-                    continue;
-                }
-
-                *pageBitmapPtr = pageBitmap;
+                //inputPtr = inputBlockPtr;
+                inputPtr += BlockSize;
             }
 
+            Console.WriteLine($"Done. {((ulong)outputPtr - (ulong)outputBuffer)}");
+            
             isDiff = true;
             return (long)((ulong)outputPtr - (ulong)outputBuffer);
 
@@ -139,31 +253,7 @@ namespace Voron.Impl.Journal
                 return size;
             }
         }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private int ExtractAndWriteChangedBytes(Vector512<byte> vector, ulong bitmap, byte* outputPtr)
-        {
-            // Obtain a byte pointer to the Vector512<byte> data
-            byte* vectorBytes = (byte*)&vector;
-            byte* destPtr = outputPtr;
-
-            // Process only the set bits in the bitmap
-            while (bitmap != 0)
-            {
-                // Find the position of the least significant set bit
-                int bitPos = BitOperations.TrailingZeroCount(bitmap);
-
-                // Extract the byte at the found position directly via pointer arithmetic
-                *destPtr++ = vectorBytes[bitPos];
-
-                // Clear the processed bit
-                bitmap &= bitmap - 1;
-            }
-
-            // Return the number of bytes written
-            return (int)(destPtr - outputPtr);
-        }
-
+        
 
         public void ComputeNew(byte* modifiedBuffer, byte* outputBuffer, long size)
         {
@@ -187,116 +277,49 @@ namespace Voron.Impl.Journal
             if (isNewDiff)
                 Unsafe.InitBlockUnaligned(buffer, 0, (uint)bufferSize); // Initialize destination buffer to zeros
 
-            byte* inputPtr = diff;
-            byte* inputEnd = diff + diffSize;
-
-            while (inputPtr < inputEnd)
+            long pos = 0;
+            while (pos < diffSize)
             {
-                // Read page index
-                int pageIdx = VariableSizeEncoding.Read<int>(inputPtr, out var len);
-                inputPtr += len;
-                if (inputPtr > inputEnd)
-                    throw new InvalidOperationException("Invalid diff format.");
+                if (pos + sizeof(long) * 2 > diffSize)
+                    AssertInvalidDiffSize(pos, sizeof(long) * 2, diffSize);
 
-                // Read page bitmap
-                ulong blocksBitmap = Unsafe.ReadUnaligned<ulong>(inputPtr);
-                inputPtr += sizeof(ulong);
-                if (inputPtr > inputEnd)
-                    throw new InvalidOperationException("Invalid diff format.");
+                long start = ((long*)(diff + pos))[0];
+                long count = ((long*)(diff + pos))[1];
+                pos += sizeof(long) * 2;
 
-                byte* currentPagePtr = buffer + pageIdx * PageSize;
 
-                // Process only the set bits in the bitmap
-                while (blocksBitmap != 0)
+                if (count < 0)
                 {
-                    // Find the position of the least significant set bit
-                    int blockIdx = BitOperations.TrailingZeroCount(blocksBitmap);
-                    
-                    // Clear the processed bit
-                    blocksBitmap &= blocksBitmap - 1;
-
-                    // Read changed bitmap
-                    ulong changedBitmap = VariableSizeEncoding.Read<ulong>(inputPtr, out len);
-                    inputPtr += len;
-                    if (inputPtr > inputEnd)
-                        throw new InvalidOperationException("Invalid diff format.");
-
-                    byte* destBlockPtr = currentPagePtr + blockIdx * BlockSize;
-                    
-                    if (changedBitmap == FullBlockTombstone)
-                    {
-                        // Entire block has changed
-                        if (inputPtr + BlockSize > inputEnd)
-                            throw new InvalidOperationException("Invalid diff format.");
-
-                        // Overwrite the entire block with the modified data from the diff
-                        Vector512.Load(inputPtr)
-                                 .StoreAligned(destBlockPtr);
-                        
-                        inputPtr += BlockSize;
-                        continue;
-                    }
-
-                    // Read zeroes bitmap
-                    ulong zeroesBitmap = VariableSizeEncoding.Read<ulong>(inputPtr, out len);
-                    inputPtr += len;
-                    if (inputPtr > inputEnd)
-                        throw new InvalidOperationException("Invalid diff format.");
-                    
-
-                    // Calculate number of changed bytes
-                    ulong changedNonZeroBitmap = (ulong)changedBitmap & ~(ulong)zeroesBitmap;
-                    int numChangedBytes = BitOperations.PopCount(changedNonZeroBitmap);
-
-                    if (inputPtr + numChangedBytes > inputEnd)
-                    {
-                        throw new InvalidOperationException("Invalid diff format.");
-                    }
-
-
-                    // Load the current block
-                    Vector512<byte> destVector = Vector512.Load(destBlockPtr);
-
-                    // Apply zeroes bitmap
-                    Vector512<byte> zeroMaskVector = CreateMaskVector((ulong)zeroesBitmap);
-                    destVector = Vector512.AndNot(destVector, zeroMaskVector); // Clear bytes where zeroMaskVector is set
-
-                    // Apply changed bytes
-                    destVector = ApplyChangedBytes(destVector, changedNonZeroBitmap, inputPtr);
-                    inputPtr += numChangedBytes;
-
-                    // Store the updated block back to destination
-                    destVector.Store(destBlockPtr);
+                    // run of only zeroes
+                    count *= -1;
+                    if (start + count > bufferSize)
+                        AssertInvalidSize(start, count, bufferSize);
+                    Memory.Set(buffer + start, 0, count);
+                    continue;
                 }
+
+                if (start + count > bufferSize)
+                    AssertInvalidSize(start, count, bufferSize);
+                if (pos + count > diffSize)
+                    AssertInvalidDiffSize(pos, count, diffSize);
+
+                Memory.Copy(buffer + start, diff + pos, count);
+                pos += count;
             }
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private Vector512<byte> CreateMaskVector(ulong bitmap)
+        [DoesNotReturn]
+        private void AssertInvalidSize(long start, long count, long size)
         {
-            // Create a Vector512<byte> mask from the bitmap
-            byte* maskBytes = stackalloc byte[64];
-            for (int i = 0; i < 64; i++)
-            {
-                maskBytes[i] = (byte)(((bitmap >> i) & 1) * 0xFF);
-            }
-            return Vector512.Load(maskBytes);
+            throw new ArgumentOutOfRangeException(nameof(Size),
+                $"Cannot apply diff to position {start + count} because it is bigger than {size}");
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private Vector512<byte> ApplyChangedBytes(Vector512<byte> destVector, ulong bitmap, byte* changedBytesPtr)
+        [DoesNotReturn]
+        private void AssertInvalidDiffSize(long pos, long count, long diffSize)
         {
-            // Apply the changed bytes to the destination vector
-            int changedIndex = 0;
-            for (int i = 0; i < 64; i++)
-            {
-                if (((bitmap >> i) & 1) != 0)
-                {
-                    byte value = changedBytesPtr[changedIndex++];
-                    destVector = destVector.WithElement(i, value);
-                }
-            }
-            return destVector;
+            throw new ArgumentOutOfRangeException(nameof(Size),
+                $"Cannot apply diff because pos {pos} & count {count} are beyond the diff size: {diffSize}");
         }
     }
 }

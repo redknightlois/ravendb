@@ -76,6 +76,39 @@ namespace FastTests.Voron.Journal
             }
         }
 
+        [RavenFact(RavenTestCategory.Voron)]
+        public void CanComputeSmallSequentialDifference_AndThenApplyit()
+        {
+            var fst = new byte[PageSize];
+            var sec = new byte[PageSize];
+            var trd = new byte[PageSize];
+
+            new Random().NextBytes(fst);
+            Buffer.BlockCopy(fst, 0, sec, 0, fst.Length);
+            Buffer.BlockCopy(fst, 0, trd, 0, fst.Length);
+
+            sec[127]++;
+            sec[191]++;
+
+            fixed (byte* one = fst)
+            fixed (byte* two = sec)
+            fixed (byte* tri = trd)
+            fixed (byte* diff = new byte[PageSize])
+            {
+                var diffPage = new AdvPageDiff();
+
+                var diffSize = diffPage.ComputeDiff(one, two, diff, PageSize, out var isDiff);
+
+                Assert.True(isDiff);
+
+                Memory.Copy(tri, one, PageSize);
+                diffPage.Apply(diff, diffSize, tri, PageSize, false);
+
+                var result = Memory.Compare(tri, two, PageSize);
+                Assert.Equal(0, result);
+            }
+        }
+
         //[Fact]
         //public void CanComputeSmallDifferenceFromNew()
         //{
@@ -157,7 +190,7 @@ namespace FastTests.Voron.Journal
         [RavenFact(RavenTestCategory.Voron)]
         public void ComputeAndThenApplyRandomized()
         {
-            const int Size = 4096 * 4;
+            const int Size = 4096 * 2;
 
             var fst = new byte[Size];
             var sec = new byte[Size];

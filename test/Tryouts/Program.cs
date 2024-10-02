@@ -46,7 +46,7 @@ public static class Program
                 {
                     DebuggerAttachedTimeout.DisableLongTimespan = true;
                    
-                    test.CompletelyDifferent();
+                    test.ComputeAndThenApplyRandomized();
                     //test.Streaming_documents_will_respect_the_sorting_order(
                     //    new RavenTestParameters
                     //    {
