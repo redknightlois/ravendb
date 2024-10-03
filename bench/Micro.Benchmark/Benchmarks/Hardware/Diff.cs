@@ -63,6 +63,9 @@ namespace Micro.Benchmark.Benchmarks.Hardware
 
         private NumericsDiff _numerics;
 
+        [Params(true, false)]
+        public bool AreDifferent { get; set; }
+
 
 
         [GlobalSetup]
@@ -80,13 +83,16 @@ namespace Micro.Benchmark.Benchmarks.Hardware
                 modified[i] = (byte)b;
             }
 
-            for (int i = 0; i < 100; i++)
+            if (AreDifferent)
             {
-                int start = r.Next(size - 1000);
-                int end = start + 256 + r.Next(4096);
+                for (int i = 0; i < 100; i++)
+                {
+                    int start = r.Next(size - 1000);
+                    int end = start + 256 + r.Next(4096);
 
-                for (; start < end; start++)
-                    source[start + i] = 0;
+                    for (; start < end; start++)
+                        source[start + i] = 0;
+                }
             }
 
             original = new ScalarDiff
