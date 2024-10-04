@@ -126,12 +126,18 @@ namespace Voron.Impl.Journal
                 // Skip any 64 bytes of unmodified buffer very fast.
                 while (bitmapPtr < bitmapEnd && *bitmapPtr == 0)
                 {
+                    if (Sse.IsSupported) 
+                        Sse.Prefetch0(inputBlockPtr + BlockSize);
+                    
                     bitmapPtr++;
                     inputBlockPtr += n;
                 }
 
                 while (bitmapPtr < bitmapEnd)
                 {
+                    if (Sse.IsSupported) 
+                        Sse.Prefetch0(inputBlockPtr + BlockSize);
+
                     // If we are done, we just bail out.
                     if (*bitmapPtr == 0)
                         goto NewLoop;
@@ -181,6 +187,9 @@ namespace Voron.Impl.Journal
                         runStoragePtrNext = runStoragePtr + n;
                         if (runStoragePtrNext >= outputEnd)
                             goto CopyFullBuffer;
+
+                        if (Sse.IsSupported) 
+                            Sse.Prefetch0(inputBlockPtr + BlockSize);
 
                         m0 = Vector512.Load((ulong*)inputBlockPtr);
                         bitmapPtr += 1;
