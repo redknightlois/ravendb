@@ -88,27 +88,28 @@ namespace Voron.Impl.Journal
                     // they are multiples of BlockSize to minimize the amount of housekeeping logic.
 
                     Vector256<ulong> m00 = Vector256.Load((ulong*)(inputBlockPtr + 0 * n2));
-                    Vector256<ulong> o00 = Vector256.Load((ulong*)(inputBlockPtr + offset + 0 * n2));
-                    
-                    Vector256<ulong> m01 = Vector256.Load((ulong*)(inputBlockPtr + 1 * n2));
-                    Vector256<ulong> o01 = Vector256.Load((ulong*)(inputBlockPtr + offset + 1 * n2));
-
                     Vector256<ulong> m10 = Vector256.Load((ulong*)(inputBlockPtr + 2 * n2));
+                    
+                    Vector256<ulong> o00 = Vector256.Load((ulong*)(inputBlockPtr + offset + 0 * n2));
                     Vector256<ulong> o10 = Vector256.Load((ulong*)(inputBlockPtr + offset + 2 * n2));
 
+                    Vector256<ulong> m01 = Vector256.Load((ulong*)(inputBlockPtr + 1 * n2));
                     Vector256<ulong> m11 = Vector256.Load((ulong*)(inputBlockPtr + 3 * n2));
+                    
+                    Vector256<ulong> o01 = Vector256.Load((ulong*)(inputBlockPtr + offset + 1 * n2));
                     Vector256<ulong> o11 = Vector256.Load((ulong*)(inputBlockPtr + offset + 3 * n2));
+
 
                     byte b00 = (byte)Vector256.Equals(o00, m00).ExtractMostSignificantBits();
                     byte b01 = (byte)Vector256.Equals(o01, m01).ExtractMostSignificantBits();
-                    byte b0 = (byte)(b00 << 4 | b01);
-                    
+                    byte b0 = (byte)((b00 << 4) + b01);
+
                     byte b10 = (byte)Vector256.Equals(o10, m10).ExtractMostSignificantBits();
                     byte b11 = (byte)Vector256.Equals(o11, m11).ExtractMostSignificantBits();
-                    byte b1 = (byte)(b10 << 4 | b11);
+                    byte b1 = (byte)((b10 << 4) + b11);
 
-                    *(ushort*)bitmapPtr = (ushort)~(b1 << 8 | b0);
-                    
+                    *(ushort*)bitmapPtr = (ushort)~((b1 << 8) + b0);
+
                     bitmapPtr += sizeof(ushort);
                     inputBlockPtr += sizeof(ushort) * n;
                 }
