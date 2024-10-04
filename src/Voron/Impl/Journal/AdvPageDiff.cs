@@ -46,7 +46,8 @@ namespace Voron.Impl.Journal
         public long ComputeDiff(byte* originalBuffer, byte* modifiedBuffer, byte* outputBuffer, long size, out bool isDiff)
         {
             const int n = 64;
-            
+            const int n2 = n / 2;
+
             Debug.Assert(size % PageSize == 0, "Size must be a multiple of PageSize");
 
             byte* inputPtr = modifiedBuffer;
@@ -72,9 +73,6 @@ namespace Voron.Impl.Journal
             {
                 Debug.Assert(inputPtr <= inputEnd - BlockSize, "Block processing exceeds buffer size");
 
-                if (outputPtr > outputEnd)
-                    goto CopyFullBuffer;
-
                 // Initialize bitmap for the current group of blocks
                 byte* inputBlockPtr = inputPtr;
                 byte* bitmapPtr = bitmap;
@@ -89,20 +87,30 @@ namespace Voron.Impl.Journal
                     // We know that a single load of a 512 bits vector will fill a byte. So we can add as many as we need as long as
                     // they are multiples of BlockSize to minimize the amount of housekeeping logic.
 
-                    Vector512<ulong> m0 = Vector512.Load((ulong*)(inputBlockPtr + 0 * n));
-                    Vector512<ulong> o0 = Vector512.Load((ulong*)(inputBlockPtr + offset + 0 * n));
-
-                    Vector512<ulong> m1 = Vector512.Load((ulong*)(inputBlockPtr + 1 * n));
-                    Vector512<ulong> o1 = Vector512.Load((ulong*)(inputBlockPtr + offset + 1 * n));
-
-                    var b0 = (byte)~Vector512.Equals(o0, m0).ExtractMostSignificantBits();
-                    var b1 = (byte)~Vector512.Equals(o1, m1).ExtractMostSignificantBits();
+                    Vector256<ulong> m00 = Vector256.Load((ulong*)(inputBlockPtr + 0 * n2));
+                    Vector256<ulong> o00 = Vector256.Load((ulong*)(inputBlockPtr + offset + 0 * n2));
                     
-                    bitmapPtr[0] = b0;
-                    bitmapPtr[1] = b1;
+                    Vector256<ulong> m01 = Vector256.Load((ulong*)(inputBlockPtr + 1 * n2));
+                    Vector256<ulong> o01 = Vector256.Load((ulong*)(inputBlockPtr + offset + 1 * n2));
+
+                    Vector256<ulong> m10 = Vector256.Load((ulong*)(inputBlockPtr + 2 * n2));
+                    Vector256<ulong> o10 = Vector256.Load((ulong*)(inputBlockPtr + offset + 2 * n2));
+
+                    Vector256<ulong> m11 = Vector256.Load((ulong*)(inputBlockPtr + 3 * n2));
+                    Vector256<ulong> o11 = Vector256.Load((ulong*)(inputBlockPtr + offset + 3 * n2));
+
+                    byte b00 = (byte)Vector256.Equals(o00, m00).ExtractMostSignificantBits();
+                    byte b01 = (byte)Vector256.Equals(o01, m01).ExtractMostSignificantBits();
+                    byte b0 = (byte)(b00 << 4 | b01);
                     
-                    inputBlockPtr += 2 * n;
-                    bitmapPtr += 2;
+                    byte b10 = (byte)Vector256.Equals(o10, m10).ExtractMostSignificantBits();
+                    byte b11 = (byte)Vector256.Equals(o11, m11).ExtractMostSignificantBits();
+                    byte b1 = (byte)(b10 << 4 | b11);
+
+                    *(ushort*)bitmapPtr = (ushort)~(b1 << 8 | b0);
+                    
+                    bitmapPtr += sizeof(ushort);
+                    inputBlockPtr += sizeof(ushort) * n;
                 }
 
                 // Check invariants
@@ -196,7 +204,7 @@ namespace Voron.Impl.Journal
                     runHeaderPtr->Count = isZeroRun ? -runLength : runLength;
 
                     // Since we wrote many blocks we have to add those bytes to the output.
-                    outputPtr += sizeof(RunHeader) + (isZeroRun ? 0 : runHeaderPtr->Count);
+                    outputPtr = runStoragePtr;
                 }
 
                 inputPtr += BlockSize;
