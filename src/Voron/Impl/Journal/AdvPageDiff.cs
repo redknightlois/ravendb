@@ -174,8 +174,9 @@ namespace Voron.Impl.Journal
                     Vector512.Store(m0.AsByte(), runStoragePtr);
 
                     bool isZeroRun = Vector512.EqualsAll(m0, Vector512<ulong>.Zero);
-                    runStoragePtr = isZeroRun ? runStoragePtr : runStoragePtrNext;
-                    
+                    // runStoragePtr = isZeroRun ? runStoragePtr : runStoragePtrNext;
+                    runStoragePtr = Branchless.ConditionalSelect(isZeroRun, runStoragePtr, runStoragePtrNext);
+
                     // Now if this 'start' is a zero-run, then m0 is going to be full of zeroes, which also mean that
                     // we can just loop until there are no changes.
                     while (bitmapPtr < bitmapEnd)
@@ -211,7 +212,7 @@ namespace Voron.Impl.Journal
                     // We could technically fix the count if in the last block there are unchanged values (we can know
                     // using the bitmap values corresponding to that particular block).
                     long runLength = inputBlockPtr - inputBlockPtrRunStart;
-                    runHeaderPtr->Count = isZeroRun ? -runLength : runLength;
+                    runHeaderPtr->Count = Branchless.ConditionalSelect(isZeroRun, -runLength, runLength);
 
                     // Since we wrote many blocks we have to add those bytes to the output.
                     outputPtr = runStoragePtr;
