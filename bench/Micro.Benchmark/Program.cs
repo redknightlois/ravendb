@@ -20,13 +20,15 @@ namespace Micro.Benchmark
 
 
             var test = new DiffNonZeroes();
+            test.AreDifferent = true;
             test.Setup();
-            Console.WriteLine($"AdvDiff: {test.Current_AdvDiff()}");
-            Console.WriteLine($"Diff: {test.Current_Sequential()}");
-            //for (int i = 0; i < 100000; i++)
-            //{
-            //    test.Current_Sequential();
-            //}
+            //Console.WriteLine($"AdvDiff: {test.Current_AdvDiff()}");
+            //Console.WriteLine($"Diff: {test.Current_Sequential()}");
+            for (int i = 0; i < 1000; i++)
+            {
+                //test.Current_Sequential();
+                test.Current_AdvDiff();
+            }
 
             BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(args);
         }

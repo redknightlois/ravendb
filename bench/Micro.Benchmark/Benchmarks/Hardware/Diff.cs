@@ -15,13 +15,16 @@ using BenchmarkDotNet.Validators;
 using Sparrow;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
+using BenchmarkDotNet.Diagnosers;
 using Sparrow.Server.Utils;
 using Voron.Impl.Journal;
 using NativeMemory = Sparrow.Utils.NativeMemory;
+using RunMode = BenchmarkDotNet.Jobs.RunMode;
 
 namespace Micro.Benchmark.Benchmarks.Hardware
 {
     [DisassemblyDiagnoser]
+    [HardwareCounters([HardwareCounter.BranchMispredictions, HardwareCounter.BranchInstructions, HardwareCounter.TotalIssues])]
     [Config(typeof(DiffNonZeroes.Config))]
     public unsafe class DiffNonZeroes
     {
