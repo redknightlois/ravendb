@@ -28,7 +28,7 @@ namespace Voron.Impl.Journal
         // certainly optimize this based on architecture eventually as a JIT constant. 
         // The block size has to be smaller than twice the capability of the L1 because we have 2 data streams.
         // For example in the AMD Zen3 architecture the L1 is a 32Kb, 8-way, 64 sets, 64B line. And has a latency of 4 clocks.
-        const int BlockSize = 1024;
+        const int BlockSize = 2048;
         const int PageSize = 4096; // This is always 4096 because we are ensuring that every page is at least a multiple of 4K
 
         [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -79,49 +79,49 @@ namespace Voron.Impl.Journal
 
                 Debug.Assert((ulong)(inputBlockPtr - modifiedBuffer) % BlockSize == 0);
 
+                // We know that a single load of a 512 bits vector will fill a byte. So we can add as many as we need as long as
+                // they are multiples of BlockSize to minimize the amount of housekeeping logic.
+
+                Vector256<ulong> m00 = Vector256.Load((ulong*)(inputBlockPtr + 0 * n2));
+                Vector256<ulong> o00 = Vector256.Load((ulong*)(inputBlockPtr + offset + 0 * n2));
+
+                Vector256<ulong> m01 = Vector256.Load((ulong*)(inputBlockPtr + 1 * n2));
+                Vector256<ulong> o01 = Vector256.Load((ulong*)(inputBlockPtr + offset + 1 * n2));
+
+                byte b00, b01, b10 = 0, b11 = 0;
                 // Block-level loop: unroll processing to handle multiple blocks per iteration
-                while (bitmapPtr < bitmapEnd)
+                while (true)
                 {
                     Debug.Assert(inputBlockPtr <= inputPtr + BlockSize - 2 * n);
 
-                    // We know that a single load of a 512 bits vector will fill a byte. So we can add as many as we need as long as
-                    // they are multiples of BlockSize to minimize the amount of housekeeping logic.
+                    b00 = (byte)Vector256.Equals(o00, m00).ExtractMostSignificantBits();
+                    b01 = (byte)Vector256.Equals(o01, m01).ExtractMostSignificantBits();
 
-                    Vector256<ulong> m00 = Vector256.Load((ulong*)(inputBlockPtr + 0 * n2));
-                    Vector256<ulong> o00 = Vector256.Load((ulong*)(inputBlockPtr + offset + 0 * n2));
-                    
-                    Vector256<ulong> m01 = Vector256.Load((ulong*)(inputBlockPtr + 1 * n2));
-                    Vector256<ulong> o01 = Vector256.Load((ulong*)(inputBlockPtr + offset + 1 * n2));
-
-                    byte b00 = (byte)Vector256.Equals(o00, m00).ExtractMostSignificantBits();
-                    byte b01 = (byte)Vector256.Equals(o01, m01).ExtractMostSignificantBits();
-                    byte b0 = (byte)((b00 << 4) + b01);
-                    
                     Vector256<ulong> m10 = Vector256.Load((ulong*)(inputBlockPtr + 2 * n2));
                     Vector256<ulong> o10 = Vector256.Load((ulong*)(inputBlockPtr + offset + 2 * n2));
 
                     Vector256<ulong> m11 = Vector256.Load((ulong*)(inputBlockPtr + 3 * n2));
                     Vector256<ulong> o11 = Vector256.Load((ulong*)(inputBlockPtr + offset + 3 * n2));
 
-                    byte b10 = (byte)Vector256.Equals(o10, m10).ExtractMostSignificantBits();
-                    byte b11 = (byte)Vector256.Equals(o11, m11).ExtractMostSignificantBits();
-                    byte b1 = (byte)((b10 << 4) + b11);
+                    b10 = (byte)Vector256.Equals(o10, m10).ExtractMostSignificantBits();
+                    b11 = (byte)Vector256.Equals(o11, m11).ExtractMostSignificantBits();
+                    
+                    if (bitmapPtr + sizeof(ushort) >= bitmapEnd)
+                        break;
+                    
+                    m00 = Vector256.Load((ulong*)(inputBlockPtr + 4 * n2));
+                    o00 = Vector256.Load((ulong*)(inputBlockPtr + offset + 4 * n2));
 
-                    if (Sse.IsSupported)
-                    {
-                        Sse.Prefetch0(inputBlockPtr + 4 * n2);
-                        Sse.Prefetch0(inputBlockPtr + offset + 4 * n2);
-                    }
+                    m01 = Vector256.Load((ulong*)(inputBlockPtr + 5 * n2));
+                    o01 = Vector256.Load((ulong*)(inputBlockPtr + offset + 5 * n2));
 
-                    *(ushort*)bitmapPtr = (ushort)~((b1 << 8) + b0);
+                    *(ushort*)bitmapPtr = (ushort)~(((byte)((b10 << 4) + b11) << 8) + (byte)((b00 << 4) + b01));
 
                     bitmapPtr += sizeof(ushort);
                     inputBlockPtr += sizeof(ushort) * n;
                 }
-
-                // Check invariants
-                Debug.Assert(inputPtr == inputBlockPtr - BlockSize);
-                Debug.Assert(bitmapPtr == bitmapEnd);
+                
+                *(ushort*)bitmapPtr = (ushort)~(((byte)((b10 << 4) + b11) << 8) + (byte)((b00 << 4) + b01));
 
                 // We need to reset the block pointer to start again because we need to just move toward the end on the modified buffer.
                 inputBlockPtr = inputPtr;
