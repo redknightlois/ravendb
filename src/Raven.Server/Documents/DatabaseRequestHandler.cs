@@ -1,5 +1,7 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Raven.Client;
@@ -14,6 +16,7 @@ using Raven.Server.Utils.Configuration;
 using Raven.Server.Web;
 using Sparrow.Json;
 using Sparrow.Logging;
+using Sparrow.Server.Logging;
 
 namespace Raven.Server.Documents
 {
@@ -25,12 +28,26 @@ namespace Raven.Server.Documents
 
         protected internal delegate void RefAction<T>(string databaseName, ref T configuration, JsonOperationContext context);
 
+        [ThreadStatic]
+        private static Dictionary<string, RavenLogger> _internalLoggerPool;
+
         public override void Init(RequestHandlerContext context)
         {
             Database = context.Database;
             ContextPool = Database.DocumentsStorage.ContextPool;
-            Logger = RavenLogManager.Instance.GetLoggerForDatabase(GetType(), Database);
 
+            _internalLoggerPool ??= new Dictionary<string, RavenLogger>();
+
+            var type = GetType();
+            if (_internalLoggerPool.TryGetValue($"{type.Name}/{Database.Name}", out Logger) == false)
+            {
+                Logger = RavenLogManager.Instance.GetLoggerForDatabase(type, Database);
+
+                // We will try to add it, but if there is already one at this thread dictionary, no problem, just get rid of it.
+                // Thread hopping is essentially what we are trying to deal with here. 
+                _internalLoggerPool?.TryAdd($"{GetType().Name}/{Database.Name}", Logger);
+            }
+            
             base.Init(context);
         }
 
