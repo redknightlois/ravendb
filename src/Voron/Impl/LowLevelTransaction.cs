@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using Sparrow;
 using Sparrow.Platform;
 using Sparrow.Server;
+using Sparrow.Server.Collections;
 using Sparrow.Threading;
 using Sparrow.Utils;
 using Sparrow.Server.Utils;
@@ -200,7 +201,7 @@ namespace Voron.Impl
             {
                 CopyPagerStatesFromPreviousTx(previous);
 
-                _pageLocator = transactionPersistentContext.AllocatePageLocator(this);
+                _pageLocator = PersistentContext.AllocatePageLocator();
 
                 _scratchPagerStates = previous._scratchPagerStates;
 
@@ -224,6 +225,18 @@ namespace Voron.Impl
                 throw;
             }
 
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public PageLocator AllocatePageLocator()
+        {
+            return PersistentContext.AllocatePageLocator();
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void FreePageLocator(PageLocator locator)
+        {
+            PersistentContext.FreePageLocator(locator);
         }
 
         private LowLevelTransaction(LowLevelTransaction previous, TransactionPersistentContext persistentContext, long txId)
@@ -299,7 +312,7 @@ namespace Voron.Impl
 
                 _state = previous._state.Clone();
 
-                _pageLocator = PersistentContext.AllocatePageLocator(this);
+                _pageLocator = PersistentContext.AllocatePageLocator();
                 InitializeRoots();
                 InitTransactionHeader();
             }
@@ -370,7 +383,7 @@ namespace Voron.Impl
                     EnsurePagerStateReference(ref pagerState);
                 }
 
-                _pageLocator = transactionPersistentContext.AllocatePageLocator(this);
+                _pageLocator = PersistentContext.AllocatePageLocator();
 
                 switch (flags)
                 {
@@ -964,7 +977,7 @@ namespace Voron.Impl
 
                 _txState |= TxState.Disposed;
 
-                PersistentContext.FreePageLocator(_pageLocator);
+                FreePageLocator(_pageLocator);
             }
             finally
             {
