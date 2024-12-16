@@ -2134,7 +2134,7 @@ namespace Raven.Server.Documents.Indexes
 
                 if (CalledUnderIndexingThread)
                 {
-                    ByteStringMemoryCache.CleanForCurrentThread();
+                    //ByteStringMemoryCache.CleanForCurrentThread();
                 }
 
                 IndexPersistence.Clean(mode);

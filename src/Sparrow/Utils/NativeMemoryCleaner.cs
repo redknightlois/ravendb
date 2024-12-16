@@ -1,100 +1,97 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Threading;
+using Sparrow.Collections;
 using Sparrow.Logging;
 using Sparrow.Threading;
 
 namespace Sparrow.Utils
 {
-    public sealed class NativeMemoryCleaner<TStack, TPooledItem> : IDisposable where TPooledItem : PooledItem where TStack : StackHeader<TPooledItem>
-    {
-        private static readonly IRavenLogger Logger = RavenLogManager.Instance.GetLoggerForSparrow(typeof(NativeMemoryCleaner<TStack, TPooledItem>));
 
-        private readonly object _lock = new object();
-        private readonly Func<object, ICollection<TStack>> _getContextsFromCleanupTarget;
+    public sealed class NativeMemoryCleaner<TPooledItem> : IDisposable
+        where TPooledItem : PooledItem
+    {
+        private static readonly IRavenLogger Logger = RavenLogManager.Instance.GetLoggerForSparrow(typeof(NativeMemoryCleaner<TPooledItem>));
+
+        private readonly LockFreeRingBuffer<TPooledItem> _ringBuffer;
         private readonly SharedMultipleUseFlag _lowMemoryFlag;
         private readonly TimeSpan _idleTime;
         private readonly Timer _timer;
-        private WeakReference _cleanupTargetWeakRef;
 
-        public NativeMemoryCleaner(object cleanupTarget, Func<object, ICollection<TStack>> getContexts, SharedMultipleUseFlag lowMemoryFlag, TimeSpan period, TimeSpan idleTime)
+        private bool _disposed;
+
+        public NativeMemoryCleaner(LockFreeRingBuffer<TPooledItem> ringBuffer, SharedMultipleUseFlag lowMemoryFlag, TimeSpan period, TimeSpan idleTime)
         {
-            _cleanupTargetWeakRef = new WeakReference(cleanupTarget);
-            _getContextsFromCleanupTarget = getContexts;
-
-            _lowMemoryFlag = lowMemoryFlag;
+            _ringBuffer = ringBuffer ?? throw new ArgumentNullException(nameof(ringBuffer));
+            _lowMemoryFlag = lowMemoryFlag ?? throw new ArgumentNullException(nameof(lowMemoryFlag));
             _idleTime = idleTime;
             _timer = new Timer(CleanNativeMemory, null, period, period);
         }
 
-        private ICollection<TStack> GetContexts()
-        {
-            object cleanupTarget = _cleanupTargetWeakRef.Target;
-            return cleanupTarget == null ? Array.Empty<TStack>() : _getContextsFromCleanupTarget(cleanupTarget);
-        }
+        private const int MinItemsInQueue = 2;
 
+        /// <summary>
+        /// Called periodically by the timer to clean up old or unneeded items.
+        /// This method no longer takes a global lock, as the ring buffer is thread-safe.
+        /// We aggressively and optimistically dequeue items, check their conditions, and either dispose or re-enqueue them.
+        /// </summary>
         public void CleanNativeMemory(object state)
         {
-            var lockTaken = false;
+            if (_disposed)
+                return;
+
             try
             {
-                Monitor.TryEnter(_lock, ref lockTaken);
-                if (lockTaken == false)
-                    return;
 
-                var now = DateTime.UtcNow;
-                ICollection<TStack> values;
-                try
+                int maxIterations = _ringBuffer.Count;
+                if (maxIterations <= MinItemsInQueue)
+                    return; // We effectively have nothing to do, we want to still have at least 2 items in there. 
+
+                DateTime now = DateTime.UtcNow;
+                for (int i = 0; i < maxIterations; i++)
                 {
-                    values = GetContexts();
-                }
-                catch (OutOfMemoryException)
-                {
-                    return; // trying to allocate the list?
-                }
-                catch (ObjectDisposedException)
-                {
-                    return; // already disposed
-                }
-                foreach (var header in values)
-                {
-                    if (header == null)
+                    if (_ringBuffer.TryDequeue(out var item) == false)
                         continue;
 
-                    var current = header.Head;
-                    while (current != null)
+                    if (item == null)
+                        continue;
+
+                    Debug.Assert(item.InUse.IsRaised() == false, "Item should not be in use when in the pool.");
+
+                    // TODO: Since this is a global ring buffer, time in pool is always going to be somewhat low; recheck this assumption with data.
+                    var timeInPool = now - item.InPoolSince;
+                    bool shouldDispose = _lowMemoryFlag.IsRaised() || timeInPool >= _idleTime;
+                    if (shouldDispose == false)
                     {
-                        var item = current.Value;
-                        var parent = current;
-                        current = current.Next;
-
-                        if (item == null)
-                            continue;
-
-                        if (_lowMemoryFlag == false)
+                        // Item is still fresh and we are not under memory pressure.
+                        // Attempt to return item back to the pool for reuse.
+                        if (_ringBuffer.TryEnqueue(item) == false)
                         {
-                            var timeInPool = now - item.InPoolSince;
-                            if (timeInPool < _idleTime)
-                                continue;
-                        } // else dispose context on low mem stress
-
-                        // it is too old, we can dispose it, but need to protect from races
-                        // if the owner thread will just pick it up
-
-                        if (!item.InUse.Raise())
-                            continue;
-
-                        try
-                        {
+                            // Fallback mechanism: if the pool is full, we have no choice but to dispose the item
+                            // to avoid memory leaks and uncontrolled growth.
                             item.Dispose();
                         }
-                        catch (ObjectDisposedException)
-                        {
-                            // it is possible that this has already been disposed
-                        }
 
-                        parent.Value = null;
+                        if (_ringBuffer.Count <= MinItemsInQueue)
+                            break;
+
+                        continue;
+                    }
+
+                    // Under memory pressure or item is too old, we will attempt to dispose.
+                    // but need to protect from races if the owner thread will just pick it up
+                    if (!item.InUse.Raise())
+                        continue;
+
+                    try
+                    {
+                        item.Dispose();
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // it is possible that this has already been disposed
                     }
                 }
             }
@@ -104,11 +101,6 @@ namespace Sparrow.Utils
                 if (Logger.IsErrorEnabled)
                     Logger.Error("Error during cleanup.", e);
             }
-            finally
-            {
-                if (lockTaken)
-                    Monitor.Exit(_lock);
-            }
         }
 
         public void Dispose()
@@ -116,6 +108,7 @@ namespace Sparrow.Utils
 #if !NETSTANDARD1_3
             using (var waitHandle = new ManualResetEvent(false))
             {
+                _disposed = true;
                 if (_timer.Dispose(waitHandle))
                 {
                     waitHandle.WaitOne();
