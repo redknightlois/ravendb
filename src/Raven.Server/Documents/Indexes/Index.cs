@@ -765,6 +765,7 @@ namespace Raven.Server.Documents.Indexes
             options.DisableSparseRegions = documentDatabase.Configuration.Storage.DisableSparseRegions;
             options.JournalsCompressionAcceleration = documentDatabase.Configuration.Storage.JournalsCompressionAcceleration;
             options.MinimumSharedJournalsMergeCount = documentDatabase.Configuration.Storage.MinimumSharedJournalsMergeCount;
+            options.MaxLogFileSize = documentDatabase.Configuration.Storage.MaxJournalFileSize.GetValue(SizeUnit.Bytes);
 
 
             if (documentDatabase.ServerStore.GlobalIndexingScratchSpaceMonitor != null)
