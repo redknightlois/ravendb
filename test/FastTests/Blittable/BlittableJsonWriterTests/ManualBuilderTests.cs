@@ -22,7 +22,7 @@ namespace FastTests.Blittable.BlittableJsonWriterTests
         {
         }
 
-        [Fact]
+        [RavenFact(RavenTestCategory.Core)]
         public void BasicObject()
         {
             using (var context = new JsonOperationContext(1024, 1024 * 4, 32 * 1024, SharedMultipleUseFlag.None))
@@ -46,7 +46,7 @@ namespace FastTests.Blittable.BlittableJsonWriterTests
             }
         }
 
-        [Fact]
+        [RavenFact(RavenTestCategory.Core)]
         public void BasicEmptyObject()
         {
             using (var context = new JsonOperationContext(1024, 1024 * 4, 32 * 1024, SharedMultipleUseFlag.None))
@@ -69,7 +69,7 @@ namespace FastTests.Blittable.BlittableJsonWriterTests
             }
         }
 
-        [Fact]
+        [RavenFact(RavenTestCategory.Core)]
         public void BasicNestedEmptyObject()
         {
             using (var context = new JsonOperationContext(1024, 1024 * 4, 32 * 1024, SharedMultipleUseFlag.None))
@@ -100,7 +100,7 @@ namespace FastTests.Blittable.BlittableJsonWriterTests
             }
         }
 
-        [Fact]
+        [RavenFact(RavenTestCategory.Core)]
         public void BasicIntFlatStructure()
         {
             using (var context = new JsonOperationContext(1024, 1024 * 4, 32 * 1024, SharedMultipleUseFlag.None))
@@ -135,7 +135,7 @@ namespace FastTests.Blittable.BlittableJsonWriterTests
             }
         }
 
-        [Fact]
+        [RavenFact(RavenTestCategory.Core)]
         public void BasicIntNestedStructure()
         {
             using (var context = new JsonOperationContext(1024, 1024 * 4, 32 * 1024, SharedMultipleUseFlag.None))
@@ -196,7 +196,7 @@ namespace FastTests.Blittable.BlittableJsonWriterTests
             }
         }
 
-        [Fact]
+        [RavenFact(RavenTestCategory.Core)]
         public void BasicIntDeeperNestedStructure()
         {
             using (var context = new JsonOperationContext(1024, 1024 * 4, 32 * 1024, SharedMultipleUseFlag.None))
@@ -318,7 +318,7 @@ namespace FastTests.Blittable.BlittableJsonWriterTests
             }
         }
 
-        [Fact]
+        [RavenFact(RavenTestCategory.Core)]
         public void FlatObjectWithEmptyArray()
         {
             using (var context = new JsonOperationContext(1024, 1024 * 4, 32 * 1024, SharedMultipleUseFlag.None))
@@ -357,7 +357,7 @@ namespace FastTests.Blittable.BlittableJsonWriterTests
             }
         }
 
-        [Fact]
+        [RavenFact(RavenTestCategory.Core)] 
         public void FlatObjectWithArrayOfEmptyObjects()
         {
             using (var context = new JsonOperationContext(1024, 1024 * 4, 32 * 1024, SharedMultipleUseFlag.None))
@@ -408,7 +408,7 @@ namespace FastTests.Blittable.BlittableJsonWriterTests
             }
         }
 
-        [Fact]
+        [RavenFact(RavenTestCategory.Core)]
         public void FlatObjectWithIntArrayTest()
         {
             using (var context = new JsonOperationContext(1024, 1024 * 4, 32 * 1024, SharedMultipleUseFlag.None))
@@ -452,7 +452,7 @@ namespace FastTests.Blittable.BlittableJsonWriterTests
             }
         }
 
-        [Fact]
+        [RavenFact(RavenTestCategory.Core)]
         public void ObjectWithNestedIntArrayTest()
         {
             using (var context = new JsonOperationContext(1024, 1024 * 4, 32 * 1024, SharedMultipleUseFlag.None))
@@ -716,7 +716,7 @@ namespace FastTests.Blittable.BlittableJsonWriterTests
             }
         }
 
-        [Fact]
+        [RavenFact(RavenTestCategory.Core)]
         public void FlatObjectWithObjectArray()
         {
             using (var context = new JsonOperationContext(1024, 1024 * 4, 32 * 1024, SharedMultipleUseFlag.None))
@@ -773,7 +773,7 @@ namespace FastTests.Blittable.BlittableJsonWriterTests
             }
         }
 
-        [Fact]
+        [RavenFact(RavenTestCategory.Core)]
         public void FlatObjectWithObjectArrayWithNestedArray()
         {
             using (var context = new JsonOperationContext(1024, 1024 * 4, 32 * 1024, SharedMultipleUseFlag.None))
@@ -840,7 +840,7 @@ namespace FastTests.Blittable.BlittableJsonWriterTests
             }
         }
 
-        [Fact]
+        [RavenFact(RavenTestCategory.Core)]
         public void SimpleArrayDocument()
         {
             using (var context = new JsonOperationContext(1024, 1024 * 4, 32 * 1024, SharedMultipleUseFlag.None))
@@ -868,7 +868,7 @@ namespace FastTests.Blittable.BlittableJsonWriterTests
             }
         }
 
-        [Theory]
+        [RavenTheory(RavenTestCategory.Core)]
         [InlineData(byte.MaxValue)]
         [InlineData(short.MaxValue)]
         [InlineData(short.MaxValue + 1)]
@@ -911,7 +911,7 @@ namespace FastTests.Blittable.BlittableJsonWriterTests
             }
         }
 
-        [Fact]
+        [RavenFact(RavenTestCategory.Core)]
         public unsafe void ReadDataTypesTest()
         {
             using (var context = new JsonOperationContext(1024, 1024 * 4, 32 * 1024, SharedMultipleUseFlag.None))
@@ -931,8 +931,17 @@ namespace FastTests.Blittable.BlittableJsonWriterTests
 
                 using (var builder = new ManualBlittableJsonDocumentBuilder<UnmanagedWriteBuffer>(context))
                 {
-                    var lonEscapedCharsString = string.Join(",", Enumerable.Repeat("\"Cool\"", 200).ToArray());
+                    var longEscapedCharsString = string.Join(",", Enumerable.Repeat("\"Cool\"", 200).ToArray());
                     var longEscapedCharsAndNonAsciiString = string.Join(",", Enumerable.Repeat("\"מגניב\"", 200).ToArray());
+
+                    var veryLongEscapedCharsString = string.Join(",", Enumerable.Repeat("\"Cool\"", 200).ToArray());
+                    var veryLongEscapedCharsAndNonAsciiString = string.Join(",", Enumerable.Repeat("\"מגניב\"", 200).ToArray());
+
+                    var longEscapedWithControlCharsString = string.Join(",", Enumerable.Repeat("Cool\u0001\t\n", 100).ToArray());
+                    var expectedLongEscapedWithControlCharsString = string.Join(",", Enumerable.Repeat("Cool\\u0001\t\n", 100).ToArray());
+
+                    var veryLongEscapedWithControlCharsString = string.Join(",", Enumerable.Repeat("Cool\u0001\t\n", 300).ToArray());
+                    var expectedVeryLongEscapedWithControlCharsString = string.Join(",", Enumerable.Repeat("Cool\\u0001\t\n", 300).ToArray());
 
                     builder.Reset(BlittableJsonDocumentBuilder.UsageMode.None);
 
@@ -979,10 +988,22 @@ namespace FastTests.Blittable.BlittableJsonWriterTests
                     builder.WriteValue("\"Cool\"");
 
                     builder.WritePropertyName("StringLongEscapedChars");
-                    builder.WriteValue(lonEscapedCharsString);
+                    builder.WriteValue(longEscapedCharsString);
 
                     builder.WritePropertyName("StringEscapedCharsAndNonAscii");
                     builder.WriteValue(longEscapedCharsAndNonAsciiString);
+
+                    builder.WritePropertyName("StringVeryLongEscapedChars");
+                    builder.WriteValue(veryLongEscapedCharsString);
+
+                    builder.WritePropertyName("StringVeryEscapedCharsAndNonAscii");
+                    builder.WriteValue(veryLongEscapedCharsAndNonAsciiString);
+
+                    builder.WritePropertyName("StringLongEscapedWithControlChars");
+                    builder.WriteValue(longEscapedWithControlCharsString);
+
+                    builder.WritePropertyName("StringVeryLongEscapedWithControlChars");
+                    builder.WriteValue(veryLongEscapedWithControlCharsString);
 
                     var lsvString = "\"fooאbar\"";
                     var lsvStringBytes = Encoding.UTF8.GetBytes(lsvString);
@@ -1008,7 +1029,7 @@ namespace FastTests.Blittable.BlittableJsonWriterTests
                     var reader = builder.CreateReader();
                     reader.BlittableValidation();
 
-                    Assert.Equal(17, reader.Count);
+                    Assert.Equal(21, reader.Count);
                     Assert.Equal(float.MinValue, float.Parse(reader["FloatMin"].ToString(), CultureInfo.InvariantCulture));
                     Assert.Equal(float.MaxValue, float.Parse(reader["FloatMax"].ToString(), CultureInfo.InvariantCulture));
                     Assert.Equal(ushort.MinValue, ushort.Parse(reader["UshortMin"].ToString(), CultureInfo.InvariantCulture));
@@ -1022,15 +1043,19 @@ namespace FastTests.Blittable.BlittableJsonWriterTests
                     Assert.Equal(string.Empty, reader["StringEmpty"].ToString());
                     Assert.Equal("StringSimple", reader["StringSimple"].ToString());
                     Assert.Equal("\"Cool\"", reader["StringEscapedChars"].ToString());
-                    Assert.Equal(lonEscapedCharsString, reader["StringLongEscapedChars"].ToString());
+                    Assert.Equal(longEscapedCharsString, reader["StringLongEscapedChars"].ToString());
                     Assert.Equal(longEscapedCharsAndNonAsciiString, reader["StringEscapedCharsAndNonAscii"].ToString());
+                    Assert.Equal(veryLongEscapedCharsString, reader["StringVeryLongEscapedChars"].ToString());
+                    Assert.Equal(veryLongEscapedCharsAndNonAsciiString, reader["StringVeryEscapedCharsAndNonAscii"].ToString());
+                    Assert.Equal(expectedLongEscapedWithControlCharsString, reader["StringLongEscapedWithControlChars"].ToString());
+                    Assert.Equal(expectedVeryLongEscapedWithControlCharsString, reader["StringVeryLongEscapedWithControlChars"].ToString());
                     Assert.Equal(lsvString, reader["LSVString"].ToString());
                     Assert.Equal(1000, int.Parse((reader["Embedded"] as BlittableJsonReaderObject)["Value"].ToString(), CultureInfo.InvariantCulture));
                 }
             }
         }
 
-        [Fact]
+        [RavenFact(RavenTestCategory.Core)]
         public void LargeDocumentsMemoryReuse()
         {
             using (var context = new JsonOperationContext(1024 * 64, 1024 * 4, 32 * 1024, SharedMultipleUseFlag.None))
