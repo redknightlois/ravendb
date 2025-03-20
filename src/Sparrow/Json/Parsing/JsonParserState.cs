@@ -53,7 +53,7 @@ namespace Sparrow.Json.Parsing
             return FindEscapePositionsMaxSize(str.AsSpan(), out escapedCount);
         }
 
-        private static ReadOnlySpan<int> EscapePositionsCountTable =>
+        internal static ReadOnlySpan<int> EscapePositionsCountTable =>
         [
             0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 1, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -62,29 +62,13 @@ namespace Sparrow.Json.Parsing
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
         ];
 
-        private static ReadOnlySpan<int> EscapePositionsControlTable =>
+        internal static ReadOnlySpan<int> EscapePositionsControlTable =>
         [
             1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 1,
             1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -101,7 +85,32 @@ namespace Sparrow.Json.Parsing
 
             foreach (var value in str)
             {
-                if (value >= 255)
+                if (value >= EscapePositionsCountTable.Length)
+                    continue;
+
+                count += EscapePositionsCountTable[value];
+                controlCount += EscapePositionsControlTable[value];
+            }
+
+            escapedCount = controlCount;
+            // we take 5 because that is the max number of bytes for variable size int
+            // plus 1 for the actual number of positions
+
+            // NOTE: this is used by FindEscapePositionsIn, change only if you also modify FindEscapePositionsIn
+            return (count + 1) * EscapePositionItemSize + controlCount * ControlCharacterItemSize;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static int FindEscapePositionsMaxSize(ReadOnlySpan<byte> str, out int escapedCount)
+        {
+            var count = 0;
+            var controlCount = 0;
+
+            foreach (var value in str)
+            {
+                // PERF: We can do this for UTF8 because Non-ASCII characters have the higher bit set and the 
+                // tables only cover the ASCII charset.
+                if (value >= EscapePositionsCountTable.Length)
                     continue;
 
                 count += EscapePositionsCountTable[value];
@@ -124,7 +133,7 @@ namespace Sparrow.Json.Parsing
             for (int i = 0; i < size; i++)
             {
                 var value = str[i];
-                if (value >= 255)
+                if (value >= EscapePositionsCountTable.Length)
                     continue;
 
                 count += EscapePositionsCountTable[value];
@@ -200,10 +209,12 @@ namespace Sparrow.Json.Parsing
                 }
             }
         }
+
         private static void ThrowInvalidSizeForEscapeControlChars(int previousComputedMaxSize)
         {
             throw new InvalidOperationException($"The previousComputedMaxSize: {previousComputedMaxSize} is too small to support the required escape positions. Did you not call FindMaxNumberOfEscapePositions?");
         }
+
         public int WriteEscapePositionsTo(byte* buffer)
         {
             var escapePositions = EscapePositions;
