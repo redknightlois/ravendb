@@ -30,15 +30,12 @@ public partial class Hnsw
                 _searchState.RegisterNodeLocation(EntryPointId, entryPointNode);
             }
 
-            SingleThreadedScheduler singleThreadedScheduler = new();
-            var placement = new NodePlacement(this, singleThreadedScheduler);
-
-            Task.Factory.StartNew(()=> placement.Place(), CancellationToken.None,TaskCreationOptions.None,
-                singleThreadedScheduler);
-            singleThreadedScheduler.Run();
+            int maxTasks = Math.Min(Math.Max(1, _searchState.CreatedNodesCount / 256), 256);
+            NodePlacementScheduler scheduler = new(this, maxTasks);
+            scheduler.Run();
         }
 
-        private class NodePlacement(Registration parent, SingleThreadedScheduler singleThreadedScheduler)
+        private class NodePlacement(Registration parent)
         {
             private readonly SearchState _searchState = parent._searchState;
             private readonly List<int> _candidates = [];
@@ -51,22 +48,15 @@ public partial class Hnsw
             private readonly PriorityQueue<int, float> _candidatesQ = new();
             private readonly PriorityQueue<int, float> _nearestEdgesQ = new();
 
-            public async Task Place()
+            public async Task RunAsync()
             {
-                try
+                while (true)
                 {
-                    while (true)
-                    {
-                        var currentNodeIndex = parent._nextNodeIndex++;
-                        if (currentNodeIndex >= _searchState.CreatedNodesCount)
-                            break;
+                    var currentNodeIndex = parent._nextNodeIndex++;
+                    if (currentNodeIndex >= _searchState.CreatedNodesCount)
+                        break;
 
-                        await FindGraphPlacementForNode(currentNodeIndex);
-                    }
-                }
-                finally
-                {
-                    singleThreadedScheduler.Done();
+                    await FindGraphPlacementForNode(currentNodeIndex);
                 }
             }
 
@@ -94,7 +84,7 @@ public partial class Hnsw
                     for (int i = 0; i < _candidates.Count; i++)
                     {
                         int edgeIdx = _candidates[i];
-                        if(edgeIdx == currentNodeIndex)
+                        if (edgeIdx == currentNodeIndex)
                             continue; // cannot add node to itself
                         ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
                         list.AddUnsafe(edge.NodeId);
@@ -114,7 +104,9 @@ public partial class Hnsw
                         {
                             ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
                             ref var edgeList = ref edge.EdgesPerLevel[level];
+                            _indexes.Clear();
                             _indexes.EnsureCapacity(edgeList.Count);
+                            _vectors.Clear();
                             _vectors.EnsureCapacity(edgeList.Count);
                             for (int k = 0; k < edgeList.Count; k++)
                             {
@@ -130,12 +122,13 @@ public partial class Hnsw
                         await ExecuteElsewhere(() =>
                         {
                             FilterEdgesHeuristic(vector, _edgeIndexes, _indexes, _vectors);
-                            return 1;// unused
+                            return 1; // unused
                         });
 
                         {
                             ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
                             ref var edgeList = ref edge.EdgesPerLevel[level];
+                            edgeList.ResetAndEnsureCapacity(_searchState.Llt.Allocator,_edgeIndexes.Count);
                             for (int k = 0; k < _edgeIndexes.Count; k++)
                             {
                                 edgeList.AddUnsafe(_searchState.GetNodeByIndex(_edgeIndexes[k]).NodeId);
@@ -183,6 +176,8 @@ public partial class Hnsw
 
                 if (_nearestEdgesQ.Count > _searchState.Options.NumberOfEdges)
                 {
+                    _indexes.Clear();
+                    _vectors.Clear();
                     while (_nearestEdgesQ.TryDequeue(out var edgeId, out var d))
                     {
                         _indexes.Add(edgeId);
@@ -192,7 +187,7 @@ public partial class Hnsw
                     await ExecuteElsewhere(() =>
                     {
                         FilterEdgesHeuristic(vector, _candidates, _indexes, _vectors);
-                        return 0;// unused
+                        return 0; // unused
                     });
                 }
                 else
@@ -354,38 +349,63 @@ public partial class Hnsw
                 return level;
             }
         }
-    }
 
-    private static  Task<TResult> ExecuteElsewhere<TResult>(Func<TResult> func)
-    {
-        return Task.Factory.StartNew(func, 
-            CancellationToken.None, TaskCreationOptions.None, 
-            TaskScheduler.Default);
-    }
-    
-    public class SingleThreadedScheduler : TaskScheduler
-    {
-        private readonly BlockingCollection<Task> _tasks = [];
-        protected override IEnumerable<Task> GetScheduledTasks() => _tasks;
-
-        protected override void QueueTask(Task task)
+        private static Task<TResult> ExecuteElsewhere<TResult>(Func<TResult> func)
         {
-            _tasks.Add(task);
+            return Task.Factory.StartNew(func,
+                CancellationToken.None, TaskCreationOptions.None,
+                TaskScheduler.Default);
         }
 
-        protected override bool TryExecuteTaskInline(Task task, bool taskWasPreviouslyQueued) => false;
-
-        public void Run()
+        private class NodePlacementScheduler : TaskScheduler
         {
-            foreach(var task in _tasks.GetConsumingEnumerable())
+            private int _completed;
+            private readonly BlockingCollection<Task> _tasks = [];
+
+            public NodePlacementScheduler(Registration parent, int activeTasksCount)
             {
-                TryExecuteTask(task);
+                for (int i = 0; i < activeTasksCount; i++)
+                {
+                    Task.Factory.StartNew(async () =>
+                    {
+                        try
+                        {
+                            NodePlacement placement = new(parent);
+                            await placement.RunAsync();
+                        }
+                        finally
+                        {
+                            if (activeTasksCount == ++_completed)
+                            {
+                                _tasks.CompleteAdding();
+                            }
+                        }
+                    }, CancellationToken.None, TaskCreationOptions.None, this);
+                }
             }
-        }
 
-        public void Done()
-        {
-            _tasks.CompleteAdding();
+            protected override IEnumerable<Task> GetScheduledTasks() => _tasks;
+
+            protected override void QueueTask(Task task)
+            {
+                _tasks.Add(task);
+            }
+
+            protected override bool TryExecuteTaskInline(Task task, bool taskWasPreviouslyQueued) => false;
+
+            public void Run()
+            {
+                foreach (var task in _tasks.GetConsumingEnumerable())
+                {
+                    TryExecuteTask(task);
+                }
+            }
+
+            public void Done()
+            {
+                _tasks.CompleteAdding();
+            }
         }
     }
 }
+
