@@ -31,6 +31,7 @@ using Sparrow.Server.Logging;
 using Sparrow.Server.Platform;
 using Sparrow.Utils;
 using Voron;
+using Voron.Data.Graphs;
 using Voron.Exceptions;
 using Voron.Impl;
 using NativeMemory = Sparrow.Utils.NativeMemory;
@@ -157,6 +158,7 @@ namespace Raven.Server
 
             configuration.Initialize();
             GenerateEmbeddings.Configure(configuration);
+            // Hnsw.Configure(configuration.Indexing.MaxNumberOfThreadsForHnswAcceleration);
 
             GlobalFlushingBehavior.NumberOfConcurrentSyncsPerPhysicalDrive = configuration.Storage.NumberOfConcurrentSyncsPerPhysicalDrive;
 

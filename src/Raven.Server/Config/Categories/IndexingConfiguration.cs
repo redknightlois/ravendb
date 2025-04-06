@@ -99,6 +99,13 @@ namespace Raven.Server.Config.Categories
                 <= 16 => 4,
                 _ => 6
             };
+            MaxNumberOfThreadsForHnswAcceleration = Environment.ProcessorCount switch
+            {
+                <= 2 => 1,
+                <= 8 => 3,
+                <= 16 => 6,
+                _ => 12
+            };
         }
         
         private static HashSet<string> GetValidIndexingConfigurationKeys()
@@ -633,6 +640,12 @@ namespace Raven.Server.Config.Categories
         [IndexUpdateType(IndexUpdateType.None)]
         [ConfigurationEntry("Indexing.Corax.VectorSearch.MaxNumberOfThreadsForLocalEmbeddingsGeneration", ConfigurationEntryScope.ServerWideOnly)]
         public int MaxNumberOfThreadsForLocalEmbeddingsGeneration { get; set; }
+        
+        [Description("Maximum number of threads that will be used accelerating HNSW distnace computation.")]
+        [DefaultValue(DefaultValueSetInConstructor)]
+        [IndexUpdateType(IndexUpdateType.None)]
+        [ConfigurationEntry("Indexing.Corax.VectorSearch.MaxNumberOfThreadsForHnswAcceleration", ConfigurationEntryScope.ServerWideOnly)]
+        public int MaxNumberOfThreadsForHnswAcceleration { get; set; }
         
         protected override void ValidateProperty(PropertyInfo property)
         {

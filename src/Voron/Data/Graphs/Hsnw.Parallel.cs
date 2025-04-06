@@ -1,9 +1,10 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Threading;
 using System.Threading.Tasks;
 using Sparrow;
-using Sparrow.Server.Utils;
 using Voron.Data.Containers;
 using Voron.Util;
 
@@ -29,16 +30,17 @@ public partial class Hnsw
                 _searchState.RegisterNodeLocation(EntryPointId, entryPointNode);
             }
 
-            var placement = new NodePlacement(this);
-            while (_nextNodeIndex < _searchState.CreatedNodesCount)
-            {
-                placement.Place().GetAwaiter().GetResult();
-            }
+            SingleThreadedScheduler singleThreadedScheduler = new();
+            var placement = new NodePlacement(this, singleThreadedScheduler);
+
+            Task.Factory.StartNew(()=> placement.Place(), CancellationToken.None,TaskCreationOptions.None,
+                singleThreadedScheduler);
+            singleThreadedScheduler.Run();
         }
 
-        private class NodePlacement(Registration parent)
+        private class NodePlacement(Registration parent, SingleThreadedScheduler singleThreadedScheduler)
         {
-            private readonly Hnsw.SearchState _searchState = parent._searchState;
+            private readonly SearchState _searchState = parent._searchState;
             private readonly List<int> _candidates = [];
             private readonly List<int> _nearestIndexes = [];
             private readonly List<int> _indexes = [];
@@ -51,13 +53,20 @@ public partial class Hnsw
 
             public async Task Place()
             {
-                while (true)
+                try
                 {
-                    var currentNodeIndex = parent._nextNodeIndex++;
-                    if (currentNodeIndex >= _searchState.CreatedNodesCount)
-                        break;
+                    while (true)
+                    {
+                        var currentNodeIndex = parent._nextNodeIndex++;
+                        if (currentNodeIndex >= _searchState.CreatedNodesCount)
+                            break;
 
-                    await FindGraphPlacementForNode(currentNodeIndex);
+                        await FindGraphPlacementForNode(currentNodeIndex);
+                    }
+                }
+                finally
+                {
+                    singleThreadedScheduler.Done();
                 }
             }
 
@@ -118,7 +127,11 @@ public partial class Hnsw
                             vector = edge.GetVectorUnmanagedSpan(_searchState);
                         }
 
-                        await FilterEdgesHeuristicAsync(vector, _edgeIndexes, _indexes, _vectors);
+                        await ExecuteElsewhere(() =>
+                        {
+                            FilterEdgesHeuristic(vector, _edgeIndexes, _indexes, _vectors);
+                            return 1;// unused
+                        });
 
                         {
                             ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
@@ -163,7 +176,7 @@ public partial class Hnsw
                         _indexes[i] = -1; // no need to check
                     }
 
-                    lowerBound = await ProcessEdgesAsync(vector, lowerBound);
+                    lowerBound = await ExecuteElsewhere(() => ProcessEdges(vector, lowerBound));
                 }
 
                 _candidatesQ.Clear();
@@ -176,7 +189,11 @@ public partial class Hnsw
                         _vectors.Add(_searchState.GetNodeByIndex(edgeId).GetVectorUnmanagedSpan(_searchState));
                     }
 
-                    await FilterEdgesHeuristicAsync(vector, _candidates, _indexes, _vectors);
+                    await ExecuteElsewhere(() =>
+                    {
+                        FilterEdgesHeuristic(vector, _candidates, _indexes, _vectors);
+                        return 0;// unused
+                    });
                 }
                 else
                 {
@@ -190,7 +207,7 @@ public partial class Hnsw
             }
 
 
-            public async Task FilterEdgesHeuristicAsync(UnmanagedSpan src, List<int> candidates, List<int> indexes, List<UnmanagedSpan> vectors)
+            private void FilterEdgesHeuristic(UnmanagedSpan src, List<int> candidates, List<int> indexes, List<UnmanagedSpan> vectors)
             {
                 // See: https://icode.best/i/45208840268843 - Chinese, but auto-translate works, and a good explanation with 
                 // conjunction of: https://img-bc.icode.best/20210425010212938.png
@@ -239,7 +256,7 @@ public partial class Hnsw
                 _candidatesQ.Clear();
             }
 
-            private async Task<float> ProcessEdgesAsync(UnmanagedSpan vector, float lowerBound)
+            private float ProcessEdges(UnmanagedSpan vector, float lowerBound)
             {
                 int numberOfCandidates = _searchState.Options.NumberOfCandidates;
                 for (int i = 0; i < _indexes.Count; i++)
@@ -292,7 +309,7 @@ public partial class Hnsw
                             _indexes[i] = -1;
                         }
 
-                        var (shortestDistance, closestNode) = await FindNearestAsync(from);
+                        var (shortestDistance, closestNode) = await ExecuteElsewhere(() => FindNearest(from));
                         if (shortestDistance >= distance)
                             break;
                         currentNodeIndex = closestNode;
@@ -306,7 +323,7 @@ public partial class Hnsw
                 _nearestIndexes.Reverse();
             }
 
-            private async Task<(float distance, int currentNodeIndex)> FindNearestAsync(UnmanagedSpan from)
+            private (float distance, int currentNodeIndex) FindNearest(UnmanagedSpan from)
             {
                 float distance = float.MaxValue;
                 int closestNodeIndex = -1;
@@ -336,6 +353,39 @@ public partial class Hnsw
 
                 return level;
             }
+        }
+    }
+
+    private static  Task<TResult> ExecuteElsewhere<TResult>(Func<TResult> func)
+    {
+        return Task.Factory.StartNew(func, 
+            CancellationToken.None, TaskCreationOptions.None, 
+            TaskScheduler.Default);
+    }
+    
+    public class SingleThreadedScheduler : TaskScheduler
+    {
+        private readonly BlockingCollection<Task> _tasks = [];
+        protected override IEnumerable<Task> GetScheduledTasks() => _tasks;
+
+        protected override void QueueTask(Task task)
+        {
+            _tasks.Add(task);
+        }
+
+        protected override bool TryExecuteTaskInline(Task task, bool taskWasPreviouslyQueued) => false;
+
+        public void Run()
+        {
+            foreach(var task in _tasks.GetConsumingEnumerable())
+            {
+                TryExecuteTask(task);
+            }
+        }
+
+        public void Done()
+        {
+            _tasks.CompleteAdding();
         }
     }
 }
