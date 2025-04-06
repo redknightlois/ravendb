@@ -5,6 +5,7 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Threading.Tasks;
 using Sparrow;
 using Sparrow.Compression;
 using Sparrow.Platform;
@@ -158,13 +159,18 @@ public unsafe partial class Hnsw
             return bufferSpan[..pos];
         }
 
-        public Span<byte> GetVector(SearchState state)
+        public UnmanagedSpan GetVectorUnmanagedSpan(SearchState state)
         {
             if (_vectorSpan.Length > 0) 
-                return _vectorSpan.ToSpan();
+                return _vectorSpan;
 
             _vectorSpan = NodeReader.ReadVector(VectorId, in state);
             return _vectorSpan;
+        }
+        
+        public Span<byte> GetVector(SearchState state)
+        {
+            return GetVectorUnmanagedSpan(state).ToSpan();
         }
     }
 
@@ -375,7 +381,7 @@ public unsafe partial class Hnsw
         }
 
         /// <summary>
-        /// This accepts a list of node ids (mutable, we do destructive to it) and translate
+        /// This accepts a list of node ids (mutable, we do destructive updates to it) and translate
         /// that to a list of the indexes in the nodes array. If needed, it will load the nodes
         /// from the disk in a batch oriented manner. 
         /// </summary>
@@ -417,6 +423,47 @@ public unsafe partial class Hnsw
                 reader.LoadInto(ref _nodes[indexes[matches + i]]);
             }
         }
+        
+        private void LoadNodeIndexes(List<long> nodeIds, List<int> indexes)
+        {
+            indexes.Clear();
+            indexes.EnsureCapacity(nodeIds.Count);
+            for (int i = 0; i < nodeIds.Count; i++)
+            {
+                if (_nodeIdToIdx.TryGetValue(nodeIds[i], out var index))
+                {
+                    indexes.Add(index);
+                    nodeIds[i] = -1;
+                }
+            }
+            
+            if (indexes.Count == nodeIds.Count)
+                return;
+
+            var matches = indexes.Count;
+            var keys = CollectionsMarshal.AsSpan(nodeIds);
+            keys.Sort();
+            keys = keys[matches..]; // discard all those we already found
+            for (int i = 0; i < keys.Length; i++)
+            {
+                var nodeIdx = AllocateNodeIndex(keys[i]);
+                _nodes[nodeIdx].NodeId = keys[i];
+                _nodeIdToIdx[keys[i]] = nodeIdx;
+                indexes.Add(nodeIdx);
+            }
+            _nodeIdToLocations.GetFor(keys, keys, -1);
+            
+            using var _ = Llt.Allocator.AllocateDirect(sizeof(UnmanagedSpan) * keys.Length, out var buffer);
+            var spans = (UnmanagedSpan*)buffer.Ptr;
+            Container.GetAll(Llt, keys, spans, -1, Llt.PageLocator);
+            for (int i = 0; i < keys.Length; i++)
+            {
+                var buf = spans[i].ToSpan();
+                var reader = Node.Decode(Llt, buf);
+                reader.LoadInto(ref _nodes[indexes[matches + i]]);
+            }
+        }
+
 
         public int GetNodeIndexById(long nodeId)
         {
@@ -440,6 +487,11 @@ public unsafe partial class Hnsw
             return ref GetNodeByIndex(idx);
         }
 
+        public float Distance(UnmanagedSpan src, UnmanagedSpan dst)
+        {
+            return SimilarityCalc(src.ToSpan(), dst.ToSpan());
+        }
+        
         public float Distance(ReadOnlySpan<byte> vector, int fromIdx, int toIdx)
         {
             if (vector.IsEmpty)
@@ -468,49 +520,6 @@ public unsafe partial class Hnsw
             postingListSize = smallPostingList.Length;
         }
 
-        public void FilterEdgesHeuristic(int srcIdx, ref NativeList<int> candidates)
-        {
-            // See: https://icode.best/i/45208840268843 - Chinese, but auto-translate works, and a good explanation with 
-            // conjunction of: https://img-bc.icode.best/20210425010212938.png
-            // See also the paper here: https://arxiv.org/pdf/1603.09320
-            // This implements the Fig. 2 / Algorithm 4
-            
-            Debug.Assert(_candidatesQ.Count is 0);
-            for (int i = 0; i < candidates.Count; i++)
-            {
-                var dstIndex = candidates[i];
-                var distance = Distance(Span<byte>.Empty, srcIdx, dstIndex);
-                _candidatesQ.Enqueue(dstIndex, distance);
-            }
-
-            candidates.Clear();
-            
-            while (candidates.Count <= Options.NumberOfEdges &&
-                   _candidatesQ.TryDequeue(out var cur, out var distance))
-            {
-                bool match = true;
-                for (int i = 0; i < candidates.Count; i++)
-                {
-                    int alternativeIndex = candidates[i];
-                    var curDist = Distance(Span<byte>.Empty, cur, alternativeIndex);
-                    // there is already an item in the result that is *closer* to the current
-                    // node than the target node, so no need to add it
-                    if (curDist < distance)
-                    {
-                        match = false;
-                        break;
-                    }
-                }
-
-                if (match)
-                {
-                    Debug.Assert(candidates.HasCapacityFor(1), "candidates.HasCapacityFor(1)");
-                    candidates.AddUnsafe(cur);
-                }
-            }
-
-            _candidatesQ.Clear();
-        }
 
         [Flags]
         public enum NearestEdgesFlags
@@ -663,9 +672,26 @@ public unsafe partial class Hnsw
             nodeIds.Dispose(Llt.Allocator);
             nearestIndexes.Reverse();
         }
+
+        private readonly List<long> _edgesCopy = [];
+        public void GetEdges(int currentNodeIndex, int level, List<int> indexes, List<UnmanagedSpan> vectors)
+        {
+            ref var n = ref GetNodeByIndex(currentNodeIndex);
+            n.EdgesPerLevel.SetCapacity(Llt.Allocator, level + 1);
+            Debug.Assert(n.EdgesPerLevel.Count > level, "n.EdgesPerLevel.Count > level");
+            ref var edges = ref n.EdgesPerLevel[level];
+            _edgesCopy.Clear();
+            _edgesCopy.Add(n.NodeId);
+            _edgesCopy.AddRange(edges.ToSpan());
+            LoadNodeIndexes(_edgesCopy, indexes);
+            for (int i = 0; i < indexes.Count; i++)
+            {
+                vectors.Add(_nodes[i].GetVectorUnmanagedSpan(this));
+            }
+        }
     }
     
-    public class Registration : IDisposable
+    public partial class Registration : IDisposable
     {
         public bool IsCommited { get; private set; }
         private readonly Dictionary<ByteString, (ByteString Key, int NodeIndex, NativeList<long> PostingList)> _vectorHashCache = new(ByteStringContentComparer.Instance);
@@ -886,16 +912,6 @@ public unsafe partial class Hnsw
             return hashBuffer;
         }
         
-        private int GetLevelForNewNode(int maxLevel)
-        {
-            int level = 0;
-            while ((Random.Next() & 1) == 0 && // 50% chance 
-                   level < maxLevel)
-            {
-                level++;
-            }
-            return level;
-        }
 
         public void Commit()
         {
@@ -1106,90 +1122,7 @@ public unsafe partial class Hnsw
         }
 
 
-        void InsertVectorsToGraph(ref ContextBoundNativeList<byte> byteBuffer)
-        {
-            if (_searchState.TryGetLocationForNode(EntryPointId, out var entryPointNode) is false)
-            {
-                if (_searchState.CreatedNodesCount == 0)
-                    return;
-
-                ref Node startingNode = ref _searchState.Nodes[0];
-                Span<byte> span = startingNode.Encode(ref byteBuffer);
-                entryPointNode = Container.Allocate(_searchState.Llt, _searchState.Options.Container, span.Length, out Span<byte> allocated);
-                span.CopyTo(allocated);
-                _searchState.RegisterNodeLocation(EntryPointId, entryPointNode);
-            }
-
-            var nearestNodesByLevel = new NativeList<int>();
-            var edges = new NativeList<int>();
-            var tmp = new NativeList<int>();
-
-            nearestNodesByLevel.EnsureCapacityFor(_searchState.Llt.Allocator, _searchState.Options.MaxLevel + 1);
-
-            for (int currentNodeIndex = 0; currentNodeIndex < _searchState.CreatedNodesCount; currentNodeIndex++)
-            {
-                nearestNodesByLevel.Clear();
-
-                var currentMaxLevel = _searchState.Options.CurrentMaxLevel(_searchState.CreatedNodesCount - currentNodeIndex);
-                int nodeRandomLevel = GetLevelForNewNode(currentMaxLevel);
-                Span<byte> vector;
-                {
-                    // intentionally scoping Node here, to avoid "leaking" the reference
-                    // it isn't _stable_ one and may move if the _nodes list is realloced
-                    ref var node = ref _searchState.GetNodeByIndex(currentNodeIndex);
-                    node.EdgesPerLevel.SetCapacity(_searchState.Llt.Allocator, nodeRandomLevel + 1);
-                    vector = node.GetVector(_searchState);
-                    _searchState.SearchNearestAcrossLevels(vector, currentNodeIndex, currentMaxLevel, ref nearestNodesByLevel);
-                }
-                for (int level = nodeRandomLevel; level >= 0; level--)
-                {
-                    int startingPointIndex = nearestNodesByLevel[level];
-                    edges.Clear();
-                    var flags = currentNodeIndex != startingPointIndex ? 
-                        SearchState.NearestEdgesFlags.StartingPointAsEdge : 
-                        SearchState.NearestEdgesFlags.None;
-                    
-                    _searchState.NearestEdges(startingPointIndex, currentNodeIndex,
-                        vector,
-                        level, _searchState.Options.NumberOfCandidates, ref edges, flags);
-
-                    if (edges.Count > _searchState.Options.NumberOfEdges)
-                        _searchState.FilterEdgesHeuristic(currentNodeIndex, ref edges);
-
-                    ref var node = ref _searchState.GetNodeByIndex(currentNodeIndex);
-                    ref var list = ref node.EdgesPerLevel[level];
-                    list.EnsureCapacityFor(_searchState.Llt.Allocator, edges.Count);
-                    list.Clear();
-                    for (int i = 0; i < edges.Count; i++)
-                    {
-                        int edgeIdx = edges[i];
-                        ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
-                        list.AddUnsafe(edge.NodeId);
-                        Debug.Assert(edge.NodeId != node.NodeId, "edge.NodeId != node.NodeId");
-                        
-                        ref var edgeList = ref edge.EdgesPerLevel[level];
-                        edgeList.Add(_searchState.Llt.Allocator, node.NodeId);
-
-                        if (edgeList.Count <= _searchState.Options.NumberOfEdges)
-                            continue;
-
-                        // FilterEdgesHeuristic works on node indexes, while edges list is node ids
-                        // so we need to convert them back & forth in this manner
-                        tmp.ResetAndEnsureCapacity(_searchState.Llt.Allocator, edgeList.Count);
-                        for (int k = 0; k < edgeList.Count; k++)
-                        {
-                            tmp.AddUnsafe(_searchState.GetNodeIndexById(edgeList[k]));
-                        }
-                        _searchState.FilterEdgesHeuristic(edgeIdx, ref tmp);
-                        edgeList.Clear();
-                        for (int k = 0; k < tmp.Count; k++)
-                        {
-                            edgeList.AddUnsafe(_searchState.GetNodeByIndex(tmp[k]).NodeId);
-                        }
-                    }
-                }
-            }
-        }
+        
     }
 
     public static Registration RegistrationFor(LowLevelTransaction llt, string name, Random random = null)
