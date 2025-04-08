@@ -505,10 +505,15 @@ public unsafe partial class Hnsw
             var distance = SimilarityCalc(vector, v2);
             return distance;
         }
-        
+
         public void ReadPostingList(long rawPostingListId, ref ContextBoundNativeList<long> listBuffer, ref FastPForDecoder pforDecoder, out int postingListSize)
         {
-            var smallPostingList = Container.Get(Llt, rawPostingListId);
+            ReadPostingList(Llt, rawPostingListId, ref listBuffer, ref pforDecoder, out postingListSize);
+        }
+
+        public static void ReadPostingList(LowLevelTransaction llt,long rawPostingListId, ref ContextBoundNativeList<long> listBuffer, ref FastPForDecoder pforDecoder, out int postingListSize)
+        {
+            var smallPostingList = Container.Get(llt, rawPostingListId);
             var count = VariableSizeEncoding.Read<int>(smallPostingList.Address, out var offset);
             
             var requiredSize = Math.Max(256, 256 * (int)Math.Ceiling((count + listBuffer.Count) / 256f));
