@@ -1,13 +1,15 @@
 ﻿using System;
 using System.Diagnostics;
 using System.Numerics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Sparrow.Server.Utils.VxSort;
 
 namespace Sparrow.Server.Utils
 {
     internal static class Sorting
     {
-        public static int SortAndMergeDuplicates<T, W>(Span<T> values, Span<W> itemsAssociated)
+        public static unsafe int SortAndMergeDuplicates<T, W>(Span<T> values, Span<W> itemsAssociated)
             where T : unmanaged, IBinaryNumber<T>
             where W : unmanaged, IAdditionOperators<W, W, W>
         {
@@ -16,22 +18,42 @@ namespace Sparrow.Server.Utils
             
             values.Sort(itemsAssociated);
 
-            int outputIdx = 0;
-            for (int i = 1; i < values.Length; i++)
+            // Set up references for efficient span traversal
+            ref var valuesStartRef = ref MemoryMarshal.GetReference(values);
+            ref var valuesEndRef = ref Unsafe.Add(ref valuesStartRef, values.Length);
+            ref var outputValuesRef = ref valuesStartRef;
+            ref var outputItemRef = ref MemoryMarshal.GetReference(itemsAssociated);
+            ref var currentValuesRef = ref valuesStartRef;
+            ref var currentItemRef = ref outputItemRef;
+
+            // Iterate through the sorted span to merge duplicates
+            while (Unsafe.IsAddressLessThan(ref currentValuesRef, ref valuesEndRef))
             {
-                if (values[i] == values[outputIdx])
+                // Advance to the next element for comparison, since in the naive version we
+                // start at one, it is the same as pre incrementing the starting reference.
+                currentValuesRef = ref Unsafe.Add(ref currentValuesRef, 1);
+                currentItemRef = ref Unsafe.Add(ref currentItemRef, 1);
+
+                // Check if current value is a duplicate of the last output value
+                if (currentValuesRef != outputValuesRef)
                 {
-                    itemsAssociated[outputIdx] += itemsAssociated[i];
+                    // Advance output position since this is a new value.
+                    outputValuesRef = ref Unsafe.Add(ref outputValuesRef, 1);
+                    outputItemRef = ref Unsafe.Add(ref outputItemRef, 1);
+
+                    outputValuesRef = currentValuesRef;
+                    outputItemRef = currentItemRef;
                 }
                 else
                 {
-                    outputIdx++;
-                    values[outputIdx] = values[i];
-                    itemsAssociated[outputIdx] = itemsAssociated[i];
+                    // Duplicate value: merge associated items by adding them
+                    outputItemRef += currentItemRef;
                 }
             }
 
-            return outputIdx + 1;
+            // Calculate the number of unique elements based on the final output position
+            int outputIdx = (int)Unsafe.ByteOffset(ref valuesStartRef, ref outputValuesRef).ToInt32() / Unsafe.SizeOf<T>();
+            return outputIdx;
         }
         
         public static int SortAndRemoveDuplicates<T, W>(Span<T> valuesToDeduplicate, Span<W> itemsAssociated)
