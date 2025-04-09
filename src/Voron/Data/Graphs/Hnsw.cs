@@ -689,9 +689,11 @@ public unsafe partial class Hnsw
             _edgesCopy.Add(n.NodeId);
             _edgesCopy.AddRange(edges.ToSpan());
             LoadNodeIndexes(_edgesCopy, indexes);
+            vectors.Clear();
             for (int i = 0; i < indexes.Count; i++)
             {
-                vectors.Add(_nodes[i].GetVectorUnmanagedSpan(this));
+                var nodeIdx = indexes[i];
+                vectors.Add(_nodes[nodeIdx].GetVectorUnmanagedSpan(this));
             }
         }
     }
