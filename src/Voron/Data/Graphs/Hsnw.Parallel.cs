@@ -75,7 +75,7 @@ public partial class Hnsw
                 for (int level = nodeRandomLevel; level >= 0; level--)
                 {
                     int startingPointIndex = _nearestIndexes[level];
-                    await NearestEdgesAsync(startingPointIndex, insertedVector, level);
+                    await NearestEdgesAsync(startingPointIndex, currentNodeIndex, insertedVector, level);
                     ref var node = ref _searchState.GetNodeByIndex(currentNodeIndex);
                     ref var list = ref node.EdgesPerLevel[level];
                     list.EnsureCapacityFor(_searchState.Llt.Allocator, _candidates.Count);
@@ -84,8 +84,7 @@ public partial class Hnsw
                     for (int i = 0; i < _candidates.Count; i++)
                     {
                         int edgeIdx = _candidates[i];
-                        if (edgeIdx == currentNodeIndex)
-                            continue; // cannot add node to itself
+                        Debug.Assert(edgeIdx != currentNodeIndex);
                         ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
                         list.AddUnsafe(edge.NodeId);
 
@@ -124,7 +123,6 @@ public partial class Hnsw
                             FilterEdgesHeuristic(vector, _edgeIndexes, _indexes, _vectors);
                             return 1; // unused
                         });
-
                         {
                             ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
                             ref var edgeList = ref edge.EdgesPerLevel[level];
@@ -139,15 +137,15 @@ public partial class Hnsw
             }
 
 
-            private async Task NearestEdgesAsync(int startingPointIndex, UnmanagedSpan vector, int level)
+            private async Task NearestEdgesAsync(int startingPointIndex, int currentNodeIndex, UnmanagedSpan vector, int level)
             {
                 Debug.Assert(_candidatesQ.Count == 0, "_candidatesQ.Count == 0");
                 Debug.Assert(_nearestEdgesQ.Count == 0, "_nearestEdgesQ.Count == 0");
 
                 float lowerBound = float.MaxValue;
                 _visited.Clear();
-                _candidates.Clear();
-
+                _visited.Add(currentNodeIndex); // we can't have an edge to itself
+ 
                 // candidates queue is sorted using the distance, so the lowest distance
                 // will always pop first.
                 // nearest edges is sorted using _reversed_ distance, so when we add a 
@@ -173,15 +171,21 @@ public partial class Hnsw
                 }
 
                 _candidatesQ.Clear();
+                _candidates.Clear();
+                while (_nearestEdgesQ.TryDequeue(out var edgeId, out var d))
+                {
+                    _candidates.Add(edgeId);
+                }
+                _candidates.Reverse();
 
-                if (_nearestEdgesQ.Count > _searchState.Options.NumberOfEdges)
+                if (_candidates.Count > _searchState.Options.NumberOfEdges)
                 {
                     _indexes.Clear();
                     _vectors.Clear();
-                    while (_nearestEdgesQ.TryDequeue(out var edgeId, out var d))
+                    for (int i = 0; i < _candidates.Count; i++)
                     {
-                        _indexes.Add(edgeId);
-                        _vectors.Add(_searchState.GetNodeByIndex(edgeId).GetVectorUnmanagedSpan(_searchState));
+                        _indexes.Add(_candidates[i]);
+                        _vectors.Add(_searchState.GetNodeByIndex(_candidates[i]).GetVectorUnmanagedSpan(_searchState));
                     }
 
                     await ExecuteElsewhere(() =>
@@ -190,15 +194,6 @@ public partial class Hnsw
                         return 0; // unused
                     });
                 }
-                else
-                {
-                    while (_nearestEdgesQ.TryDequeue(out var edgeId, out var d))
-                    {
-                        _candidates.Add(edgeId);
-                    }
-                }
-
-                _candidates.Reverse();
             }
 
 
