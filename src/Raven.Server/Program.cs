@@ -158,7 +158,7 @@ namespace Raven.Server
 
             configuration.Initialize();
             GenerateEmbeddings.Configure(configuration);
-            // Hnsw.Configure(configuration.Indexing.MaxNumberOfThreadsForHnswAcceleration);
+            Hnsw.MaxNumberOfWorkerThreads = configuration.Indexing.MaxNumberOfThreadsForHnswAcceleration;
 
             GlobalFlushingBehavior.NumberOfConcurrentSyncsPerPhysicalDrive = configuration.Storage.NumberOfConcurrentSyncsPerPhysicalDrive;
 

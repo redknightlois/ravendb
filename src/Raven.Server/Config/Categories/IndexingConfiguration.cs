@@ -647,6 +647,13 @@ namespace Raven.Server.Config.Categories
         [ConfigurationEntry("Indexing.Corax.VectorSearch.MaxNumberOfThreadsForHnswAcceleration", ConfigurationEntryScope.ServerWideOnly)]
         public int MaxNumberOfThreadsForHnswAcceleration { get; set; }
         
+        [Description("Expert: The maximum number of concurrent batches for HNSW distnace computation acceleration.")]
+        [DefaultValue(512)]
+        [IndexUpdateType(IndexUpdateType.None)]
+        [ConfigurationEntry("Indexing.Corax.VectorSearch.MaximumConcurrentBatchesForHnswAcceleration", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
+        public int MaximumConcurrentBatchesForHnswAcceleration { get; set; }
+
+        
         protected override void ValidateProperty(PropertyInfo property)
         {
             base.ValidateProperty(property);

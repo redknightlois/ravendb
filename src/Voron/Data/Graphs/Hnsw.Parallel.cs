@@ -2,6 +2,8 @@
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Sparrow;
@@ -16,6 +18,7 @@ public partial class Hnsw
     {
         private int _nextNodeIndex;
 
+        public int MaxConcurrentBatches = 512;
         void InsertVectorsToGraph(ref ContextBoundNativeList<byte> byteBuffer)
         {
             if (_searchState.TryGetLocationForNode(EntryPointId, out var entryPointNode) is false)
@@ -30,7 +33,10 @@ public partial class Hnsw
                 _searchState.RegisterNodeLocation(EntryPointId, entryPointNode);
             }
 
-            int maxTasks = Math.Min(Math.Max(1, _searchState.CreatedNodesCount / 256), 256);
+            // Run 1..MaxConcurrentBatches batches here, depending on how much work we have to run
+            int numberOfBatches = Math.Max(1, _searchState.CreatedNodesCount / MaxConcurrentBatches);
+            // but not too much...
+            int maxTasks = Math.Min(numberOfBatches, MaxConcurrentBatches);
             NodePlacementScheduler scheduler = new(this, maxTasks);
             scheduler.Run();
         }
@@ -118,11 +124,8 @@ public partial class Hnsw
                             vector = edge.GetVectorUnmanagedSpan(_searchState);
                         }
 
-                        await ExecuteElsewhere(() =>
-                        {
-                            FilterEdgesHeuristic(vector, _edgeIndexes, _indexes, _vectors);
-                            return 1; // unused
-                        });
+                        await Workers.Run(new FilterEdgesHeuristicWorker(vector, _edgeIndexes, _indexes, _vectors, _candidatesQ, _searchState));
+                        
                         {
                             ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
                             ref var edgeList = ref edge.EdgesPerLevel[level];
@@ -167,7 +170,9 @@ public partial class Hnsw
                         _indexes[i] = -1; // no need to check
                     }
 
-                    lowerBound = await ExecuteElsewhere(() => ProcessEdges(vector, lowerBound));
+                    var worker = new ProcessEdgesWorker(vector, lowerBound, _indexes, _vectors, _candidatesQ, _nearestEdgesQ, _searchState);
+                    await Workers.Run(worker);
+                    lowerBound = worker.LowerBound;
                 }
 
                 _candidatesQ.Clear();
@@ -188,96 +193,104 @@ public partial class Hnsw
                         _vectors.Add(_searchState.GetNodeByIndex(_candidates[i]).GetVectorUnmanagedSpan(_searchState));
                     }
 
-                    await ExecuteElsewhere(() =>
-                    {
-                        FilterEdgesHeuristic(vector, _candidates, _indexes, _vectors);
-                        return 0; // unused
-                    });
+                    await Workers.Run(new FilterEdgesHeuristicWorker(vector, _candidates, _indexes, _vectors, _candidatesQ, _searchState));
                 }
             }
 
-
-            private void FilterEdgesHeuristic(UnmanagedSpan src, List<int> candidates, List<int> indexes, List<UnmanagedSpan> vectors)
+            private record FilterEdgesHeuristicWorker(
+                UnmanagedSpan Src, 
+                List<int> Candidates, 
+                List<int> Indexes, 
+                List<UnmanagedSpan> Vectors, 
+                PriorityQueue<int, float> Queue,
+                SearchState SearchState) : WorkItem(DateTime.UtcNow)
             {
-                // See: https://icode.best/i/45208840268843 - Chinese, but auto-translate works, and a good explanation with 
-                // conjunction of: https://img-bc.icode.best/20210425010212938.png
-                // See also the paper here: https://arxiv.org/pdf/1603.09320
-                // This implements the Fig. 2 / Algorithm 4
-
-                Debug.Assert(_candidatesQ.Count is 0);
-                for (int i = 0; i < indexes.Count; i++)
+                public override void Execute()
                 {
-                    var distance = _searchState.Distance(src, vectors[i]);
-                    // note that we use local indexes here!
-                    _candidatesQ.Enqueue(i, distance);
-                }
+                    // See: https://icode.best/i/45208840268843 - Chinese, but auto-translate works, and a good explanation with 
+                    // conjunction of: https://img-bc.icode.best/20210425010212938.png
+                    // See also the paper here: https://arxiv.org/pdf/1603.09320
+                    // This implements the Fig. 2 / Algorithm 4
 
-                candidates.Clear();
-
-                while (candidates.Count <= _searchState.Options.NumberOfEdges &&
-                       _candidatesQ.TryDequeue(out var cur, out var distance))
-                {
-                    bool match = true;
-                    for (int i = 0; i < candidates.Count; i++)
+                    Debug.Assert(Queue.Count is 0);
+                    for (int i = 0; i < Indexes.Count; i++)
                     {
-                        int alternativeIndex = candidates[i];
-                        var curDist = _searchState.Distance(vectors[cur], vectors[alternativeIndex]);
-                        // there is already an item in the result that is *closer* to the current
-                        // node than the target node, so no need to add it
-                        if (curDist < distance)
+                        var distance = SearchState.Distance(Src, Vectors[i]);
+                        // note that we use local indexes here!
+                        Queue.Enqueue(i, distance);
+                    }
+
+                    Candidates.Clear();
+
+                    while (Candidates.Count <= SearchState.Options.NumberOfEdges &&
+                           Queue.TryDequeue(out var cur, out var distance))
+                    {
+                        bool match = true;
+                        for (int i = 0; i < Candidates.Count; i++)
                         {
-                            match = false;
-                            break;
+                            int alternativeIndex = Candidates[i];
+                            var curDist = SearchState.Distance(Vectors[cur], Vectors[alternativeIndex]);
+                            // there is already an item in the result that is *closer* to the current
+                            // node than the target node, so no need to add it
+                            if (curDist < distance)
+                            {
+                                match = false;
+                                break;
+                            }
+                        }
+
+                        if (match)
+                        {
+                            Candidates.Add(cur);
                         }
                     }
 
-                    if (match)
+                    for (int i = 0; i < Candidates.Count; i++)
                     {
-                        candidates.Add(cur);
+                        // turn the local indexing into a global one
+                        Candidates[i] = Indexes[Candidates[i]];
                     }
+
+                    Queue.Clear();
                 }
 
-                for (int i = 0; i < candidates.Count; i++)
-                {
-                    // turn the local indexing into a global one
-                    candidates[i] = indexes[candidates[i]];
-                }
-
-                _candidatesQ.Clear();
             }
 
-            private float ProcessEdges(UnmanagedSpan vector, float lowerBound)
+            private record ProcessEdgesWorker(UnmanagedSpan Vector, float InitialLowerBound, List<int> Indexes, List<UnmanagedSpan> Vectors, PriorityQueue<int, float> Candidates,PriorityQueue<int, float> NearestEdges,
+                SearchState SearchState) : WorkItem(DateTime.UtcNow)
             {
-                int numberOfCandidates = _searchState.Options.NumberOfCandidates;
-                for (int i = 0; i < _indexes.Count; i++)
+                public float LowerBound = InitialLowerBound;
+                
+                public override void Execute()
                 {
-                    var nextIndex = _indexes[i];
-                    if (_indexes[i] is -1)
-                        continue; // already checked
+                    int numberOfCandidates = SearchState.Options.NumberOfCandidates;
+                    for (int i = 0; i < Indexes.Count; i++)
+                    {
+                        var nextIndex = Indexes[i];
+                        if (Indexes[i] is -1)
+                            continue; // already checked
 
-                    float nextDist = -_searchState.Distance(vector, _vectors[i]);
-                    if (_nearestEdgesQ.Count < numberOfCandidates)
-                    {
-                        _candidatesQ.Enqueue(nextIndex, -nextDist);
-                        _nearestEdgesQ.Enqueue(nextIndex, nextDist);
-                    }
-                    else if (lowerBound < nextDist)
-                    {
-                        _candidatesQ.Enqueue(nextIndex, -nextDist);
-                        _nearestEdgesQ.EnqueueDequeue(nextIndex, nextDist);
-                    }
-                    else
-                    {
-                        continue;
-                    }
+                        float nextDist = -SearchState.Distance(Vector, Vectors[i]);
+                        if (NearestEdges.Count < numberOfCandidates)
+                        {
+                            Candidates.Enqueue(nextIndex, -nextDist);
+                            NearestEdges.Enqueue(nextIndex, nextDist);
+                        }
+                        else if (LowerBound < nextDist)
+                        {
+                            Candidates.Enqueue(nextIndex, -nextDist);
+                            NearestEdges.EnqueueDequeue(nextIndex, nextDist);
+                        }
+                        else
+                        {
+                            continue;
+                        }
 
-                    Debug.Assert(_candidatesQ.Count > 0);
-                    _nearestEdgesQ.TryPeek(out _, out lowerBound);
+                        Debug.Assert(Candidates.Count > 0);
+                        NearestEdges.TryPeek(out _, out LowerBound);
+                    }
                 }
-
-                return lowerBound;
             }
-
 
             private async Task SearchNearestAcrossLevelsAsync(UnmanagedSpan from, int maxLevel)
             {
@@ -299,11 +312,12 @@ public partial class Hnsw
                             _indexes[i] = -1;
                         }
 
-                        var (shortestDistance, closestNode) = await ExecuteElsewhere(() => FindNearest(from));
-                        if (shortestDistance >= distance)
+                        var worker = new FindNearestWorker(from, _indexes, _vectors, _searchState);
+                        await Workers.Run(worker);
+                        if (worker.Distance >= distance)
                             break;
-                        currentNodeIndex = closestNode;
-                        distance = shortestDistance;
+                        currentNodeIndex = worker.CurrentNodeIndex;
+                        distance = worker.Distance;
                     } while (true);
 
                     _nearestIndexes.Add(currentNodeIndex);
@@ -313,24 +327,28 @@ public partial class Hnsw
                 _nearestIndexes.Reverse();
             }
 
-            private (float distance, int currentNodeIndex) FindNearest(UnmanagedSpan from)
+            private record FindNearestWorker(UnmanagedSpan From, List<int> Indexes, List<UnmanagedSpan> Vectors, SearchState SearchState) : WorkItem(DateTime.UtcNow)
             {
-                float distance = float.MaxValue;
-                int closestNodeIndex = -1;
-                for (var i = 0; i < _indexes.Count; i++)
+                public float Distance = float.MaxValue;
+                public int CurrentNodeIndex = -1;
+                
+                public override void Execute()
                 {
-                    var edgeIdx = _indexes[i];
-                    if (edgeIdx is -1)
-                        continue;
-                    var curDist = _searchState.Distance(from, _vectors[i]);
-                    if (curDist >= distance || double.IsNaN(curDist))
-                        continue;
-                    distance = curDist;
-                    closestNodeIndex = edgeIdx;
+                    for (var i = 0; i < Indexes.Count; i++)
+                    {
+                        var edgeIdx = Indexes[i];
+                        if (edgeIdx is -1)
+                            continue;
+                        var curDist = SearchState.Distance(From, Vectors[i]);
+                        if (curDist >= Distance || double.IsNaN(curDist))
+                            continue;
+                        Distance = curDist;
+                        CurrentNodeIndex = edgeIdx;
+                    }
                 }
-
-                return (distance, closestNodeIndex);
+                
             }
+            
 
             private int GetLevelForNewNode(int maxLevel)
             {
@@ -343,13 +361,6 @@ public partial class Hnsw
 
                 return level;
             }
-        }
-
-        private static Task<TResult> ExecuteElsewhere<TResult>(Func<TResult> func)
-        {
-            return Task.Factory.StartNew(func,
-                CancellationToken.None, TaskCreationOptions.None,
-                TaskScheduler.Default);
         }
 
         private class NodePlacementScheduler : TaskScheduler
@@ -390,17 +401,125 @@ public partial class Hnsw
 
             public void Run()
             {
-                foreach (var task in _tasks.GetConsumingEnumerable())
+                Workers.Start();// only happens once
+
+                while (_tasks.IsCompleted is false)
                 {
+                    if (_tasks.TryTake(out var task))
+                    {
+                        TryExecuteTask(task);
+                        continue;
+                    }
+                    // we have nothing to do, let's try processing
+                    // some work ourselves instead of just waiting
+                    if (Workers.Queue.TryTake(out var worker))
+                    {
+                        Workers.ProcessItem(worker);
+                        continue;
+                    }
+
+                    try
+                    {
+                        task = _tasks.Take();
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // task was completed
+                        continue; 
+                    }
                     TryExecuteTask(task);
                 }
             }
+        }
+    }
 
-            public void Done()
+    private abstract record WorkItem(DateTime Registered)
+    {
+        public TaskCompletionSource<object> Tcs;
+        public abstract void Execute();
+    }
+
+    public static int MaxNumberOfWorkerThreads = Math.Max(1, Environment.ProcessorCount / 4);
+
+    private static class Workers
+    {
+        public static readonly BlockingCollection<WorkItem> Queue = [];
+        private static int WorkersCount;
+        private static DateTime AllowThreadCreationAfter = DateTime.MinValue;
+        
+        public static void Start()
+        {
+            if (WorkersCount != 0)
+                return;
+            
+            if (Interlocked.CompareExchange(ref WorkersCount, 1, 0) != 0)
+                return; // already started;
+            
+            new Thread(Primary)
             {
-                _tasks.CompleteAdding();
+                Name = "HNSW.Worker",
+                IsBackground = true
+            }.Start();
+        }
+
+        private static void CreateNewThread()
+        {
+            if (DateTime.Now < AllowThreadCreationAfter)
+                return; // not yet
+        
+            AllowThreadCreationAfter = DateTime.UtcNow.AddSeconds(5);
+            Interlocked.Increment(ref WorkersCount);
+            new Thread(Helper)
+            {
+                Name = "HNSW.Worker",
+                IsBackground = true
+            }.Start();
+        }
+        private static void Helper()
+        {
+            var timeout = TimeSpan.FromSeconds(15);
+            while (Queue.TryTake(out var item , timeout))
+            {
+                ProcessItem((WorkItem)item);
             }
+            Interlocked.Decrement(ref WorkersCount);
+        }
+
+        public static void ProcessItem(WorkItem item)
+        {
+            try
+            {
+                item.Execute();
+                item.Tcs.TrySetResult(item);
+            }
+            catch (Exception e)
+            {
+                item.Tcs.TrySetException(e);
+            }
+        }
+
+        private static void Primary()
+        {
+            var maxDelay = TimeSpan.FromSeconds(2);
+            foreach (WorkItem item in Queue.GetConsumingEnumerable())
+            {
+                DateTime now = DateTime.UtcNow;
+                var delay = (item.Registered - now);
+                if (delay > maxDelay && WorkersCount < MaxNumberOfWorkerThreads)
+                {
+                    CreateNewThread();
+                }
+
+                ProcessItem(item);
+            }
+        }
+
+        public static Task Run(WorkItem workItem)
+        {
+            var tcs = new TaskCompletionSource<object>();
+            workItem.Tcs = tcs;
+            Queue.Add(workItem);
+            return tcs.Task;
         }
     }
 }
-
