@@ -49,7 +49,6 @@ public partial class Hnsw
             private readonly List<int> _nearestIndexes = [];
             private readonly List<int> _indexes = [];
             private readonly List<int> _requiresEdgeFiltering = [];
-            private readonly List<int> _edgeIndexes = [];
             private readonly List<UnmanagedSpan> _vectors = [];
             private readonly HashSet<int> _visited = [];
             private readonly PriorityQueue<int, float> _candidatesQ = new();
@@ -125,15 +124,15 @@ public partial class Hnsw
                             vector = edge.GetVectorUnmanagedSpan(_searchState);
                         }
 
-                        await scheduler.Offload(new FilterEdgesHeuristicWorker(vector, _edgeIndexes, _indexes, _vectors, _candidatesQ, _searchState));
+                        await scheduler.Offload(new FilterEdgesHeuristicWorker(this, vector));
                         
                         {
                             ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
                             ref var edgeList = ref edge.EdgesPerLevel[level];
-                            edgeList.ResetAndEnsureCapacity(_searchState.Llt.Allocator,_edgeIndexes.Count);
-                            for (int k = 0; k < _edgeIndexes.Count; k++)
+                            edgeList.ResetAndEnsureCapacity(_searchState.Llt.Allocator,_indexes.Count);
+                            for (int k = 0; k < _indexes.Count; k++)
                             {
-                                edgeList.AddUnsafe(_searchState.GetNodeByIndex(_edgeIndexes[k]).NodeId);
+                                edgeList.AddUnsafe(_searchState.GetNodeByIndex(_indexes[k]).NodeId);
                             }
                         }
                     }
@@ -171,7 +170,7 @@ public partial class Hnsw
                         _indexes[i] = -1; // no need to check
                     }
 
-                    var worker = new ProcessEdgesWorker(vector, lowerBound, _indexes, _vectors, _candidatesQ, _nearestEdgesQ, _searchState);
+                    var worker = new ProcessEdgesWorker(this, vector, lowerBound);
                     await scheduler.Offload(worker);
                     lowerBound = worker.LowerBound;
                 }
@@ -194,17 +193,13 @@ public partial class Hnsw
                         _vectors.Add(_searchState.GetNodeByIndex(_candidates[i]).GetVectorUnmanagedSpan(_searchState));
                     }
 
-                    await scheduler.Offload(new FilterEdgesHeuristicWorker(vector, _candidates, _indexes, _vectors, _candidatesQ, _searchState));
+                    await scheduler.Offload(new FilterEdgesHeuristicWorker(this, vector));
                 }
             }
 
             private record FilterEdgesHeuristicWorker(
-                UnmanagedSpan Src, 
-                List<int> Candidates, 
-                List<int> Indexes, 
-                List<UnmanagedSpan> Vectors, 
-                PriorityQueue<int, float> Queue,
-                SearchState SearchState) : WorkItem
+                NodePlacement Owner,
+                UnmanagedSpan Src) : WorkItem(Owner)
             {
                 public override void Execute()
                 {
@@ -213,24 +208,30 @@ public partial class Hnsw
                     // See also the paper here: https://arxiv.org/pdf/1603.09320
                     // This implements the Fig. 2 / Algorithm 4
 
-                    Debug.Assert(Queue.Count is 0);
-                    for (int i = 0; i < Indexes.Count; i++)
+                    var searchState = Owner._searchState;
+                    var candidates = Owner._candidates;
+                    var vectors = Owner._vectors;
+                    var indexes = Owner._nearestIndexes;
+                    var queue = Owner._candidatesQ;
+                    
+                    Debug.Assert(queue.Count is 0);
+                    for (int i = 0; i < indexes.Count; i++)
                     {
-                        var distance = SearchState.Distance(Src, Vectors[i]);
+                        var distance = searchState.Distance(Src, vectors[i]);
                         // note that we use local indexes here!
-                        Queue.Enqueue(i, distance);
+                        queue.Enqueue(i, distance);
                     }
 
-                    Candidates.Clear();
+                    candidates.Clear();
 
-                    while (Candidates.Count <= SearchState.Options.NumberOfEdges &&
-                           Queue.TryDequeue(out var cur, out var distance))
+                    while (candidates.Count <= searchState.Options.NumberOfEdges &&
+                           queue.TryDequeue(out var cur, out var distance))
                     {
                         bool match = true;
-                        for (int i = 0; i < Candidates.Count; i++)
+                        for (int i = 0; i < candidates.Count; i++)
                         {
-                            int alternativeIndex = Candidates[i];
-                            var curDist = SearchState.Distance(Vectors[cur], Vectors[alternativeIndex]);
+                            int alternativeIndex = candidates[i];
+                            var curDist = searchState.Distance(vectors[cur], vectors[alternativeIndex]);
                             // there is already an item in the result that is *closer* to the current
                             // node than the target node, so no need to add it
                             if (curDist < distance)
@@ -242,55 +243,63 @@ public partial class Hnsw
 
                         if (match)
                         {
-                            Candidates.Add(cur);
+                            candidates.Add(cur);
                         }
                     }
 
-                    for (int i = 0; i < Candidates.Count; i++)
+                    for (int i = 0; i < candidates.Count; i++)
                     {
                         // turn the local indexing into a global one
-                        Candidates[i] = Indexes[Candidates[i]];
+                        candidates[i] = indexes[candidates[i]];
                     }
 
-                    Queue.Clear();
+                    queue.Clear();
                 }
 
             }
 
-            private record ProcessEdgesWorker(UnmanagedSpan Vector, float InitialLowerBound, List<int> Indexes, List<UnmanagedSpan> Vectors, PriorityQueue<int, float> Candidates,PriorityQueue<int, float> NearestEdges,
-                SearchState SearchState) : WorkItem
+            private record ProcessEdgesWorker(NodePlacement Owner, UnmanagedSpan Vector, float LowerBound) : WorkItem(Owner)
             {
-                public float LowerBound = InitialLowerBound;
+                public float LowerBound { get; private set; } = LowerBound;
                 
                 public override void Execute()
                 {
-                    int numberOfCandidates = SearchState.Options.NumberOfCandidates;
-                    for (int i = 0; i < Indexes.Count; i++)
+                    var searchState = Owner._searchState;
+                    var indexes = Owner._indexes;
+                    var vectors = Owner._vectors;
+                    var nearestEdgesQ = Owner._nearestEdgesQ;
+                    var candidatesQ = Owner._candidatesQ;
+                    var lowerBound  = LowerBound;
+                    
+                    int numberOfCandidates = searchState.Options.NumberOfCandidates;
+                    for (int i = 0; i < indexes.Count; i++)
                     {
-                        var nextIndex = Indexes[i];
-                        if (Indexes[i] is -1)
+                        var nextIndex = indexes[i];
+                        if (indexes[i] is -1)
                             continue; // already checked
 
-                        float nextDist = -SearchState.Distance(Vector, Vectors[i]);
-                        if (NearestEdges.Count < numberOfCandidates)
+                        float nextDist = -searchState.Distance(Vector, vectors[i]);
+                        if (nearestEdgesQ.Count < numberOfCandidates)
                         {
-                            Candidates.Enqueue(nextIndex, -nextDist);
-                            NearestEdges.Enqueue(nextIndex, nextDist);
+                            candidatesQ.Enqueue(nextIndex, -nextDist);
+                            nearestEdgesQ.Enqueue(nextIndex, nextDist);
                         }
-                        else if (LowerBound < nextDist)
+                        else if (lowerBound < nextDist)
                         {
-                            Candidates.Enqueue(nextIndex, -nextDist);
-                            NearestEdges.EnqueueDequeue(nextIndex, nextDist);
+                            candidatesQ.Enqueue(nextIndex, -nextDist);
+                            nearestEdgesQ.EnqueueDequeue(nextIndex, nextDist);
                         }
                         else
                         {
                             continue;
                         }
 
-                        Debug.Assert(Candidates.Count > 0);
-                        NearestEdges.TryPeek(out _, out LowerBound);
+                        Debug.Assert(candidatesQ.Count > 0);
+                        nearestEdgesQ.TryPeek(out _, out lowerBound);
                     }
+                    LowerBound = lowerBound;
                 }
+                
             }
 
             private async Task SearchNearestAcrossLevelsAsync(UnmanagedSpan from, int maxLevel)
@@ -313,7 +322,7 @@ public partial class Hnsw
                             _indexes[i] = -1;
                         }
 
-                        var worker = new FindNearestWorker(from, _indexes, _vectors, _searchState);
+                        var worker = new FindNearestWorker(this, from, _indexes, _vectors, _searchState);
                         await scheduler.Offload(worker);
                         if (worker.Distance >= distance)
                             break;
@@ -328,7 +337,7 @@ public partial class Hnsw
                 _nearestIndexes.Reverse();
             }
 
-            private record FindNearestWorker(UnmanagedSpan From, List<int> Indexes, List<UnmanagedSpan> Vectors, SearchState SearchState) : WorkItem
+            private record FindNearestWorker(NodePlacement Owner,UnmanagedSpan From, List<int> Indexes, List<UnmanagedSpan> Vectors, SearchState SearchState) : WorkItem(Owner)
             {
                 public float Distance = float.MaxValue;
                 public int CurrentNodeIndex = -1;
@@ -417,10 +426,10 @@ public partial class Hnsw
                 }
             }
         }
-    }
-
-    private abstract record WorkItem
-    {
-        public abstract void Execute();
+        
+        private abstract record WorkItem(NodePlacement Owner)
+        {
+            public abstract void Execute();
+        }
     }
 }
