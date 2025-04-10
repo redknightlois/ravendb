@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using Sparrow;
 using Voron.Data.Containers;
@@ -41,7 +42,7 @@ public partial class Hnsw
             scheduler.Run();
         }
 
-        private class NodePlacement(Registration parent)
+        private class NodePlacement(Registration parent, NodePlacementScheduler scheduler)
         {
             private readonly SearchState _searchState = parent._searchState;
             private readonly List<int> _candidates = [];
@@ -124,7 +125,7 @@ public partial class Hnsw
                             vector = edge.GetVectorUnmanagedSpan(_searchState);
                         }
 
-                        await Workers.Run(new FilterEdgesHeuristicWorker(vector, _edgeIndexes, _indexes, _vectors, _candidatesQ, _searchState));
+                        await scheduler.Offload(new FilterEdgesHeuristicWorker(vector, _edgeIndexes, _indexes, _vectors, _candidatesQ, _searchState));
                         
                         {
                             ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
@@ -171,7 +172,7 @@ public partial class Hnsw
                     }
 
                     var worker = new ProcessEdgesWorker(vector, lowerBound, _indexes, _vectors, _candidatesQ, _nearestEdgesQ, _searchState);
-                    await Workers.Run(worker);
+                    await scheduler.Offload(worker);
                     lowerBound = worker.LowerBound;
                 }
 
@@ -193,7 +194,7 @@ public partial class Hnsw
                         _vectors.Add(_searchState.GetNodeByIndex(_candidates[i]).GetVectorUnmanagedSpan(_searchState));
                     }
 
-                    await Workers.Run(new FilterEdgesHeuristicWorker(vector, _candidates, _indexes, _vectors, _candidatesQ, _searchState));
+                    await scheduler.Offload(new FilterEdgesHeuristicWorker(vector, _candidates, _indexes, _vectors, _candidatesQ, _searchState));
                 }
             }
 
@@ -203,7 +204,7 @@ public partial class Hnsw
                 List<int> Indexes, 
                 List<UnmanagedSpan> Vectors, 
                 PriorityQueue<int, float> Queue,
-                SearchState SearchState) : WorkItem(DateTime.UtcNow)
+                SearchState SearchState) : WorkItem
             {
                 public override void Execute()
                 {
@@ -257,7 +258,7 @@ public partial class Hnsw
             }
 
             private record ProcessEdgesWorker(UnmanagedSpan Vector, float InitialLowerBound, List<int> Indexes, List<UnmanagedSpan> Vectors, PriorityQueue<int, float> Candidates,PriorityQueue<int, float> NearestEdges,
-                SearchState SearchState) : WorkItem(DateTime.UtcNow)
+                SearchState SearchState) : WorkItem
             {
                 public float LowerBound = InitialLowerBound;
                 
@@ -313,7 +314,7 @@ public partial class Hnsw
                         }
 
                         var worker = new FindNearestWorker(from, _indexes, _vectors, _searchState);
-                        await Workers.Run(worker);
+                        await scheduler.Offload(worker);
                         if (worker.Distance >= distance)
                             break;
                         currentNodeIndex = worker.CurrentNodeIndex;
@@ -327,7 +328,7 @@ public partial class Hnsw
                 _nearestIndexes.Reverse();
             }
 
-            private record FindNearestWorker(UnmanagedSpan From, List<int> Indexes, List<UnmanagedSpan> Vectors, SearchState SearchState) : WorkItem(DateTime.UtcNow)
+            private record FindNearestWorker(UnmanagedSpan From, List<int> Indexes, List<UnmanagedSpan> Vectors, SearchState SearchState) : WorkItem
             {
                 public float Distance = float.MaxValue;
                 public int CurrentNodeIndex = -1;
@@ -376,7 +377,7 @@ public partial class Hnsw
                     {
                         try
                         {
-                            NodePlacement placement = new(parent);
+                            NodePlacement placement = new(parent, this);
                             await placement.RunAsync();
                         }
                         finally
@@ -399,127 +400,27 @@ public partial class Hnsw
 
             protected override bool TryExecuteTaskInline(Task task, bool taskWasPreviouslyQueued) => false;
 
+            public Task Offload(WorkItem item)
+            {
+                return Task.Factory.StartNew(item.Execute, CancellationToken.None, TaskCreationOptions.None, TaskScheduler.Default);
+            }
+            
             public void Run()
             {
-                Workers.Start();// only happens once
-
-                while (_tasks.IsCompleted is false)
+                foreach (var task in _tasks.GetConsumingEnumerable())
                 {
-                    if (_tasks.TryTake(out var task))
+                    var item = task;
+                    do
                     {
-                        TryExecuteTask(task);
-                        continue;
-                    }
-                    // we have nothing to do, let's try processing
-                    // some work ourselves instead of just waiting
-                    if (Workers.Queue.TryTake(out var worker))
-                    {
-                        Workers.ProcessItem(worker);
-                        continue;
-                    }
-
-                    try
-                    {
-                        task = _tasks.Take();
-                    }
-                    catch (InvalidOperationException)
-                    {
-                        // task was completed
-                        continue; 
-                    }
-                    TryExecuteTask(task);
+                        TryExecuteTask(item);
+                    } while (_tasks.TryTake(out item));
                 }
             }
         }
     }
 
-    private abstract record WorkItem(DateTime Registered)
+    private abstract record WorkItem
     {
-        public TaskCompletionSource<object> Tcs;
         public abstract void Execute();
-    }
-
-    public static int MaxNumberOfWorkerThreads = Math.Max(1, Environment.ProcessorCount / 4);
-
-    private static class Workers
-    {
-        public static readonly BlockingCollection<WorkItem> Queue = [];
-        private static int WorkersCount;
-        private static DateTime AllowThreadCreationAfter = DateTime.MinValue;
-        
-        public static void Start()
-        {
-            if (WorkersCount != 0)
-                return;
-            
-            if (Interlocked.CompareExchange(ref WorkersCount, 1, 0) != 0)
-                return; // already started;
-            
-            new Thread(Primary)
-            {
-                Name = "HNSW.Worker",
-                IsBackground = true
-            }.Start();
-        }
-
-        private static void CreateNewThread()
-        {
-            if (DateTime.Now < AllowThreadCreationAfter)
-                return; // not yet
-        
-            AllowThreadCreationAfter = DateTime.UtcNow.AddSeconds(5);
-            Interlocked.Increment(ref WorkersCount);
-            new Thread(Helper)
-            {
-                Name = "HNSW.Worker",
-                IsBackground = true
-            }.Start();
-        }
-        private static void Helper()
-        {
-            var timeout = TimeSpan.FromSeconds(15);
-            while (Queue.TryTake(out var item , timeout))
-            {
-                ProcessItem((WorkItem)item);
-            }
-            Interlocked.Decrement(ref WorkersCount);
-        }
-
-        public static void ProcessItem(WorkItem item)
-        {
-            try
-            {
-                item.Execute();
-                item.Tcs.TrySetResult(item);
-            }
-            catch (Exception e)
-            {
-                item.Tcs.TrySetException(e);
-            }
-        }
-
-        private static void Primary()
-        {
-            var maxDelay = TimeSpan.FromSeconds(2);
-            foreach (WorkItem item in Queue.GetConsumingEnumerable())
-            {
-                DateTime now = DateTime.UtcNow;
-                var delay = (item.Registered - now);
-                if (delay > maxDelay && WorkersCount < MaxNumberOfWorkerThreads)
-                {
-                    CreateNewThread();
-                }
-
-                ProcessItem(item);
-            }
-        }
-
-        public static Task Run(WorkItem workItem)
-        {
-            var tcs = new TaskCompletionSource<object>();
-            workItem.Tcs = tcs;
-            Queue.Add(workItem);
-            return tcs.Task;
-        }
     }
 }
