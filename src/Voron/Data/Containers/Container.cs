@@ -341,8 +341,8 @@ namespace Voron.Data.Containers
 
         public Container(Page page)
         {
-            Debug.Assert(page.IsOverflow == false);
             Debug.Assert(((ContainerPageHeader*)page.Pointer)->ContainerFlags == ExtendedPageType.Container);
+            Debug.Assert(page.IsOverflow == false);
 
             _page = page;            
         }
@@ -1168,15 +1168,14 @@ namespace Voron.Data.Containers
                     page = llt.GetPage(pageNum);
                     pageCache.SetReadable(page);
                 }
-
-                var container = new Container(page);
                 
-                if (container._page.IsOverflow)
+                if (page.IsOverflow)
                 {
                     spans[i] = new(page.DataPointer, page.OverflowSize);
                     continue;
                 }
 
+                var container = new Container(page);
                 var metadata = container.MetadataFor(OffsetToIndex(offset));
                 Debug.Assert(metadata.IsFree == false);
                 var p = page.Pointer;

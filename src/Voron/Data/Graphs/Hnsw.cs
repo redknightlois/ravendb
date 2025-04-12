@@ -12,6 +12,7 @@ using Sparrow.Platform;
 using Sparrow.Server;
 using Sparrow.Server.Utils;
 using Sparrow.Server.Utils.VxSort;
+using Sparrow.Utils;
 using Voron.Data.BTrees;
 using Voron.Data.CompactTrees;
 using Voron.Data.Lookups;
@@ -74,11 +75,11 @@ public unsafe partial class Hnsw
 
         public static UnmanagedSpan ReadVector(long vectorId, in SearchState state)
         {
-            if ((vectorId & 1) == 0)
+            if ((vectorId & Constants.Graphs.VectorStorage.VectorContainerInternalIndexer) == 0)
             {
                 var item = Container.Get(state.Llt, vectorId);
                 var vectorSpan = new UnmanagedSpan(item.Address, item.Length);
-                Debug.Assert(state.Options.VectorSizeBytes == vectorSpan.Length, "state.Options.VectorSizeBytes == vectorSpan.Length");
+                Debug.Assert(state.Options.VectorSizeBytes == vectorSpan.Length);
                 return vectorSpan;
             }
             
@@ -86,7 +87,7 @@ public unsafe partial class Hnsw
             var containerId = vectorId & ~0xFFF;
             var container = Container.Get(state.Llt, containerId);
             var offset = count * state.Options.VectorSizeBytes;
-            Debug.Assert(offset >= 0 && offset + state.Options.VectorSizeBytes <= container.Length, "offset >= 0 && offset + state.Options.VectorSizeBytes <= container.Length");
+            Debug.Assert(offset >= 0 && offset + state.Options.VectorSizeBytes <= container.Length);
             return new UnmanagedSpan(container.Address + offset, state.Options.VectorSizeBytes);
         }
     }
@@ -99,6 +100,14 @@ public unsafe partial class Hnsw
         public NativeList<NativeList<long>> EdgesPerLevel;
         private UnmanagedSpan _vectorSpan;
         public int Visited;
+
+        public long GetVectorContainerId()
+        {
+            if((VectorId & Constants.Graphs.VectorStorage.VectorContainerInternalIndexer) == 0)
+                return VectorId;
+            
+            return VectorId & ~0xFFF;
+        }
 
         public static NodeReader Decode(LowLevelTransaction llt, long id)
         {
@@ -424,47 +433,6 @@ public unsafe partial class Hnsw
             }
         }
         
-        private void LoadNodeIndexes(List<long> nodeIds, List<int> indexes)
-        {
-            indexes.Clear();
-            indexes.EnsureCapacity(nodeIds.Count);
-            for (int i = 0; i < nodeIds.Count; i++)
-            {
-                if (_nodeIdToIdx.TryGetValue(nodeIds[i], out var index))
-                {
-                    indexes.Add(index);
-                    nodeIds[i] = -1;
-                }
-            }
-            
-            if (indexes.Count == nodeIds.Count)
-                return;
-
-            var matches = indexes.Count;
-            var keys = CollectionsMarshal.AsSpan(nodeIds);
-            keys.Sort();
-            keys = keys[matches..]; // discard all those we already found
-            for (int i = 0; i < keys.Length; i++)
-            {
-                var nodeIdx = AllocateNodeIndex(keys[i]);
-                _nodes[nodeIdx].NodeId = keys[i];
-                _nodeIdToIdx[keys[i]] = nodeIdx;
-                indexes.Add(nodeIdx);
-            }
-            _nodeIdToLocations.GetFor(keys, keys, -1);
-            
-            using var _ = Llt.Allocator.AllocateDirect(sizeof(UnmanagedSpan) * keys.Length, out var buffer);
-            var spans = (UnmanagedSpan*)buffer.Ptr;
-            Container.GetAll(Llt, keys, spans, -1, Llt.PageLocator);
-            for (int i = 0; i < keys.Length; i++)
-            {
-                var buf = spans[i].ToSpan();
-                var reader = Node.Decode(Llt, buf);
-                reader.LoadInto(ref _nodes[indexes[matches + i]]);
-            }
-        }
-
-
         public int GetNodeIndexById(long nodeId)
         {
             ref var nodeIdx = ref CollectionsMarshal.GetValueRefOrAddDefault(_nodeIdToIdx, nodeId, out var exists);
@@ -678,23 +646,45 @@ public unsafe partial class Hnsw
             nearestIndexes.Reverse();
         }
 
-        private readonly List<long> _edgesCopy = [];
-        public void GetEdges(int currentNodeIndex, int level, List<int> indexes, List<UnmanagedSpan> vectors)
+        public void Preload(Span<long> nodeIds)
         {
-            ref var n = ref GetNodeByIndex(currentNodeIndex);
-            n.EdgesPerLevel.SetCapacity(Llt.Allocator, level + 1);
-            Debug.Assert(n.EdgesPerLevel.Count > level, "n.EdgesPerLevel.Count > level");
-            ref var edges = ref n.EdgesPerLevel[level];
-            _edgesCopy.Clear();
-            _edgesCopy.Add(n.NodeId);
-            _edgesCopy.AddRange(edges.ToSpan());
-            LoadNodeIndexes(_edgesCopy, indexes);
-            vectors.Clear();
-            for (int i = 0; i < indexes.Count; i++)
+            using var _ = Llt.Allocator.AllocateDirect((sizeof(long) * sizeof(long) * sizeof(UnmanagedSpan)) * nodeIds.Length, out var buffer);
+            var idsToLoad = buffer.ToSpan<long>().Slice(0, nodeIds.Length);
+            var vectorIdsToLoad = buffer.ToSpan<long>().Slice(nodeIds.Length, nodeIds.Length);
+            UnmanagedSpan* spans = (UnmanagedSpan*)(buffer.Ptr + nodeIds.Length * 2 * sizeof(long));
+            int idsToLoadIdx  = 0;
+            var vectorsToLoadIdx = 0;
+            var startingNodeIndex = _nodes.Count;
+            foreach (var nodeId in nodeIds)
             {
-                var nodeIdx = indexes[i];
-                vectors.Add(_nodes[nodeIdx].GetVectorUnmanagedSpan(this));
+                if (_nodeIdToIdx.TryGetValue(nodeId, out var existingIdx))
+                {
+                    vectorIdsToLoad[vectorsToLoadIdx++] = _nodes[existingIdx].GetVectorContainerId();
+                    continue;
+                }
+                
+                var nodeIdx = AllocateNodeIndex(nodeId);
+                _nodes[nodeIdx].NodeId = nodeId;
+                _nodeIdToIdx[nodeId] = nodeIdx;
+                idsToLoad[idsToLoadIdx++] = nodeId;
             }
+
+            idsToLoad = idsToLoad[..idsToLoadIdx];
+            if (idsToLoadIdx is not 0)
+            {
+                _nodeIdToLocations.GetFor(idsToLoad, idsToLoad, -1);
+                Container.GetAll(Llt, idsToLoad, spans, -1, Llt.PageLocator);
+                for (int i = 0; i < idsToLoad.Length; i++)
+                {
+                    var buf = spans[i].ToSpan();
+                    var reader = Node.Decode(Llt, buf);
+                    ref var n = ref _nodes[startingNodeIndex + i];
+                    reader.LoadInto(ref n);
+                    vectorIdsToLoad[vectorsToLoadIdx++] = n.GetVectorContainerId();
+                }
+            }
+            Sort.Run(vectorIdsToLoad);
+            Container.GetAll(Llt, vectorIdsToLoad, spans, -1, Llt.PageLocator);
         }
     }
     

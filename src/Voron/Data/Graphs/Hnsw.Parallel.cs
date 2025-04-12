@@ -4,10 +4,13 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using Sparrow;
+using Sparrow.Server.Utils;
+using Voron.Data.BTrees;
 using Voron.Data.Containers;
 using Voron.Util;
 
@@ -84,8 +87,7 @@ public partial class Hnsw
                     await NearestEdgesAsync(startingPointIndex, currentNodeIndex, insertedVector, level);
                     ref var node = ref _searchState.GetNodeByIndex(currentNodeIndex);
                     ref var list = ref node.EdgesPerLevel[level];
-                    list.EnsureCapacityFor(_searchState.Llt.Allocator, _candidates.Count);
-                    list.Clear();
+                    list.ResetAndEnsureCapacity(_searchState.Llt.Allocator, _candidates.Count);
                     _requiresEdgeFiltering.Clear();
                     for (int i = 0; i < _candidates.Count; i++)
                     {
@@ -108,23 +110,14 @@ public partial class Hnsw
                         UnmanagedSpan vector;
                         {
                             ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
-                            ref var edgeList = ref edge.EdgesPerLevel[level];
-                            _indexes.Clear();
-                            _indexes.EnsureCapacity(edgeList.Count);
-                            _vectors.Clear();
-                            _vectors.EnsureCapacity(edgeList.Count);
-                            for (int k = 0; k < edgeList.Count; k++)
-                            {
-                                long nodeId = edgeList[k];
-                                int nodeIdx = _searchState.GetNodeIndexById(nodeId);
-                                _indexes.Add(nodeIdx);
-                                _vectors.Add(_searchState.GetNodeByIndex(nodeIdx).GetVectorUnmanagedSpan(_searchState));
-                            }
-
                             vector = edge.GetVectorUnmanagedSpan(_searchState);
                         }
 
-                        await scheduler.Offload(new FilterEdgesHeuristicWorker(this, vector));
+                        await scheduler.Offload(new FilterEdgesHeuristicWorker(this, vector)
+                        {
+                            CurrentNodeIndex = edgeIdx,
+                            Level = level
+                        });
                         
                         {
                             ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
@@ -161,16 +154,11 @@ public partial class Hnsw
                         _nearestEdgesQ.Count == _searchState.Options.NumberOfCandidates)
                         break;
 
-                    _searchState.GetEdges(cur, level, _indexes, _vectors);
-                    for (int i = 0; i < _indexes.Count; i++)
+                    var worker = new ProcessEdgesWorker(this, vector, lowerBound)
                     {
-                        var nextIndex = _indexes[i];
-                        if (_visited.Add(nextIndex))
-                            continue;
-                        _indexes[i] = -1; // no need to check
-                    }
-
-                    var worker = new ProcessEdgesWorker(this, vector, lowerBound);
+                        CurrentNodeIndex = cur,
+                        Level = level,
+                    };
                     await scheduler.Offload(worker);
                     lowerBound = worker.LowerBound;
                 }
@@ -187,13 +175,19 @@ public partial class Hnsw
                 {
                     _indexes.Clear();
                     _vectors.Clear();
-                    for (int i = 0; i < _candidates.Count; i++)
+                    foreach (var candidate in _candidates)
                     {
-                        _indexes.Add(_candidates[i]);
-                        _vectors.Add(_searchState.GetNodeByIndex(_candidates[i]).GetVectorUnmanagedSpan(_searchState));
+                        ref var n = ref _searchState.GetNodeByIndex(candidate);
+                        _indexes.Add(candidate);
+                        _vectors.Add(n.GetVectorUnmanagedSpan(_searchState));
                     }
 
-                    await scheduler.Offload(new FilterEdgesHeuristicWorker(this, vector));
+                    await scheduler.Offload(new FilterEdgesHeuristicWorker(this, vector)
+                    {
+                        // disable preloading - we already got everything from the 
+                        // previous preloading step and are operating purely in memory 
+                        CurrentNodeIndex = -1,
+                    });
                 }
             }
 
@@ -201,7 +195,7 @@ public partial class Hnsw
                 NodePlacement Owner,
                 UnmanagedSpan Src) : WorkItem(Owner)
             {
-                public override void Execute()
+                protected override void Execute()
                 {
                     // See: https://icode.best/i/45208840268843 - Chinese, but auto-translate works, and a good explanation with 
                     // conjunction of: https://img-bc.icode.best/20210425010212938.png
@@ -261,8 +255,8 @@ public partial class Hnsw
             private record ProcessEdgesWorker(NodePlacement Owner, UnmanagedSpan Vector, float LowerBound) : WorkItem(Owner)
             {
                 public float LowerBound { get; private set; } = LowerBound;
-                
-                public override void Execute()
+
+                protected override void Execute()
                 {
                     var searchState = Owner._searchState;
                     var indexes = Owner._indexes;
@@ -275,9 +269,7 @@ public partial class Hnsw
                     for (int i = 0; i < indexes.Count; i++)
                     {
                         var nextIndex = indexes[i];
-                        if (indexes[i] is -1)
-                            continue; // already checked
-
+                   
                         float nextDist = -searchState.Distance(Vector, vectors[i]);
                         if (nearestEdgesQ.Count < numberOfCandidates)
                         {
@@ -313,16 +305,11 @@ public partial class Hnsw
                 {
                     do
                     {
-                        _searchState.GetEdges(currentNodeIndex, level, _indexes, _vectors);
-                        for (var i = 0; i < _indexes.Count; i++)
+                        var worker = new FindNearestWorker(this, from)
                         {
-                            if (_visited.Add(_indexes[i]))
-                                continue;
-                            // already seen, should skip it
-                            _indexes[i] = -1;
-                        }
-
-                        var worker = new FindNearestWorker(this, from, _indexes, _vectors, _searchState);
+                            CurrentNodeIndex = currentNodeIndex,
+                            Level = level
+                        };
                         await scheduler.Offload(worker);
                         if (worker.Distance >= distance)
                             break;
@@ -337,19 +324,20 @@ public partial class Hnsw
                 _nearestIndexes.Reverse();
             }
 
-            private record FindNearestWorker(NodePlacement Owner,UnmanagedSpan From, List<int> Indexes, List<UnmanagedSpan> Vectors, SearchState SearchState) : WorkItem(Owner)
+            private record FindNearestWorker(NodePlacement Owner,UnmanagedSpan From) : WorkItem(Owner)
             {
                 public float Distance = float.MaxValue;
-                public int CurrentNodeIndex = -1;
-                
-                public override void Execute()
+
+                protected override void Execute()
                 {
-                    for (var i = 0; i < Indexes.Count; i++)
+                    var indexes = Owner._indexes;
+                    var vectors = Owner._vectors;
+                    var searchState = Owner._searchState;
+                    
+                    for (var i = 0; i < indexes.Count; i++)
                     {
-                        var edgeIdx = Indexes[i];
-                        if (edgeIdx is -1)
-                            continue;
-                        var curDist = SearchState.Distance(From, Vectors[i]);
+                        var edgeIdx = indexes[i];
+                        var curDist = searchState.Distance(From, vectors[i]);
                         if (curDist >= Distance || double.IsNaN(curDist))
                             continue;
                         Distance = curDist;
@@ -371,15 +359,42 @@ public partial class Hnsw
 
                 return level;
             }
+
+            public void AfterPreloading(int currentNodeIndex, int level)
+            {
+                if (currentNodeIndex is -1)
+                    return;
+                
+                ref var n = ref _searchState.GetNodeByIndex(currentNodeIndex);
+                _indexes.Clear();
+                _vectors.Clear();
+                if (_visited.Add(currentNodeIndex))
+                {
+                    _indexes.Add(currentNodeIndex);
+                    _vectors.Add(n.GetVectorUnmanagedSpan(_searchState));
+                }
+                foreach (var e in n.EdgesPerLevel[level])
+                {
+                    int idx = _searchState.GetNodeIndexById(e);
+                    if (_visited.Add(idx) is false)
+                        continue; // already checked
+                    _indexes.Add(idx);
+                    ref var edge = ref _searchState.GetNodeByIndex(idx);
+                    _vectors.Add(edge.GetVectorUnmanagedSpan(_searchState));
+                }
+            }
         }
 
         private class NodePlacementScheduler : TaskScheduler
         {
             private int _completed;
             private readonly BlockingCollection<Task> _tasks = [];
+            private readonly List<WorkItem> _items = [];
+            private readonly SearchState _searchState;
 
             public NodePlacementScheduler(Registration parent, int activeTasksCount)
             {
+                _searchState = parent._searchState;
                 for (int i = 0; i < activeTasksCount; i++)
                 {
                     Task.Factory.StartNew(async () =>
@@ -411,25 +426,80 @@ public partial class Hnsw
 
             public Task Offload(WorkItem item)
             {
-                return Task.Factory.StartNew(item.Execute, CancellationToken.None, TaskCreationOptions.None, TaskScheduler.Default);
+                item.Tcs = new TaskCompletionSource();
+                _items.Add(item);
+                return item.Tcs.Task.ContinueWith(
+                    antecedent => antecedent,
+                    CancellationToken.None,
+                    TaskContinuationOptions.None,
+                    // force to complete using this schedule
+                    this).Unwrap();
             }
             
             public void Run()
             {
+                List<long> batch = [];
                 foreach (var task in _tasks.GetConsumingEnumerable())
                 {
-                    var item = task;
+                    var curTask = task;
                     do
                     {
-                        TryExecuteTask(item);
-                    } while (_tasks.TryTake(out item));
+                        TryExecuteTask(curTask);
+                    } while (_tasks.TryTake(out curTask));
+                    
+                    // we executed all we could, now let's check if we have any edges to load that we can do in bulk
+                    batch.Clear();
+                    foreach(var item in _items)
+                    {
+                        item.RegisterForPreloading(_searchState, batch);
+                    }
+                    var batchSpan = CollectionsMarshal.AsSpan(batch);
+                    var used = Sorting.SortAndRemoveDuplicates(batchSpan);
+                    _searchState.Preload(batchSpan[..used]);
+                    foreach(var item in _items)
+                    {
+                        item.Owner.AfterPreloading(item.CurrentNodeIndex, item.Level);
+                        
+                        Task.Factory.StartNew(item.Run,
+                                CancellationToken.None,
+                                TaskCreationOptions.None,
+                                TaskScheduler.Default);
+                    }
+                    _items.Clear();
                 }
             }
         }
         
         private abstract record WorkItem(NodePlacement Owner)
         {
-            public abstract void Execute();
+            public TaskCompletionSource Tcs;
+            protected abstract void Execute();
+
+            public void Run()
+            {
+                try
+                {
+                    Execute();
+                    Tcs.TrySetResult();
+                }
+                catch (Exception e)
+                {
+                    Tcs.TrySetException(e);
+                }
+            }
+
+            public int CurrentNodeIndex;
+            public int Level;
+
+            public void RegisterForPreloading(SearchState searchState, List<long> batch)
+            {
+                if (CurrentNodeIndex is -1)
+                    return;
+                
+                ref var n = ref searchState.GetNodeByIndex(CurrentNodeIndex);
+                batch.Add(n.NodeId);
+                batch.AddRange(n.EdgesPerLevel[Level].ToSpan());
+            }
         }
     }
 }
