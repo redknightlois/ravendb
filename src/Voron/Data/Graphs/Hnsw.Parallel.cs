@@ -2,15 +2,11 @@
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
-using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
-using System.Threading.Channels;
 using System.Threading.Tasks;
 using Sparrow;
 using Sparrow.Server.Utils;
-using Voron.Data.BTrees;
 using Voron.Data.Containers;
 using Voron.Util;
 
@@ -18,6 +14,84 @@ namespace Voron.Data.Graphs;
 
 public partial class Hnsw
 {
+    /*
+     * The problem with HNSW is that it is a graph algorithm, which requires
+     * that we'll touch signficantly more nodes than we would usually do in a B+Tree, 
+     * for example. 
+     * 
+     * If we need to index 1M items, using a B+Tree, I can sort them and be sure that I 
+     * can get pretty good disk access patterns. For HNSW - the problem is that we need to
+     * do effectively random I/O for each lookup. Sequential HNSW is running this one node 
+     * at a time, which link each node to its nearest neighbors. It is has horrible performance
+     * once you exceed the size of memory on the machine.
+     * 
+     * Adding 1M nodes to a HNSW graph with 15M nodes is _expensive_. Assume that they use 768 dimensions
+     * and no quantization. That 15M * 768 * 4 = 42GB of data just for the vectors. And adding a new node
+     * means that we need to compare (and thus read, randomly) about 600 vectors. 
+     * 
+     * Typically, the solution for that is to get a bigger machine, but that is something that we can
+     * try to address. This is the purpose of the code in this file. We go through many gymnastics to
+     * try to optimize the disk access pattern and parallelize what we can.
+     * 
+     * Parallelisation is complicated by the fact that we are running under a write transaction scope.
+     * A write transaction in Voron is a _single threaded operation_. Another problem is that HNSW is
+     * inherently a single-threaded algorith. If I add two nodes to the graph, the second node will 
+     * consider the first node as a candidate for its neighbors.
+     * 
+     * Moving to parallel mode make things more complex. If I add two nodes to the graph at the same time,
+     * they will _not_ consider each other for neighbors. Given that HNSW is *approixmate* nearest neighbor
+     * alogorithm, this is not too big an issue. We can assume that they will reside "nearby" and that the
+     * greedy nature of the algorithm will find the right nodes.
+     * But it does show that parallising HNSW *will* impact the resulting graph.
+     * 
+     * Having said all of that, the performance difference for large graph is significant. Therefor, we 
+     * use a parallel algorithm to build the graph. However, just adding threads isn't simple, because we
+     * operate under a single threaded write transaction.
+     * 
+     * There are two expensive parts in the graph building operations:
+     * * Computing distance between vectors
+     * * Loading the vectors from disk
+     * 
+     * This code is designed to allow to parallelize the distance computation and to allow for
+     * batch load optimization for reading the vectors. 
+     * 
+     * This is done through guile & trickery, hence this long comment.
+     * 
+     * To start with, we aren't actually using parallel here to say threads. Instead, we re-wrote
+     * the algorithm using async/await. And we run it using a dedicated single threaded scheduler.
+     * Whenever we need to do an expensive operation (such as loading vectors, or computing distances),
+     * we use an async operation.
+     * 
+     * That async operation is _not_ scheduled on a different thread. Instead, it is queued until all
+     * current operations are completed, then we check what pending work we have and start a batch 
+     * load of all the vectors we need. The next step is to run the distance computation using the 
+     * thread pool. When that is completed, we can continue with the next step.
+     * 
+     * The idea is that we run N conrcurrent tasks, where N between 1..MaxConcurrentBatches, and in 
+     * each one of them, we pick an item to be inserted to the graph. We then run the HNSW until we
+     * need to do an expensive operation (in asynchronous manner). At that point, we yield to *another*
+     * such batch. By the time we hit the MaxConcurrentBatches, we gathered enough vectors to load and
+     * distances to compute that we can really start pumping through all the items. 
+     * 
+     * The key here is to batching of I/O for loading the vectors. See the scheduler for handling that 
+     * part of the process. Both NodePlacement and NodePlacementScheduler are working very closely 
+     * together to achive this work.
+     * 
+     * # Distance computation using the thread pool
+     * 
+     * Distnace computation is expensive, and we want to run it in parallel. Each work item that we 
+     * send to the thread pool already had its vectors loaded by the batch process, so we can assume 
+     * that they are ready in memory. The work item compares a vector to a set of vectors (typically all 
+     * the edges of a particular ndoe) and returns the shortest distance or the filtered set of edges.
+     * 
+     * We use the thread pool because:
+     * * There is a known limit to the amount of work we have (up to MaxConcurrentBatches), and it
+     *   cannot grow without bound. We won't cause thread pool starvation.
+     * * The amount of work for each item is well scoped and _short_. Under 0.5ms for each work item, 
+     *   so we won't cause a bottleneck in the thread pool.
+     * * We tested using a dedicated thread pool, but those performed significantly worse than the 
+     *   default .NET one. 
+     */
     public partial class Registration
     {
         private int _nextNodeIndex;
