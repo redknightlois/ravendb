@@ -26,6 +26,7 @@ using SlowTests.Server;
 using SlowTests.SlowTests.MailingList;
 using SlowTests.Server.Documents.AI;
 using SlowTests.Server.Documents.AI.Embeddings;
+using FastTests.Corax.Vectors;
 
 namespace Tryouts;
 
@@ -49,11 +50,11 @@ public static class Program
             try
             {
                 using (var testOutputHelper = new ConsoleTestOutputHelper())
-                using (var test = new BasicGraphs(testOutputHelper))
+                using (var test = new MultiVectorSearchClientAPI(testOutputHelper))
                 {
                     DebuggerAttachedTimeout.DisableLongTimespan = true;
 
-                    test.         BasicSearchBigVec(seed: 1586213732);
+                    test.CanSearchByMultipleVectorsByRavenVector();
                 }
             }
             catch (Exception e)

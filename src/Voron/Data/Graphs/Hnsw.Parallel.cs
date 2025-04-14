@@ -498,6 +498,7 @@ public partial class Hnsw
                 
                 ref var n = ref searchState.GetNodeByIndex(CurrentNodeIndex);
                 batch.Add(n.NodeId);
+                n.EdgesPerLevel.SetCapacity(searchState.Llt.Allocator, Level + 1);
                 batch.AddRange(n.EdgesPerLevel[Level].ToSpan());
             }
         }
