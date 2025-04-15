@@ -261,6 +261,7 @@ public partial class Hnsw
                         // disable preloading - we already got everything from the 
                         // previous preloading step and are operating purely in memory 
                         CurrentNodeIndex = -1,
+                        Level = level
                     });
                 }
             }
@@ -279,7 +280,7 @@ public partial class Hnsw
                     var searchState = Owner._searchState;
                     var candidates = Owner._candidates;
                     var vectors = Owner._vectors;
-                    var indexes = Owner._nearestIndexes;
+                    var indexes = Owner._indexes;
                     var queue = Owner._candidatesQ;
                     
                     Debug.Assert(queue.Count is 0);
@@ -343,6 +344,7 @@ public partial class Hnsw
                     for (int i = 0; i < indexes.Count; i++)
                     {
                         var nextIndex = indexes[i];
+                        Debug.Assert(searchState.Nodes[nextIndex].EdgesPerLevel.Count > Level); 
                    
                         float nextDist = -searchState.Distance(Vector, vectors[i]);
                         if (nearestEdgesQ.Count < numberOfCandidates)

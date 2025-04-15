@@ -422,7 +422,7 @@ public unsafe partial class Hnsw
             }
             _nodeIdToLocations.GetFor(keys, keys, -1);
             
-            using var _ = Llt.Allocator.AllocateDirect(sizeof(UnmanagedSpan) * keys.Length, out var buffer);
+            using var _ = Llt.Allocator.Allocate(sizeof(UnmanagedSpan) * keys.Length, out var buffer);
             var spans = (UnmanagedSpan*)buffer.Ptr;
             Container.GetAll(Llt, keys, spans, -1, Llt.PageLocator);
             for (int i = 0; i < keys.Length; i++)
@@ -648,7 +648,7 @@ public unsafe partial class Hnsw
 
         public void Preload(Span<long> nodeIds)
         {
-            using var _ = Llt.Allocator.AllocateDirect((sizeof(long) * sizeof(long) * sizeof(UnmanagedSpan)) * nodeIds.Length, out var buffer);
+            using var _ = Llt.Allocator.Allocate((sizeof(long) * sizeof(long) * sizeof(UnmanagedSpan)) * nodeIds.Length, out var buffer);
             var idsToLoad = buffer.ToSpan<long>().Slice(0, nodeIds.Length);
             var vectorIdsToLoad = buffer.ToSpan<long>().Slice(nodeIds.Length, nodeIds.Length);
             UnmanagedSpan* spans = (UnmanagedSpan*)(buffer.Ptr + nodeIds.Length * 2 * sizeof(long));
