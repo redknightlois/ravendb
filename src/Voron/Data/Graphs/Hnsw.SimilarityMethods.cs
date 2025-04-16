@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using Sparrow;
+using Sparrow.Server.Tensors;
 
 namespace Voron.Data.Graphs;
 
@@ -22,7 +23,7 @@ public partial class Hnsw
     {
         var aSingles = MemoryMarshal.Cast<byte, float>(a);
         var bSingles = MemoryMarshal.Cast<byte, float>(b);
-        return 1f - TensorPrimitives.CosineSimilarity(aSingles, bSingles);
+        return Functions.CosineDistance(aSingles, bSingles);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
