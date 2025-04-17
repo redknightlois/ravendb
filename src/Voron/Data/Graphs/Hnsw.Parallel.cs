@@ -185,6 +185,8 @@ public partial class Hnsw
                         {
                             ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
                             vector = edge.GetVectorUnmanagedSpan(_searchState);
+                            _visited.Clear();
+                            _visited.Add(edgeIdx);
                         }
 
                         await scheduler.Offload(new FilterEdgesHeuristicWorker(this, vector)
@@ -196,10 +198,10 @@ public partial class Hnsw
                         {
                             ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
                             ref var edgeList = ref edge.EdgesPerLevel[level];
-                            edgeList.ResetAndEnsureCapacity(_searchState.Llt.Allocator,_indexes.Count);
-                            for (int k = 0; k < _indexes.Count; k++)
+                            edgeList.ResetAndEnsureCapacity(_searchState.Llt.Allocator, _candidates.Count);
+                            for (int k = 0; k < _candidates.Count; k++)
                             {
-                                edgeList.AddUnsafe(_searchState.GetNodeByIndex(_indexes[k]).NodeId);
+                                edgeList.AddUnsafe(_searchState.GetNodeByIndex(_candidates[k]).NodeId);
                             }
                         }
                     }

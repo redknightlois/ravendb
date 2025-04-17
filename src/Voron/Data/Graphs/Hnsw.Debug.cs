@@ -164,19 +164,20 @@ table, th, td {
                 int cols = 0;
                 for (int j = 1; j <= searchState.Options.CountOfVectors; j++)
                 {
-                    ref var n = ref searchState.GetNodeById(j);
+                    var nodeIdx = searchState.GetNodeIndexById(j);
+                    ref var n = ref searchState.Nodes[nodeIdx];
                     if (level >= n.EdgesPerLevel.Count)
                         continue;
 
-                    var dist = searchState.Distance(vector, -1, j);
-                    var isPath = path[level] == j ? "path" : "";
-                    var isResult =  level == 0 && edges.Items.Contains(j) ? "result": "";
-                    var nextId = level == 0 ? (edges.Items.Contains(j) ?"***": "") : $"N_{path[level - 1]}_{level - 1}";
+                    var dist = searchState.Distance(vector, -1, nodeIdx);
+                    var isPath = path[level] == nodeIdx ? "path" : "";
+                    var isResult =  level == 0 && edges.Items.Contains(nodeIdx) ? "result": "";
+                    var nextId = level == 0 ? (edges.Items.Contains(nodeIdx) ?"***": "") : $"N_{path[level - 1]}_{level - 1}";
                     f.WriteLine($"<td> <table id='N_{j}_{level}'><tr><th class='{isPath} {isResult}'>N_{j}_{level} - {GetEntryId(llt,n.PostingListId)}</th>" +
                                 $"<th>{n.EdgesPerLevel[level].Count}</th><th>{dist} (<a href='#{nextId}'>{nextId}</a>)</th></tr><tr>");
                     foreach (var to in n.EdgesPerLevel[level])
                     {
-                        dist = searchState.Distance(Span<byte>.Empty, j, searchState.GetNodeIndexById(to));
+                        dist = searchState.Distance(Span<byte>.Empty, nodeIdx, searchState.GetNodeIndexById(to));
                         var srcDist = searchState.Distance(vector, -1, searchState.GetNodeIndexById(to));
                         var id = $"N_{to}_{Math.Max(0, level-1)}";
                      
