@@ -19,9 +19,9 @@ if (Directory.Exists(dbPath))
 var sp = Stopwatch.StartNew();
 await ImportData(dbPath);
 Console.WriteLine(sp.Elapsed);
-sp.Restart();
-TestRecall(dbPath);
-Console.WriteLine(sp.Elapsed);
+//sp.Restart();
+//TestRecall(dbPath);
+//Console.WriteLine(sp.Elapsed);
 
 void TestRecall(string path)
 {
