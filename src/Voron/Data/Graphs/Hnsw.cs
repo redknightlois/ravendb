@@ -734,6 +734,7 @@ public unsafe partial class Hnsw
             if (idsToLoadIdx is not 0)
             {
                 _nodeIdToLocations.GetFor(idsToLoad, idsToLoad, -1);
+                Sort.Run(idsToLoad);
                 Container.GetAll(Llt, idsToLoad, spans, -1, Llt.PageLocator);
                 for (int i = 0; i < idsToLoad.Length; i++)
                 {
