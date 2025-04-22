@@ -154,7 +154,8 @@ public partial class Hnsw
                     n.EdgesPerLevel.SetCapacity(_searchState.Llt.Allocator, nodeRandomLevel + 1);
                     insertedVector = n.GetVectorUnmanagedSpan(_searchState);
                 }
-                await SearchNearestAcrossLevelsAsync(insertedVector, currentMaxLevel);
+
+                SearchNearestAcrossLevels(insertedVector, currentMaxLevel);
                 for (int level = nodeRandomLevel; level >= 0; level--)
                 {
                     int startingPointIndex = _nearestIndexes[level];
@@ -163,9 +164,9 @@ public partial class Hnsw
                     ref var list = ref node.EdgesPerLevel[level];
                     list.ResetAndEnsureCapacity(_searchState.Llt.Allocator, _candidates.Count);
                     _requiresEdgeFiltering.Clear();
-                    for (int i = 0; i < _candidates.Count; i++)
+
+                    foreach (var edgeIdx in _candidates)
                     {
-                        int edgeIdx = _candidates[i];
                         Debug.Assert(edgeIdx != currentNodeIndex);
                         ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
                         list.AddUnsafe(edge.NodeId);
@@ -199,9 +200,9 @@ public partial class Hnsw
                             ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
                             ref var edgeList = ref edge.EdgesPerLevel[level];
                             edgeList.ResetAndEnsureCapacity(_searchState.Llt.Allocator, _candidates.Count);
-                            for (int k = 0; k < _candidates.Count; k++)
+                            foreach (var candidate in _candidates)
                             {
-                                edgeList.AddUnsafe(_searchState.GetNodeByIndex(_candidates[k]).NodeId);
+                                edgeList.AddUnsafe(_searchState.GetNodeByIndex(candidate).NodeId);
                             }
                         }
                     }
@@ -299,9 +300,8 @@ public partial class Hnsw
                            queue.TryDequeue(out var cur, out var distance))
                     {
                         bool match = true;
-                        for (int i = 0; i < candidates.Count; i++)
+                        foreach (var alternativeIndex in candidates)
                         {
-                            int alternativeIndex = candidates[i];
                             var curDist = searchState.Distance(vectors[cur], vectors[alternativeIndex]);
                             // there is already an item in the result that is *closer* to the current
                             // node than the target node, so no need to add it
@@ -372,28 +372,42 @@ public partial class Hnsw
                 
             }
 
-            private async Task SearchNearestAcrossLevelsAsync(UnmanagedSpan from, int maxLevel)
+            private void SearchNearestAcrossLevels(UnmanagedSpan from, int maxLevel)
             {
                 _nearestIndexes.Clear();
                 _visited.Clear();
                 var currentNodeIndex = _searchState.GetNodeIndexById(EntryPointId);
                 var level = maxLevel;
                 var distance = float.MaxValue;
+
+                var indexes = this._indexes;
+                var vectors = this._vectors;
+                var searchState = this._searchState;
+
                 while (level >= 0)
                 {
                     do
                     {
-                        var worker = new FindNearestWorker(this, from)
+                        var bestDistance = distance;
+                        var bestEdgeIdx = -1;
+                        for (var i = 0; i < indexes.Count; i++)
                         {
-                            CurrentNodeIndex = currentNodeIndex,
-                            Level = level
-                        };
-                        await scheduler.Offload(worker);
-                        if (worker.Distance >= distance)
+                            var edgeIdx = indexes[i];
+                            var curDist = searchState.Distance(from, vectors[i]);
+                            if (curDist >= distance || double.IsNaN(curDist))
+                                continue;
+
+                            bestDistance = curDist;
+                            bestEdgeIdx = edgeIdx;
+                        }
+                        if (bestDistance >= distance)
                             break;
-                        currentNodeIndex = worker.CurrentNodeIndex;
-                        distance = worker.Distance;
-                    } while (true);
+
+                        distance = bestDistance;
+                        currentNodeIndex = bestEdgeIdx;
+
+                    } 
+                    while (true);
 
                     _nearestIndexes.Add(currentNodeIndex);
                     level--;
