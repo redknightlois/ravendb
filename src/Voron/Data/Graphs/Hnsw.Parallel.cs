@@ -143,6 +143,7 @@ public partial class Hnsw
                 }
             }
 
+            // This happens in a loop.
             private async Task FindGraphPlacementForNode(int currentNodeIndex)
             {
                 var currentMaxLevel = _searchState.Options.CurrentMaxLevel(_searchState.CreatedNodesCount - currentNodeIndex);
@@ -159,7 +160,9 @@ public partial class Hnsw
                 for (int level = nodeRandomLevel; level >= 0; level--)
                 {
                     int startingPointIndex = _nearestIndexes[level];
-                    await NearestEdgesAsync(startingPointIndex, currentNodeIndex, insertedVector, level);
+                    
+                    // This is expensive. 
+                    NearestEdges(startingPointIndex, currentNodeIndex, insertedVector, level);
                     ref var node = ref _searchState.GetNodeByIndex(currentNodeIndex);
                     ref var list = ref node.EdgesPerLevel[level];
                     list.ResetAndEnsureCapacity(_searchState.Llt.Allocator, _candidates.Count);
@@ -210,62 +213,58 @@ public partial class Hnsw
             }
 
 
-            private async Task NearestEdgesAsync(int startingPointIndex, int currentNodeIndex, UnmanagedSpan vector, int level)
+            private void NearestEdges(int startingPointIndex, int currentNodeIndex, UnmanagedSpan vector, int level)
             {
-                Debug.Assert(_candidatesQ.Count == 0, "_candidatesQ.Count == 0");
-                Debug.Assert(_nearestEdgesQ.Count == 0, "_nearestEdgesQ.Count == 0");
+                // Preconditions
+                Debug.Assert(_candidatesQ.Count == 0, "_candidatesQ should be empty");
+                Debug.Assert(_nearestEdgesQ.Count == 0, "_nearestEdgesQ should be empty");
 
                 float lowerBound = float.MaxValue;
+
                 _visited.Clear();
-                _visited.Add(currentNodeIndex); // we can't have an edge to itself
- 
-                // candidates queue is sorted using the distance, so the lowest distance
-                // will always pop first.
-                // nearest edges is sorted using _reversed_ distance, so when we add a 
-                // new item to the queue, we'll pop the one with the largest distance
+                _visited.Add(currentNodeIndex); // avoid self-edge
+
+                // Seed the candidates queue
                 _candidatesQ.Enqueue(startingPointIndex, -lowerBound);
 
-                while (_candidatesQ.TryDequeue(out var cur, out var curDistance))
+                // MAIN LOOP: Process edges until bound or queue exhausted
+                while (_candidatesQ.TryDequeue(out int curNode, out float curDistance))
                 {
-                    if (-curDistance < lowerBound &&
-                        _nearestEdgesQ.Count == _searchState.Options.NumberOfCandidates)
-                        break;
-
-                    var worker = new ProcessEdgesWorker(this, vector, lowerBound)
+                    // Stop if we've found enough candidates and next distance exceeds bound
+                    if (-curDistance < lowerBound
+                        && _nearestEdgesQ.Count == _searchState.Options.NumberOfCandidates)
                     {
-                        CurrentNodeIndex = cur,
-                        Level = level,
-                    };
-                    await scheduler.Offload(worker);
-                    lowerBound = worker.LowerBound;
+                        break;
+                    }
+
+                    // Inline ProcessEdgesWorker logic
+                    lowerBound = ProcessEdges(vector, level, lowerBound);
                 }
 
+                // Gather and sort candidate IDs by increasing distance
                 _candidatesQ.Clear();
                 _candidates.Clear();
-                while (_nearestEdgesQ.TryDequeue(out var edgeId, out var d))
+                while (_nearestEdgesQ.TryDequeue(out int edgeId, out _))
                 {
                     _candidates.Add(edgeId);
                 }
                 _candidates.Reverse();
 
+                // If too many edges, apply heuristic filter
                 if (_candidates.Count > _searchState.Options.NumberOfEdges)
                 {
+                    // Prepare vectors for filtering
                     _indexes.Clear();
                     _vectors.Clear();
                     foreach (var candidate in _candidates)
                     {
-                        ref var n = ref _searchState.GetNodeByIndex(candidate);
+                        ref var node = ref _searchState.GetNodeByIndex(candidate);
                         _indexes.Add(candidate);
-                        _vectors.Add(n.GetVectorUnmanagedSpan(_searchState));
+                        _vectors.Add(node.GetVectorUnmanagedSpan(_searchState));
                     }
 
-                    await scheduler.Offload(new FilterEdgesHeuristicWorker(this, vector)
-                    {
-                        // disable preloading - we already got everything from the 
-                        // previous preloading step and are operating purely in memory 
-                        CurrentNodeIndex = -1,
-                        Level = level
-                    });
+                    // Inline FilterEdgesHeuristicWorker logic
+                    FilterEdgesHeuristic(vector);
                 }
             }
 
@@ -326,50 +325,95 @@ public partial class Hnsw
 
                     queue.Clear();
                 }
-
             }
 
-            private record ProcessEdgesWorker(NodePlacement Owner, UnmanagedSpan Vector, float LowerBound) : WorkItem(Owner)
+            /// <summary>
+            /// Replicates the ProcessEdgesWorker.Execute() logic synchronously.
+            /// </summary>
+            private float ProcessEdges(UnmanagedSpan queryVector, int level, float currentLowerBound)
             {
-                public float LowerBound { get; private set; } = LowerBound;
+                var searchState = _searchState;
+                int maxCandidates = searchState.Options.NumberOfCandidates;
+                float lowerBound = currentLowerBound;
 
-                protected override void Execute()
+                for (int i = 0; i < _indexes.Count; i++)
                 {
-                    var searchState = Owner._searchState;
-                    var indexes = Owner._indexes;
-                    var vectors = Owner._vectors;
-                    var nearestEdgesQ = Owner._nearestEdgesQ;
-                    var candidatesQ = Owner._candidatesQ;
-                    var lowerBound  = LowerBound;
-                    
-                    int numberOfCandidates = searchState.Options.NumberOfCandidates;
-                    for (int i = 0; i < indexes.Count; i++)
-                    {
-                        var nextIndex = indexes[i];
-                        Debug.Assert(searchState.Nodes[nextIndex].EdgesPerLevel.Count > Level); 
-                   
-                        float nextDist = -searchState.Distance(Vector, vectors[i]);
-                        if (nearestEdgesQ.Count < numberOfCandidates)
-                        {
-                            candidatesQ.Enqueue(nextIndex, -nextDist);
-                            nearestEdgesQ.Enqueue(nextIndex, nextDist);
-                        }
-                        else if (lowerBound < nextDist)
-                        {
-                            candidatesQ.Enqueue(nextIndex, -nextDist);
-                            nearestEdgesQ.EnqueueDequeue(nextIndex, nextDist);
-                        }
-                        else
-                        {
-                            continue;
-                        }
+                    int nodeIndex = _indexes[i];
+                    Debug.Assert(searchState.Nodes[nodeIndex].EdgesPerLevel.Count > level,
+                        "Node has no edges at this level");
 
-                        Debug.Assert(candidatesQ.Count > 0);
-                        nearestEdgesQ.TryPeek(out _, out lowerBound);
+                    // Negative distance for max-heap behavior
+                    float dist = -searchState.Distance(queryVector, _vectors[i]);
+
+                    if (_nearestEdgesQ.Count < maxCandidates)
+                    {
+                        _candidatesQ.Enqueue(nodeIndex, -dist);
+                        _nearestEdgesQ.Enqueue(nodeIndex, dist);
                     }
-                    LowerBound = lowerBound;
+                    else if (lowerBound < dist)
+                    {
+                        _candidatesQ.Enqueue(nodeIndex, -dist);
+                        _nearestEdgesQ.EnqueueDequeue(nodeIndex, dist);
+                    }
+                    else
+                    {
+                        continue;
+                    }
+
+                    // Update bound to the largest (worst) distance in nearestEdgesQ
+                    Debug.Assert(_candidatesQ.Count > 0, "candidatesQ should not be empty after enqueue");
+                    _nearestEdgesQ.TryPeek(out _, out lowerBound);
                 }
-                
+
+                return lowerBound;
+            }
+
+            private void FilterEdgesHeuristic(UnmanagedSpan src)
+            {
+                // See: https://icode.best/i/45208840268843 - Chinese, but auto-translate works, and a good explanation with 
+                // conjunction of: https://img-bc.icode.best/20210425010212938.png
+                // See also the paper here: https://arxiv.org/pdf/1603.09320
+                // This implements the Fig. 2 / Algorithm 4
+
+                var searchState = _searchState;
+                int maxEdges = searchState.Options.NumberOfEdges;
+
+                // Build a local priority queue with distances
+                _candidatesQ.Clear();
+                for (int i = 0; i < _indexes.Count; i++)
+                {
+                    float d = searchState.Distance(src, _vectors[i]);
+                    _candidatesQ.Enqueue(i, d);
+                }
+
+                var filtered = new List<int>(maxEdges);
+                // Select edges ensuring no closer mutual neighbors
+                while (filtered.Count < maxEdges && _candidatesQ.TryDequeue(out int localIdx, out float dist))
+                {
+                    bool accept = true;
+                    foreach (var prev in filtered)
+                    {
+                        float mutualDist = searchState.Distance(_vectors[localIdx], _vectors[prev]);
+                        if (mutualDist < dist)
+                        {
+                            accept = false;
+                            break;
+                        }
+                    }
+                    if (accept)
+                    {
+                        filtered.Add(localIdx);
+                    }
+                }
+
+                // Translate back to global indices
+                _candidates.Clear();
+                foreach (var local in filtered)
+                {
+                    _candidates.Add(_indexes[local]);
+                }
+
+                _candidatesQ.Clear();
             }
 
             private void SearchNearestAcrossLevels(UnmanagedSpan from, int maxLevel)
