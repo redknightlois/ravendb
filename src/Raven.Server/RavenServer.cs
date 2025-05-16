@@ -27,6 +27,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Newtonsoft.Json;
+using NLog.Extensions.Logging;
 using NLog.Web;
 using OpenTelemetry;
 using OpenTelemetry.Exporter;
@@ -274,8 +275,12 @@ namespace Raven.Server
                 var webHostBuilder = new WebHostBuilder()
                     .UseNLog(new NLogAspNetCoreOptions
                     {
-                        IncludeScopes = false,
+                        CaptureEventId = EventIdCaptureType.EventId,
                         CaptureMessageTemplates = false,
+                        CaptureMessageProperties = true,
+                        CaptureMessageParameters = true,
+                        ParseMessageTemplates = false,
+                        IncludeScopes = false,
                         RegisterHttpContextAccessor = false,
                         IncludeActivityIdsWithBeginScope = false,
                     })
