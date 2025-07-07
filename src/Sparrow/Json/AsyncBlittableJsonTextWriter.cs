@@ -18,10 +18,9 @@ namespace Sparrow.Json
         }
 
 
-        public static ConfiguredAsyncDisposable Create(JsonOperationContext context, Stream stream, out AsyncBlittableJsonTextWriter writer, CancellationToken cancellationToken = default)
+        public static AsyncBlittableJsonTextWriter Create(JsonOperationContext context, Stream stream, CancellationToken cancellationToken = default)
         {
-            writer = new AsyncBlittableJsonTextWriter(context, stream, cancellationToken);
-            return writer.ConfigureAwait(false);
+            return new AsyncBlittableJsonTextWriter(context, stream, cancellationToken);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

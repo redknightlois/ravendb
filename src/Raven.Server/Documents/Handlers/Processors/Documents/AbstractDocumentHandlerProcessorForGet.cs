@@ -226,7 +226,7 @@ internal abstract class AbstractDocumentHandlerProcessorForGet<TRequestHandler, 
     {
         long numberOfResults;
         long totalDocumentsSizeInBytes;
-        await using (AsyncBlittableJsonTextWriter.Create(context, RequestHandler.ResponseBodyStream(), out var writer))
+        await using (var writer = AsyncBlittableJsonTextWriter.Create(context, RequestHandler.ResponseBodyStream()))
         {
             writer.WriteStartObject();
 
@@ -317,7 +317,7 @@ internal abstract class AbstractDocumentHandlerProcessorForGet<TRequestHandler, 
         long numberOfResults;
         long totalDocumentsSizeInBytes;
 
-        await using (AsyncBlittableJsonTextWriter.Create(context, RequestHandler.ResponseBodyStream(), out var writer))
+        await using (var writer = AsyncBlittableJsonTextWriter.Create(context, RequestHandler.ResponseBodyStream()))
         {
             writer.WriteStartObject();
             writer.WritePropertyName("Results");
