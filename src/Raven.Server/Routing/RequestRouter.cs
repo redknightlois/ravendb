@@ -278,8 +278,27 @@ namespace Raven.Server.Routing
             reqCtx.RouteMatch = tryMatch.Match;
             reqCtx.CheckForChanges = tryMatch.Value.CheckForChanges;
 
+            // Carmack's fast path: Non-database routes (debug/health/admin) - pure synchronous
+            if (tryMatch.Value.TypeOfRoute == RouteInformation.RouteType.None)
+            {
+                var fastPathHandler = tryMatch.Value.GetRequestHandler();
+                var handlerTask = fastPathHandler(reqCtx);
+                if (handlerTask.IsCompletedSuccessfully)
+                    return;
+                await handlerTask;
+                return;
+            }
+
             var tuple = tryMatch.Value.TryGetHandler(reqCtx);
-            var handler = tuple.Item1 ?? await tuple.Item2;
+            var handler = tuple.Item1;
+            if (handler == null)
+            {
+                var handlerTask = tuple.Item2;
+                if (handlerTask.IsCompletedSuccessfully)
+                    handler = handlerTask.Result;
+                else
+                    handler = await handlerTask;
+            }
 
             reqCtx.DatabaseMetrics?.Requests.RequestsPerSec.Mark();
             _serverMetrics.Requests.RequestsPerSec.Mark();
@@ -336,11 +355,13 @@ namespace Raven.Server.Routing
                 {
                     if (_ravenServer.Configuration.Security.AuthenticationEnabled && skipAuthorization == false)
                     {
-                        var (authorized, authorizationStatus, thumbprint) = await TryAuthorizeAsync(tryMatch.Value, context, reqCtx.DatabaseName);
-                        status = authorizationStatus;
-                        certificateThumbprint = thumbprint;
+                        var authorizeTask = TryAuthorizeAsync(tryMatch.Value, context, reqCtx.DatabaseName);
+                        var result = authorizeTask.IsCompletedSuccessfully ? authorizeTask.Result : await authorizeTask;
+                        
+                        status = result.Status;
+                        certificateThumbprint = result.CertificateThumbprint;
 
-                        if (authorized == false)
+                        if (result.Authorized == false)
                             return;
                     }
                 }
@@ -421,12 +442,18 @@ namespace Raven.Server.Routing
                             }
                         }
 
-                        await handler(reqCtx);
+                        var handlerTask = handler(reqCtx);
+                        if (handlerTask.IsCompletedSuccessfully)
+                            return;
+                        await handlerTask;
                     }
                 }
                 else
                 {
-                    await handler(reqCtx);
+                    var handlerTask = handler(reqCtx);
+                    if (handlerTask.IsCompletedSuccessfully)
+                        return;
+                    await handlerTask;
                 }
             }
             finally
