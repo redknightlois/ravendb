@@ -164,7 +164,16 @@ namespace Raven.Server
 
         internal static readonly StringValues ServerVersionHeaderValue = RavenVersionAttribute.Instance.AssemblyVersion;
 
-        private async Task RequestHandler(HttpContext context)
+        private Task RequestHandler(HttpContext context)
+        {
+            // Carmack's fast path: check the common case first  
+            if (_server.ServerStore.Initialized)
+                return HandleInitializedRequestAsync(context);
+            
+            return HandleUninitializedRequestAsync(context);
+        }
+
+        private async Task HandleInitializedRequestAsync(HttpContext context)
         {
             var requestHandlerContext = new RequestHandlerContext
             {
@@ -178,8 +187,105 @@ namespace Raven.Server
                 context.Response.StatusCode = (int)HttpStatusCode.OK;
                 context.Response.Headers[Constants.Headers.ContentType] = ContentTypeHeaderValue;
 
-                if (_server.ServerStore.Initialized == false)
-                    await _server.ServerStore.InitializationCompleted.WaitAsync();
+                // Server already initialized - skip the wait
+
+                sp = Stopwatch.StartNew();
+                await _router.HandlePath(requestHandlerContext);
+                sp.Stop();
+            }
+            catch (Exception e)
+            {
+                try
+                {
+                    sp?.Stop();
+                    exception = e;
+
+                    CheckDatabaseShutdownAndThrowIfNeeded(requestHandlerContext, ref e);
+
+                    CheckVersionAndWrapException(context, ref e);
+
+                    MaybeSetExceptionStatusCode(context, _server.ServerStore, e);
+
+                    if (context.RequestAborted.IsCancellationRequested)
+                        return;
+
+                    using (_server.ServerStore.ContextPool.AllocateOperationContext(out JsonOperationContext ctx))
+                    {
+                        var djv = new DynamicJsonValue
+                        {
+                            [nameof(ExceptionDispatcher.ExceptionSchema.Url)] = $"{context.Request.Path}{context.Request.QueryString}",
+                            [nameof(ExceptionDispatcher.ExceptionSchema.Type)] = e.GetType().FullName,
+                            [nameof(ExceptionDispatcher.ExceptionSchema.Message)] = e.Message,
+                            [nameof(ExceptionDispatcher.ExceptionSchema.Error)] = e.ToString()
+                        };
+
+#if EXCEPTION_ERROR_HUNT
+                    var f = Guid.NewGuid() + ".error";
+                    File.WriteAllText(f,
+                        $"{context.Request.Path}{context.Request.QueryString}" + Environment.NewLine + errorString);
+#endif
+
+                        MaybeAddAdditionalExceptionData(djv, e);
+
+                        await using (var writer = new AsyncBlittableJsonTextWriter(ctx, context.Response.Body))
+                        {
+                            var json = ctx.ReadObject(djv, "exception");
+                            writer.WriteObject(json);
+                        }
+
+#if EXCEPTION_ERROR_HUNT
+                    File.Delete(f);
+#endif
+                    }
+                }
+                catch (Exception internalException)
+                {
+                    if (_logger.IsErrorEnabled)
+                    {
+                        _logger.Error($"Error during error handling of a failed request. Original error: {e}", internalException);
+                    }
+
+                    throw;
+                }
+            }
+            finally
+            {
+                // check if TW has clients
+                if (TrafficWatchManager.HasRegisteredClients)
+                {
+                    var database = requestHandlerContext.DatabaseName;
+                    LogTrafficWatch(context, sp?.ElapsedMilliseconds ?? 0, database);
+                }
+
+                if (sp != null && requestHandlerContext.HttpContext.WebSockets.IsWebSocketRequest == false) // exclude web sockets
+                {
+                    var requestDuration = sp.ElapsedMilliseconds;
+                    requestHandlerContext.RavenServer?.Metrics.Requests.UpdateDuration(requestDuration);
+                    requestHandlerContext.DatabaseMetrics?.Requests.UpdateDuration(requestDuration);
+                }
+
+                if (_logger.IsDebugEnabled && SkipHttpLogging == false)
+                {
+                    _logger.Debug($"{context.Request.Method} {context.Request.Path.Value}{context.Request.QueryString.Value} - {context.Response.StatusCode} - {(sp?.ElapsedMilliseconds ?? 0):#,#;;0} ms", exception);
+                }
+            }
+        }
+
+        private async Task HandleUninitializedRequestAsync(HttpContext context)
+        {
+            var requestHandlerContext = new RequestHandlerContext
+            {
+                HttpContext = context
+            };
+            Exception exception = null;
+            Stopwatch sp = null;
+
+            try
+            {
+                context.Response.StatusCode = (int)HttpStatusCode.OK;
+                context.Response.Headers[Constants.Headers.ContentType] = ContentTypeHeaderValue;
+
+                await _server.ServerStore.InitializationCompleted.WaitAsync();
 
                 sp = Stopwatch.StartNew();
                 await _router.HandlePath(requestHandlerContext);
