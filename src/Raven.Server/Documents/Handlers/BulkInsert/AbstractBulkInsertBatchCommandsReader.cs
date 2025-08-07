@@ -35,7 +35,11 @@ public abstract class AbstractBulkInsertBatchCommandsReader<TCommandData> : IDis
     public async Task InitAsync()
     {
         while (_parser.Read() == false)
-            await BatchRequestParser.RefillParserBuffer(_stream, _buffer, _parser, _token);
+        {
+            var refillTask = BatchRequestParser.RefillParserBuffer(_stream, _buffer, _parser, _token);
+            if (!refillTask.IsCompletedSuccessfully)
+                await refillTask;
+        }
 
         if (_state.CurrentTokenType != JsonParserToken.StartArray)
         {
@@ -61,7 +65,9 @@ public abstract class AbstractBulkInsertBatchCommandsReader<TCommandData> : IDis
     {
         do
         {
-            await BatchRequestParser.RefillParserBuffer(_stream, _buffer, _parser, _token);
+            var refillTask = BatchRequestParser.RefillParserBuffer(_stream, _buffer, _parser, _token);
+            if (!refillTask.IsCompletedSuccessfully)
+                await refillTask;
         } while (_parser.Read() == false);
 
         if (_state.CurrentTokenType == JsonParserToken.EndArray)

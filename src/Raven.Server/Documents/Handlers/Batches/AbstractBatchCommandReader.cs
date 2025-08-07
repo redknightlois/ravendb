@@ -109,14 +109,20 @@ public abstract class AbstractBatchCommandsReader<TBatchCommand, TOperationConte
         /* we can't know from advanced if we will need this information so we save this for all batch commands */
         using (var modifier = new BlittableMetadataModifier(context, legacyImport: false, readLegacyEtag: false, DatabaseItemType.Attachments))
         {
-            while (parser.Read() == false)
-                await BatchRequestParser.RefillParserBuffer(stream, buffer, parser, token);
+            {
+                var readTask = BatchRequestParser.ReadNextTokenAsync(stream, buffer, parser, token);
+                if (!readTask.IsCompletedSuccessfully)
+                    await readTask;
+            }
 
             if (state.CurrentTokenType != JsonParserToken.StartObject)
                 BatchRequestParser.ThrowUnexpectedToken(JsonParserToken.StartObject, state);
 
-            while (parser.Read() == false)
-                await BatchRequestParser.RefillParserBuffer(stream, buffer, parser, token);
+            {
+                var readTask = BatchRequestParser.ReadNextTokenAsync(stream, buffer, parser, token);
+                if (!readTask.IsCompletedSuccessfully)
+                    await readTask;
+            }
 
             if (state.CurrentTokenType != JsonParserToken.String)
                 BatchRequestParser.ThrowUnexpectedToken(JsonParserToken.String, state);
@@ -127,16 +133,22 @@ public abstract class AbstractBatchCommandsReader<TBatchCommand, TOperationConte
                     BatchRequestParser.ThrowUnexpectedToken(JsonParserToken.String, state);
             }
 
-            while (parser.Read() == false)
-                await BatchRequestParser.RefillParserBuffer(stream, buffer, parser, token);
+            {
+                var readTask = BatchRequestParser.ReadNextTokenAsync(stream, buffer, parser, token);
+                if (!readTask.IsCompletedSuccessfully)
+                    await readTask;
+            }
 
             if (state.CurrentTokenType != JsonParserToken.StartArray)
                 BatchRequestParser.ThrowUnexpectedToken(JsonParserToken.StartArray, state);
 
             while (true)
             {
-                while (parser.Read() == false)
-                    await BatchRequestParser.RefillParserBuffer(stream, buffer, parser, token);
+                {
+                    var readTask = BatchRequestParser.ReadNextTokenAsync(stream, buffer, parser, token);
+                    if (!readTask.IsCompletedSuccessfully)
+                        await readTask;
+                }
 
                 if (state.CurrentTokenType == JsonParserToken.EndArray)
                     break;
