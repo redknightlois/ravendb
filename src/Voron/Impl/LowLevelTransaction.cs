@@ -539,7 +539,9 @@ namespace Voron.Impl
                 case GetPageMethod.ReadScratchFirst:
                     return PageInternalFromReadScratchTable(pageNumber);
                 case GetPageMethod.DataFile:
-                    return GetPageInternalFromDataFile(pageNumber);
+                    // HACKY FIX: Disable validation for DataFile method (used by read transactions with no scratch pages)
+                    // This mimics v7.1 behavior where journal layer would typically catch pages before validation
+                    return GetPageInternalFromDataFile(pageNumber, validateChecksum: false);
                 default:
                     throw new ArgumentOutOfRangeException(_getPageMethod.ToString());
             }
@@ -550,7 +552,7 @@ namespace Voron.Impl
         {
             if (_scratchPagesInUse.TryGetValue(pageNumber, out var value))
                 return value.ReadWritable(this);
-            return GetPageInternalFromDataFile(pageNumber);
+            return GetPageInternalFromDataFile(pageNumber, validateChecksum: false);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -558,14 +560,14 @@ namespace Voron.Impl
         {
             if (_scratchPagesForReads.TryGetValue(pageNumber, out var value))
                 return value.ReadPage(this);
-            return GetPageInternalFromDataFile(pageNumber);
+            return GetPageInternalFromDataFile(pageNumber, validateChecksum: false);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private Page GetPageInternalFromDataFile(long pageNumber)
+        private Page GetPageInternalFromDataFile(long pageNumber, bool validateChecksum = true)
         {
             var page = new Page(DataPager.AcquirePagePointerWithOverflowHandling(DataPagerState, ref PagerTransactionState, pageNumber));
-            if (_isValidationEnabled)// When encryption is off, we do validation by checksum
+            if (validateChecksum && _isValidationEnabled)// When encryption is off, we do validation by checksum
                 _env.ValidatePageChecksum(pageNumber, (PageHeader*)page.Pointer);
             return page;
         }
