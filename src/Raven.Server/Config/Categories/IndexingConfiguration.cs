@@ -165,11 +165,15 @@ namespace Raven.Server.Config.Categories
         [ConfigurationEntry("Indexing.Metrics.Enabled", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
         public virtual bool EnableMetrics { get; protected set; }
 
+        private PathSetting _storagePath;
+        
         [ReadOnlyPath]
-        public virtual PathSetting StoragePath => field ??= _root.ResourceType == ResourceType.Server ? null : _root.Core.DataDirectory.Combine("Indexes");
+        public virtual PathSetting StoragePath => _storagePath ??= _root.ResourceType == ResourceType.Server ? null : _root.Core.DataDirectory.Combine("Indexes");
 
+        private PathSetting _sharedJournalsPath;
+        
         [ReadOnlyPath]
-        public virtual PathSetting SharedJournalsPath => field ??= _root.ResourceType == ResourceType.Server ? null : _root.Core.DataDirectory.Combine("Indexes").Combine(SharedJournalsStorageName);
+        public virtual PathSetting SharedJournalsPath => _sharedJournalsPath ??= _root.ResourceType == ResourceType.Server ? null : _root.Core.DataDirectory.Combine("Indexes").Combine(SharedJournalsStorageName);
         
         [Description("Use this setting to specify a different path for the indexes' temporary files. By default, temporary files are created under the Temp folder inside the index data directory.")]
         [DefaultValue(null)]

@@ -45,7 +45,7 @@ internal class RavenServerHttpClientFactory : IRavenHttpClientFactory
 
     private sealed class RavenDynamicHttpClientFactoryConfiguration : IConfigureNamedOptions<HttpClientFactoryOptions>
     {
-        private readonly Lock _locker = new();
+        private readonly object _locker = new();
 
         private FrozenDictionary<string, HttpClientCacheKey> _registeredConfigurations = FrozenDictionary<string, HttpClientCacheKey>.Empty;
 
@@ -54,7 +54,7 @@ internal class RavenServerHttpClientFactory : IRavenHttpClientFactory
             if (_registeredConfigurations.ContainsKey(key.AsString))
                 return;
 
-            using (_locker.EnterScope())
+            lock (_locker)
             {
                 if (_registeredConfigurations.ContainsKey(key.AsString))
                     return;
