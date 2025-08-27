@@ -25,15 +25,39 @@ namespace Sparrow.Json
         private readonly CancellationTokenSource _cts = new CancellationTokenSource();
         private readonly long _maxContextSizeToKeepInBytes;
 
-        private readonly LockFreeRingBuffer<T> _contextBuffer = new LockFreeRingBuffer<T>(PlatformDetails.Is32Bits ? 4 * 1024 : 64 * 1024);
-        private readonly Timer _cleanupTimer;
+        // Dual-buffer architecture for background renewal
+        private readonly LockFreeRingBuffer<T> _readyBuffer;
+        private readonly LockFreeRingBuffer<T> _shadowBuffer;
+        
+        // Background renewer thread infrastructure
+        private readonly ManualResetEventSlim _workAvailable = new ManualResetEventSlim(false);
+        private readonly Thread _renewerThread;
+        private volatile bool _shutdownRequested;
 
         protected JsonContextPoolBase(IRavenLogger logger)
         {
             _logger = logger;
-            _cleanupTimer = new Timer(Cleanup, null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
+            
+            // Initialize dual buffers with core-based capacity scaling
+            int baseCapacityPerCore = 4 * 1024; // 4K contexts per core
+            int perBufferCapacity = Math.Max(8, ProcessorInfo.ProcessorCount * baseCapacityPerCore);
+            
+            int readyCapacity = perBufferCapacity;
+            int shadowCapacity = perBufferCapacity; // Same size as ready buffer since we can reclaim from shadow too
+            
+            _readyBuffer = new LockFreeRingBuffer<T>(readyCapacity);
+            _shadowBuffer = new LockFreeRingBuffer<T>(shadowCapacity);
+            
             LowMemoryNotification.Instance?.RegisterLowMemoryHandler(this);
             _maxContextSizeToKeepInBytes = long.MaxValue;
+            
+            // Start the background renewer thread
+            _renewerThread = new Thread(RenewLoop)
+            {
+                Name = "JsonContextPool.Renewer",
+                IsBackground = true
+            };
+            _renewerThread.Start();
         }
 
         protected JsonContextPoolBase(Size? maxContextSizeToKeep, IRavenLogger logger)
@@ -54,14 +78,22 @@ namespace Sparrow.Json
 
         public void Clean()
         {
-            // we are expecting to be called here when there is no
-            // more work to be done, and we want to release resources
+            // we are expecting to be called here when there is no more work to be done, and we want to release resources
             // to the system
 
-            // Drain the buffer and dispose all contexts
-            while (_contextBuffer.TryDequeue(out var context))
+            // Drain and dispose contexts from shadow buffer, we do this one first because we want to ensure we do not
+            // create a race condition with the renewer thread to put more in the ready buffer after we finished on it already.
+            while (_shadowBuffer.TryDequeue(out var context))
             {
-                context.Dispose();
+                if (context.InUse.Raise())
+                    context.Dispose();
+            }
+            
+            // Drain and dispose contexts from ready buffer
+            while (_readyBuffer.TryDequeue(out var context))
+            {
+                if (context.InUse.Raise())
+                    context.Dispose();
             }
         }
 
@@ -69,14 +101,12 @@ namespace Sparrow.Json
         {
             _cts.Token.ThrowIfCancellationRequested();
 
-            // Try to get a context from the ring buffer
-            while (_contextBuffer.TryDequeue(out context))
+            // Fast path: Try to get a pre-renewed context from ready buffer
+            while (_readyBuffer.TryDequeue(out context))
             {
                 if (context.InUse.Raise() == false)
                     continue;
-                // This what ensures that we work correctly with races from other threads
-                // if there is a context switch at the wrong time
-                context.Renew();
+                
                 return new ReturnRequestContext
                 {
                     Parent = this,
@@ -84,7 +114,23 @@ namespace Sparrow.Json
                 };
             }
 
-            // no choice, got to create it
+            // Second chance: Steal from shadow buffer and renew inline (bounded latency)
+            while (_shadowBuffer.TryDequeue(out context))
+            {
+                if (context.InUse.Raise() == false)
+                    continue;
+                
+                // Pay the renewal cost now to maintain bounded latency
+                context.Renew();
+                
+                return new ReturnRequestContext
+                {
+                    Parent = this,
+                    Context = context
+                };
+            }
+
+            // Cold path: Create a brand new context
             context = CreateContext();
             context.PoolGeneration = _generation;
             return new ReturnRequestContext
@@ -133,51 +179,13 @@ namespace Sparrow.Json
                 Context.InUse.Lower();
                 Context.InPoolSince = DateTime.UtcNow;
 
-                parent.Push(Context);
+                parent.EnqueueForRenew(Context);
 
                 Context = null;
             }
         }
-
-
-        private void Cleanup(object _)
-        {
-            if (Monitor.TryEnter(_locker) == false)
-                return;
-
-            try
-            {
-                var currentTime = DateTime.UtcNow;
-                var idleTime = TimeSpan.FromMinutes(5);
-                
-                // Get count estimate for the ring buffer to avoid infinite loops
-                var itemsToCheck = _contextBuffer.Count;
-
-                // Age-based cleanup using TryDequeue/TryEnqueue pattern
-                for (int i = 0; i < itemsToCheck; i++)
-                {
-                    if (_contextBuffer.TryDequeue(out var context) == false)
-                        break; // Buffer is empty, no need to continue. 
-                    
-                    // If context is old or the buffer is full, we will dispose. 
-                    var timeInPool = currentTime - context.InPoolSince;
-                    if (timeInPool > idleTime || _contextBuffer.TryEnqueue(context) == false)
-                        context.Dispose();
-                }
-            }
-            catch (Exception e)
-            {
-                Debug.Assert(e is OutOfMemoryException, $"Expecting OutOfMemoryException but got: {e}");
-                if (_logger.IsErrorEnabled)
-                    _logger.Error("Error during cleanup.", e);
-            }
-            finally
-            {
-                Monitor.Exit(_locker);
-            }
-        }
-
-        private void Push(T context)
+        
+        private void EnqueueForRenew(T context)
         {
             if (LowMemoryFlag.IsRaised())
             {
@@ -185,11 +193,67 @@ namespace Sparrow.Json
                 return;
             }
 
-            // Try to enqueue the context back into the ring buffer
-            if (_contextBuffer.TryEnqueue(context) == false)
+            // Try to enqueue the context to shadow buffer for background renewal
+            if (_shadowBuffer.TryEnqueue(context))
             {
-                // Ring buffer is full, dispose the context
+                _workAvailable.Set();
+                return;
+            }
+
+            // Shadow buffer is full - do inline renewal and push directly to ready buffer
+            context.Renew();
+            if (_readyBuffer.TryEnqueue(context) == false)
                 context.Dispose();
+        }
+
+        private void RenewLoop()
+        {
+            // Main renewer thread loop - continues until shutdown is requested
+            while (_shutdownRequested == false)
+            {
+                try
+                {
+                    // Check if cancellation was requested (dispose, shutdown, etc.)
+                    if (_cts.Token.IsCancellationRequested)
+                        break;
+                        
+                    // Try to get work from shadow buffer (contexts waiting for renewal)
+                    if (_shadowBuffer.TryDequeue(out var context) == false)
+                    {
+                        // No work available - reset event and wait for signal or timeout
+                        _workAvailable.Reset();
+                        _workAvailable.Wait(100, _cts.Token);
+                        continue;
+                    }
+                    
+                    // Check if context should be disposed instead of renewed:
+                    // - DoNotReuse: context marked as corrupted/problematic
+                    // - Generation fence: context is from before low memory event
+                    if (context.DoNotReuse || (LowMemoryFlag.IsRaised() && context.PoolGeneration < _generation))
+                    {
+                        context.Dispose();
+                        continue;
+                    }
+
+                    // Perform the expensive renewal operation off the request hot path
+                    context.Renew();
+                    
+                    // Try to enqueue renewed context to ready buffer for fast allocation
+                    // If ready buffer is full, dispose context to prevent memory buildup
+                    if (_readyBuffer.TryEnqueue(context) == false)
+                        context.Dispose();
+                }
+                catch (OperationCanceledException)
+                {
+                    // Expected during shutdown - exit cleanly
+                    break;
+                }
+                catch
+                {
+                    // Any other exception (renewal failure, disposal failure, etc.)
+                    // Swallow and continue - this thread must never die
+                    // Individual context failures should not kill the renewer
+                }
             }
         }
 
@@ -203,15 +267,26 @@ namespace Sparrow.Json
                 if (_disposed)
                     return;
 
+                // Signal shutdown and cancel operations
+                _shutdownRequested = true;
                 _cts.Cancel();
                 _disposed = true;
-                _cleanupTimer.Dispose();
-
-                // Clear all contexts from the ring buffer
-                while (_contextBuffer.TryDequeue(out var context))
+                
+                // Wake up the renewer thread and wait for clean shutdown
+                _workAvailable.Set();
+                if (_renewerThread is { IsAlive: true })
                 {
-                    context.Dispose();
+                    if (_renewerThread.Join((int)TimeSpan.FromSeconds(30).TotalMilliseconds) == false)
+                    {
+                        if (_logger.IsInfoEnabled)
+                            _logger.Info("JsonContextPool renewer thread did not shut down within timeout, continuing with disposal");
+                    }
                 }
+                
+                _workAvailable?.Dispose();
+
+                // Now we drain the pool. 
+                Clean();
             }
         }
 
@@ -228,8 +303,15 @@ namespace Sparrow.Json
             if (_isExtremelyLowMemory.Raise() == false)
                 return;
 
-            // Clear all contexts from the ring buffer during extremely low memory
-            while (_contextBuffer.TryDequeue(out var context))
+            // Clear all contexts from both buffers during extremely low memory
+            // The renewer thread will also honor the LowMemoryFlag and dispose old contexts
+            while (_readyBuffer.TryDequeue(out var context))
+            {
+                if (context.InUse.Raise())
+                    context.Dispose();
+            }
+            
+            while (_shadowBuffer.TryDequeue(out var context))
             {
                 if (context.InUse.Raise())
                     context.Dispose();
