@@ -740,9 +740,6 @@ namespace Raven.Server.Documents.TransactionMerger
                 var canCloseCurrentTx = previousOperation == null || previousOperation.IsCompleted;
                 if (canCloseCurrentTx || _is32Bits)
                 {
-                    if (_operations.IsEmpty)
-                        break; // nothing remaining to do, let's us close this work
-
                     if (sp.ElapsedMilliseconds > _maxTimeToWaitForPreviousTxInMs)
                         break; // too much time
 
@@ -764,7 +761,7 @@ namespace Raven.Server.Documents.TransactionMerger
                 break;
             } while (true);
 
-            var status = GetPendingOperationsStatus(context, executedOps.Count is 0);
+            var status = GetPendingOperationsStatus(context, executedOps.Count == 0 && _operations.Count == 0);
             if (_log.IsDebugEnabled)
             {
                 var opType = previousOperation == null ? string.Empty : "(async) ";
