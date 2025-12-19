@@ -145,7 +145,10 @@ namespace Voron.Impl
 
         private readonly HashSet<PageFromScratchBuffer> _transactionPages;
         private bool _hasFreePages;
-        private HashSet<long> _freedPages;
+
+        // Tracks freed page numbers for the lifetime of this transaction without managed allocations.
+        // It uses a Native list backed by the transaction for compact storage and in-place operations.
+        private NativeList<long> _freedPages;
 
         private CommitStats _requestedCommitStats;
 
@@ -942,8 +945,10 @@ namespace Voron.Impl
 
                 _freeSpaceHandling.FreePage(this, pageNumber);
 
-                _freedPages ??= new HashSet<long>();
-                _freedPages.Add(pageNumber);
+                // Collect freed pages in a compacted list to be used later in the journal
+                if (_freedPages.IsValid == false)
+                    _freedPages.Initialize(_allocator, 256);
+                _freedPages.Add(_allocator, pageNumber);
                 
                 _hasFreePages = true;
 
@@ -956,9 +961,18 @@ namespace Voron.Impl
             }
         }
 
-        internal HashSet<long> GetFreedPages()
+        internal bool TryGetFreedPages(out long* ptr, out int count)
         {
-            return _freedPages;
+            if (_freedPages.Count == 0)
+            {
+                ptr = null;
+                count = 0;
+                return false;
+            }
+
+            ptr = _freedPages.RawItems;
+            count = _freedPages.Count;
+            return true;
         }
 
         private static readonly ObjectPool<CompactKey> _sharedCompactKeyPool = new(() => new CompactKey());

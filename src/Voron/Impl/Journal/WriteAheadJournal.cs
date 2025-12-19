@@ -2086,22 +2086,39 @@ namespace Voron.Impl.Journal
             const int transactionHeaderPageOverhead = 1;
             var pagesRequired = (transactionHeaderPageOverhead + pagesCountIncludingAllOverflowPages + overheadInPages);
             
-            var freedPages = tx.GetFreedPages();
-            
-            if (freedPages is { Count: > 0 })
+            var hasFreed = tx.TryGetFreedPages(out long* freedPagesPtr, out int freedPagesCount);            
+            if (hasFreed && freedPagesCount > 0)
             {
                 // we need to remove the freed pages that were reused and modified later on during the transaction
                 foreach (var page in txPages)
                 {
                     for (int i = 0; i < page.NumberOfPages; i++)
                     {
-                        freedPages.Remove(page.PageNumberInDataFile + i);
+                        // mark reused pages by writing -1 sentinel to preserve order but exclude later
+                        var reused = page.PageNumberInDataFile + i;
+                        for (int fp = 0; fp < freedPagesCount; fp++)
+                        {
+                            if (freedPagesPtr[fp] == reused)
+                                freedPagesPtr[fp] = -1;
+                        }
                     }
                 } 
-                
-                if (freedPages.Count > 0)
+
+                // Sort and deduplicate treating values as unsigned so sentinels (-1) end up last.
+                // This makes removing sentinels faster by using the fact that they end up at the end of the sort.
+                // By using the deduplication we just need to know if there is one for them or not. 
+                var uPtr = (ulong*)freedPagesPtr;
+                freedPagesCount = Sorting.SortAndRemoveDuplicates(uPtr, freedPagesCount);
+                if (freedPagesCount > 0 && uPtr[freedPagesCount - 1] == ulong.MaxValue)
+                    freedPagesCount--; // drop the trailing sentinel (-1 cast to ulong)
+
+                if (freedPagesCount > 0)
                 {
-                    var freePagesOverhead = freedPages.Count * sizeof(long) * 2; // twice as much as the number of pages guarantees enough space for the encoding
+                    // Pre-size using actual encoder estimate to avoid compression buffer growth
+                    using var freePagesEncoder = new FastPForEncoder(tx.Allocator);
+                    var encodedSize = freePagesEncoder.Encode(freedPagesPtr, freedPagesCount);
+                    const int maxEncodingSectionSize = 32 * Constants.Size.Kilobyte;
+                    var freePagesOverhead = sizeof(FreePagesHeader) + encodedSize + ((encodedSize / maxEncodingSectionSize) + 1) * sizeof(EncodedFreePagesSection);
                     var freePagesOverheadInPages = checked(freePagesOverhead / Constants.Storage.PageSize + (freePagesOverhead % Constants.Storage.PageSize == 0 ? 0 : 1));
                     
                     pagesRequired += freePagesOverheadInPages;
@@ -2200,12 +2217,12 @@ namespace Voron.Impl.Journal
 
             ref var txHeader = ref tx.TransactionHeader;
             
-            if (freedPages is { Count: > 0 })
+            if (hasFreed && freedPagesCount > 0)
             {
                 var totalAllocatedBytes = pagesRequired * Constants.Storage.PageSize;
                 var availableSpace = totalAllocatedBytes - (write - txHeaderPtr);
                 
-                var encodedFreePagesSize = EncodeFreePages(freedPages, write, availableSpace, tx.Allocator);
+                var encodedFreePagesSize = EncodeFreePages(freedPagesPtr, freedPagesCount, write, availableSpace, tx.Allocator);
                 write += encodedFreePagesSize;
                 
                 txHeader.Flags |= TransactionPersistenceModeFlags.HasFreePages;
@@ -2525,7 +2542,7 @@ namespace Voron.Impl.Journal
 
         private void RejectCommitsToMerge() => SharedJournalState.SetCancel();
 
-        internal static long EncodeFreePages(HashSet<long> freedPages, byte* dst, long availableDestinationBytes, ByteStringContext allocator)
+        internal static long EncodeFreePages(long* freedPagesPtr, int freedPagesCount, byte* dst, long availableDestinationBytes, ByteStringContext allocator)
         {
             var headerPtr = dst;
             var header = (FreePagesHeader*)headerPtr;
@@ -2533,24 +2550,14 @@ namespace Voron.Impl.Journal
 
             var maxPtr = headerPtr + availableDestinationBytes;
             
-            using var _ = allocator.Allocate(freedPages.Count * sizeof(long), out var pagesBuffer);
-
-            var pages = (long*)pagesBuffer.Ptr;
-
-            var index = 0;
-
-            foreach (long freedPage in freedPages)
-            {
-                pages[index++] = freedPage;
-            }
-            
-            Sort.Run(pages, freedPages.Count);
+            var pages = freedPagesPtr;
+            var index = freedPagesCount;
 
             const int maxEncodingSectionSize = 32 * Constants.Size.Kilobyte;
 
             using var encoder = new FastPForEncoder(allocator);
 
-            var remainingCount = freedPages.Count;
+            var remainingCount = freedPagesCount;
             var processedCount = 0;
 
             var encodedSize = 0;
@@ -2584,10 +2591,10 @@ namespace Voron.Impl.Journal
                 output += size;
             }
 
-            if (processedCount != freedPages.Count)
-            {
-                throw new InvalidOperationException($"Expected to encode and write {freedPages.Count} freed pages, but wrote {processedCount} instead");
-            }
+                if (processedCount != freedPagesCount)
+                {
+                    throw new InvalidOperationException($"Expected to encode and write {freedPagesCount} freed pages, but wrote {processedCount} instead");
+                }
 
             header->NumberOfPages = processedCount;
             header->EncodedSectionsSize = encodedSize;
