@@ -99,7 +99,9 @@ public unsafe partial class Hnsw
         private readonly Tree _tree;
         private readonly Lookup<Int64LookupKey> _nodeIdToLocations;
         public readonly LowLevelTransaction Llt;
-        private int _visitsCounter;
+        // Start at 1 so that freshly-loaded nodes (QueryDistanceVersion == 0 and Visited == 0)
+        // never match the initial counter and are always treated as uncached/unvisited.
+        private int _visitsCounter = 1;
         public readonly delegate*<ReadOnlySpan<byte>, ReadOnlySpan<byte>, float> SimilarityCalc;
         public readonly bool IsEmpty;
 
@@ -318,12 +320,12 @@ public unsafe partial class Hnsw
             }
 
             ref var to = ref GetNodeByIndex(toIdx);
-            if (to.QueryDistance is not null)
-                return to.QueryDistance.Value;
-            
+            if (to.QueryDistanceVersion == _visitsCounter)
+                return to.QueryDistanceValue;
+
             Span<byte> v2 = to.GetVector(this);
             var distance = SimilarityCalc(vector, v2);
-            
+
             return distance;
         }
 
@@ -331,15 +333,16 @@ public unsafe partial class Hnsw
         public float QueryDistance(ReadOnlySpan<byte> vector, int toIdx, ref long vectorReadCounter)
         {
             ref var to = ref GetNodeByIndex(toIdx);
-            if (to.QueryDistance is not null)
+            if (to.QueryDistanceVersion == _visitsCounter)
             {
-                return to.QueryDistance.Value;
+                return to.QueryDistanceValue;
             }
-            
+
             Span<byte> v2 = to.GetVector(this);
             vectorReadCounter++;
             var distance = SimilarityCalc(vector, v2);
-            to.QueryDistance = distance;
+            to.QueryDistanceValue = distance;
+            to.QueryDistanceVersion = _visitsCounter;
 
             return distance;
         }
@@ -1101,13 +1104,35 @@ public unsafe partial class Hnsw
 
         if (searchState.Options.CountOfVectors == 0)
             return new VectorSearchRetriever(searchState, searchState.EmptySearch(), vector, minimumSimilarity);
-        
+
         searchState.SearchNearestAcrossLevels(vector.Span, -1, searchState.Options.MaxLevel, ref nearestNodesByLevel);
         var nearest = nearestNodesByLevel[0];
         nearestNodesByLevel.Clear();
         var nearestEdgesSearch = searchState.NearestSearch(nearest, vector, 0, numberOfCandidates, nearestNodesByLevel,
             SearchState.NearestEdgesFlags.StartingPointAsEdge | SearchState.NearestEdgesFlags.FilterNodesWithEmptyPostingLists, hasFilterMatch);
         return new VectorSearchRetriever(searchState, nearestEdgesSearch, vector, minimumSimilarity);
+    }
+
+    /// <summary>
+    /// Approximate nearest neighbor search using a caller-owned SearchState that may be reused
+    /// across multiple queries. The caller is responsible for disposing the SearchState.
+    /// Reusing the SearchState allows cached node data (edges, vectors) to persist across queries,
+    /// avoiding repeated LoadNodeIndexes and Container.Get calls for frequently-visited nodes.
+    /// </summary>
+    public static VectorSearchRetriever ApproximateNearest(SearchState searchState, int numberOfCandidates, Memory<byte> vector, float minimumSimilarity, bool hasFilterMatch = false)
+    {
+        var nearestNodesByLevel = new ContextBoundNativeList<int>(searchState.Llt.Allocator);
+        nearestNodesByLevel.EnsureCapacityFor(searchState.Options.MaxLevel + 1);
+
+        if (searchState.Options.CountOfVectors == 0)
+            return new VectorSearchRetriever(searchState, searchState.EmptySearch(), vector, minimumSimilarity, ownsSearchState: false);
+
+        searchState.SearchNearestAcrossLevels(vector.Span, -1, searchState.Options.MaxLevel, ref nearestNodesByLevel);
+        var nearest = nearestNodesByLevel[0];
+        nearestNodesByLevel.Clear();
+        var nearestEdgesSearch = searchState.NearestSearch(nearest, vector, 0, numberOfCandidates, nearestNodesByLevel,
+            SearchState.NearestEdgesFlags.StartingPointAsEdge | SearchState.NearestEdgesFlags.FilterNodesWithEmptyPostingLists, hasFilterMatch);
+        return new VectorSearchRetriever(searchState, nearestEdgesSearch, vector, minimumSimilarity, ownsSearchState: false);
     }
 
     public static VectorSearchRetriever EmptySearch(LowLevelTransaction llt, Slice name, int numberOfCandidates, Memory<byte> vector, float minimumSimilarity)

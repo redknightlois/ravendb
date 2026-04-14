@@ -21,7 +21,10 @@ public partial class Hnsw
         public NativeList<NativeList<int>> EdgesIndexesPerLevel;
         private UnmanagedSpan _vectorSpan;
         public int Visited;
-        public float? QueryDistance;
+        // QueryDistance is versioned: valid only when QueryDistanceVersion == SearchState._visitsCounter.
+        // This allows SearchState reuse across queries without explicit per-node resets.
+        public float QueryDistanceValue;
+        public int QueryDistanceVersion;
 
         public bool VectorLoaded => _vectorSpan.Length > 0;
 
