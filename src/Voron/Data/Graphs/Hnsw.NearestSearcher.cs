@@ -320,7 +320,7 @@ public unsafe partial class Hnsw
                     // computation during beam search) are included at their cached distance.
                     // Tail candidates with only int8 distance are appended at the end — they are
                     // extremely unlikely to be in the final top-K.
-                    const int refineCutoff = 64;
+                    const int refineCutoff = 32;
                     int totalCount = _searchState._nearestEdgesQ.Count;
 
                     // Drain the PQ into an array. Min-heap dequeues worst-first (most negative priority),
