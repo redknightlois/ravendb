@@ -5,6 +5,7 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using System.Threading;
 using Sparrow;
 using Sparrow.Binary;
@@ -104,6 +105,15 @@ public unsafe partial class Hnsw
         private int _visitsCounter = 1;
         public readonly delegate*<ReadOnlySpan<byte>, ReadOnlySpan<byte>, float> SimilarityCalc;
         public readonly bool IsEmpty;
+
+        // Int8 screening state: quantized copies for fast approximate distance pre-screening.
+        // Only used for CosineSimilaritySingles. Indexed by nodeIndex * _int8Dims.
+        private sbyte[] _int8Vectors;
+        private float[] _int8Scales; // per-node scale factor (127 / max_abs)
+        private sbyte[] _int8Query; // quantized query vector
+        private float _int8QueryScale; // query scale factor
+        private int _int8Dims; // number of float dimensions (VectorSizeBytes / 4)
+        private bool _int8Enabled; // true when screening is active for current query
 
         public Span<Node> Nodes => _nodes.ToSpan();
         public Tree Tree => _tree;
@@ -613,6 +623,187 @@ public unsafe partial class Hnsw
        public bool TryGetNodeById(long nodeId, out int nodeIndex)
        {
            return _nodeIdToIdx.TryGetValue(nodeId, out nodeIndex);
+       }
+
+       /// <summary>
+       /// Prepares int8-quantized query vector for screening. Called once per query.
+       /// Only active for f32 (CosineSimilaritySingles) embedding type.
+       /// </summary>
+       public void PrepareInt8Screening(ReadOnlySpan<byte> queryVector)
+       {
+           if (Options.SimilarityMethod != SimilarityMethod.CosineSimilaritySingles)
+           {
+               _int8Enabled = false;
+               return;
+           }
+
+           _int8Dims = Options.VectorSizeBytes / sizeof(float);
+           var queryFloats = MemoryMarshal.Cast<byte, float>(queryVector);
+
+           if (_int8Query == null || _int8Query.Length < _int8Dims)
+               _int8Query = new sbyte[_int8Dims];
+
+           _int8QueryScale = QuantizeVector(queryFloats, _int8Query.AsSpan(0, _int8Dims));
+           _int8Enabled = true;
+
+           // Ensure int8 buffers are large enough for current node count
+           EnsureInt8BufferCapacity(_nodes.Count);
+       }
+
+       /// <summary>
+       /// Ensures int8 vector buffers can hold at least <paramref name="nodeCount"/> entries.
+       /// Grows by 2x when needed. Does NOT re-quantize existing nodes (they keep their cached values).
+       /// </summary>
+       private void EnsureInt8BufferCapacity(int nodeCount)
+       {
+           int requiredVectorBytes = nodeCount * _int8Dims;
+           if (_int8Vectors != null && _int8Vectors.Length >= requiredVectorBytes)
+               return;
+
+           int newCapacity = Math.Max(nodeCount, 256);
+           if (_int8Vectors != null)
+               newCapacity = Math.Max(newCapacity, (_int8Vectors.Length / _int8Dims) * 2);
+
+           var newVectors = new sbyte[newCapacity * _int8Dims];
+           var newScales = new float[newCapacity];
+
+           if (_int8Vectors != null)
+           {
+               Array.Copy(_int8Vectors, newVectors, _int8Vectors.Length);
+               Array.Copy(_int8Scales, newScales, _int8Scales.Length);
+           }
+
+           _int8Vectors = newVectors;
+           _int8Scales = newScales;
+       }
+
+       /// <summary>
+       /// Ensures a node's int8 quantization is available. Lazily quantizes on first access.
+       /// Scale == 0 means unquantized (fresh node).
+       /// </summary>
+       [MethodImpl(MethodImplOptions.AggressiveInlining)]
+       public bool TryGetInt8Screening(int nodeIndex, out float approxDistance)
+       {
+           approxDistance = 0;
+           if (!_int8Enabled)
+               return false;
+
+           // Ensure capacity for this node index
+           if (nodeIndex >= _int8Scales.Length)
+               EnsureInt8BufferCapacity(nodeIndex + 1);
+
+           int offset = nodeIndex * _int8Dims;
+
+           // Lazily quantize if not yet done (scale == 0 means unquantized)
+           if (_int8Scales[nodeIndex] == 0)
+           {
+               ref var node = ref _nodes[nodeIndex];
+               if (!node.VectorLoaded)
+                   return false; // vector not loaded yet
+
+               var vectorBytes = node.GetVector(this);
+               var floats = MemoryMarshal.Cast<byte, float>(vectorBytes);
+               _int8Scales[nodeIndex] = QuantizeVector(floats, _int8Vectors.AsSpan(offset, _int8Dims));
+               if (_int8Scales[nodeIndex] == 0)
+               {
+                   _int8Scales[nodeIndex] = float.Epsilon; // avoid re-quantization of zero vectors
+                   return false;
+               }
+           }
+
+           // Compute approximate cosine distance using int8 dot product
+           int dotProduct = Int8DotProduct(
+               _int8Query.AsSpan(0, _int8Dims),
+               _int8Vectors.AsSpan(offset, _int8Dims));
+
+           // Convert int8 dot product to approximate cosine similarity:
+           // true_dot ≈ (int8_dot / (queryScale * dataScale))
+           // For pre-normalized vectors: cosine_sim ≈ true_dot / (||q|| * ||v||) ≈ true_dot
+           // cosine_distance = 2 * (1 - cosine_sim)
+           float approxSim = dotProduct / (_int8QueryScale * _int8Scales[nodeIndex]);
+           approxDistance = 1f - approxSim;
+           return true;
+       }
+
+       /// <summary>
+       /// Symmetric int8 quantization: q[i] = round(v[i] * 127 / max(|v[i]|)).
+       /// Returns the scale factor (127 / max_abs), or 0 for zero vectors.
+       /// </summary>
+       [MethodImpl(MethodImplOptions.AggressiveInlining)]
+       private static float QuantizeVector(ReadOnlySpan<float> floats, Span<sbyte> output)
+       {
+           float maxAbs = 0;
+           for (int i = 0; i < floats.Length; i++)
+           {
+               float abs = MathF.Abs(floats[i]);
+               if (abs > maxAbs) maxAbs = abs;
+           }
+
+           if (maxAbs == 0)
+               return 0;
+
+           float scale = 127f / maxAbs;
+           for (int i = 0; i < floats.Length; i++)
+           {
+               output[i] = (sbyte)Math.Clamp(MathF.Round(floats[i] * scale), -127, 127);
+           }
+
+           return scale;
+       }
+
+       /// <summary>
+       /// AVX-512 dot-product-only for int8 vectors (no norms needed).
+       /// Processes 32 sbytes per iteration using pmaddwd (i16×i16→i32 with horizontal pairs).
+       /// For 1536 dimensions: 48 iterations ≈ 50-60ns vs 633ns for full f32 cosine distance.
+       /// </summary>
+       [MethodImpl(MethodImplOptions.AggressiveInlining)]
+       private static int Int8DotProduct(ReadOnlySpan<sbyte> a, ReadOnlySpan<sbyte> b)
+       {
+           if (Avx512BW.IsSupported)
+               return Int8DotProductAvx512(a, b);
+
+           return Int8DotProductScalar(a, b);
+       }
+
+       [MethodImpl(MethodImplOptions.AggressiveInlining)]
+       private static int Int8DotProductAvx512(ReadOnlySpan<sbyte> a, ReadOnlySpan<sbyte> b)
+       {
+           var abVec = Vector512<int>.Zero;
+           int i = a.Length;
+
+           ref sbyte aRef = ref MemoryMarshal.GetReference(a);
+           ref sbyte bRef = ref MemoryMarshal.GetReference(b);
+
+           while (i >= Vector256<sbyte>.Count)
+           {
+               Vector512<short> aVec = Avx512BW.ConvertToVector512Int16(Vector256.LoadUnsafe(ref aRef));
+               Vector512<short> bVec = Avx512BW.ConvertToVector512Int16(Vector256.LoadUnsafe(ref bRef));
+               abVec = Avx512F.Add(abVec, Avx512BW.MultiplyAddAdjacent(aVec, bVec));
+
+               i -= Vector256<sbyte>.Count;
+               aRef = ref Unsafe.Add(ref aRef, Vector256<sbyte>.Count);
+               bRef = ref Unsafe.Add(ref bRef, Vector256<sbyte>.Count);
+           }
+
+           int result = Vector512.Sum(abVec);
+
+           while (i > 0)
+           {
+               result += aRef * bRef;
+               i--;
+               aRef = ref Unsafe.Add(ref aRef, 1);
+               bRef = ref Unsafe.Add(ref bRef, 1);
+           }
+
+           return result;
+       }
+
+       private static int Int8DotProductScalar(ReadOnlySpan<sbyte> a, ReadOnlySpan<sbyte> b)
+       {
+           int result = 0;
+           for (int i = 0; i < a.Length; i++)
+               result += a[i] * b[i];
+           return result;
        }
 
        public void Dispose()

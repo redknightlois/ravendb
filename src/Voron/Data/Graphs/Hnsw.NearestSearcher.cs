@@ -155,6 +155,12 @@ public unsafe partial class Hnsw
                 Debug.Assert(nearestEdgesQ.Count == 0, "_nearestEdgesQ.Count == 0");
                 InitState(out float lowerBound, out int visitedCounter);
 
+                // Prepare int8 screening for this query (only active for f32 vectors)
+                _searchState.PrepareInt8Screening(_vector.Span);
+                // Int8 screening margin: conservative threshold to avoid false negatives.
+                // Quantization error for 1536D int8 dot product ≈ 0.0005 std; margin = ~20× that.
+                const float int8ScreeningMargin = 0.01f;
+
                 while (candidatesQ.TryDequeue(out var cur, out var curDistance))
                 {
                     if (-curDistance < lowerBound &&
@@ -190,6 +196,19 @@ public unsafe partial class Hnsw
                         // cache-miss latency with the current distance computation.
                         // SimilarityCalc is ~65% of query time, ~80% of which is data loading.
                         PrefetchNextNeighborVector(i + 1, visitedCounter);
+
+                        // Int8 pre-screening: when the PQ is full, use cheap int8 approximate distance
+                        // (~50-60ns) to skip neighbors that are clearly worse than lowerBound,
+                        // avoiding the full f32 distance computation (~633ns).
+                        if (nearestEdgesQ.Count >= _internalNumberOfCandidates &&
+                            _searchState.TryGetInt8Screening(nextIndex, out float approxDist))
+                        {
+                            // lowerBound is negated distance (more negative = farther).
+                            // -lowerBound is the worst un-negated distance in the result set.
+                            // If approximate distance exceeds that by more than margin, skip.
+                            if (approxDist > -lowerBound + int8ScreeningMargin)
+                                continue;
+                        }
 
                         var isDeleted = (next.PostingListId & Constants.Graphs.VectorId.EnsureIsSingleMask) == Constants.Graphs.VectorId.Tombstone
                                         || (_hasFilterMatch && _alreadyReturnedEdges.Contains(nextIndex));
