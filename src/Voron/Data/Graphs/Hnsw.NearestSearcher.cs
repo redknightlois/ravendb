@@ -160,6 +160,10 @@ public unsafe partial class Hnsw
                 // Int8 screening margin: conservative threshold to avoid false negatives.
                 // Quantization error for 1536D int8 dot product ≈ 0.0005 std; margin = ~20× that.
                 const float int8ScreeningMargin = 0.01f;
+                // Boundary zone: candidates within this distance of lowerBound use f32 for accuracy.
+                // Candidates clearly better (beyond this zone) safely use int8 approximate distance.
+                // Int8 pairwise ordering error std ≈ 0.0007; 0.003 = ~4σ coverage.
+                const float int8BoundaryZone = 0.003f;
 
                 while (candidatesQ.TryDequeue(out var cur, out var curDistance))
                 {
@@ -194,26 +198,50 @@ public unsafe partial class Hnsw
 
                         // Prefetch the next unvisited neighbor's vector data to overlap
                         // cache-miss latency with the current distance computation.
-                        // SimilarityCalc is ~65% of query time, ~80% of which is data loading.
                         PrefetchNextNeighborVector(i + 1, visitedCounter);
 
-                        // Int8 pre-screening: when the PQ is full, use cheap int8 approximate distance
-                        // (~50-60ns) to skip neighbors that are clearly worse than lowerBound,
-                        // avoiding the full f32 distance computation (~633ns).
-                        if (nearestEdgesQ.Count >= _internalNumberOfCandidates &&
-                            _searchState.TryGetInt8Screening(nextIndex, out float approxDist))
+                        // Int8 primary distance with boundary-aware f32 fallback:
+                        // - Clearly worse than lowerBound: SKIP via int8 screening (~55ns)
+                        // - Near lowerBound boundary: USE F32 for accurate ordering (~633ns)
+                        // - Clearly better than lowerBound: USE INT8 (safe, ~55ns)
+                        // This preserves graph traversal accuracy at the critical boundary
+                        // while saving f32 for candidates that clearly don't affect ordering.
+                        float nextDist;
+                        if (_searchState.TryGetInt8Screening(nextIndex, out float approxDist))
                         {
-                            // lowerBound is negated distance (more negative = farther).
-                            // -lowerBound is the worst un-negated distance in the result set.
-                            // If approximate distance exceeds that by more than margin, skip.
-                            if (approxDist > -lowerBound + int8ScreeningMargin)
-                                continue;
+                            if (nearestEdgesQ.Count >= _internalNumberOfCandidates)
+                            {
+                                // PQ is full — screening and boundary decisions
+                                if (approxDist > -lowerBound + int8ScreeningMargin)
+                                    continue; // clearly worse, skip
+
+                                if (approxDist > -lowerBound - int8BoundaryZone)
+                                {
+                                    // Boundary zone: int8 distance is within zone of lowerBound.
+                                    // Use f32 for accurate ordering to preserve recall.
+                                    nextDist = -_searchState.QueryDistance(_vector.Span, nextIndex, ref _vectorReadCounter);
+                                }
+                                else
+                                {
+                                    // Clearly better: int8 is safe for PQ ordering
+                                    nextDist = -approxDist;
+                                }
+                            }
+                            else
+                            {
+                                // PQ not full: use int8 (collecting everything, ordering less critical)
+                                nextDist = -approxDist;
+                            }
+                        }
+                        else
+                        {
+                            // Fallback to f32 when int8 not available (vector not loaded yet)
+                            nextDist = -_searchState.QueryDistance(_vector.Span, nextIndex, ref _vectorReadCounter);
                         }
 
                         var isDeleted = (next.PostingListId & Constants.Graphs.VectorId.EnsureIsSingleMask) == Constants.Graphs.VectorId.Tombstone
                                         || (_hasFilterMatch && _alreadyReturnedEdges.Contains(nextIndex));
 
-                        float nextDist = -_searchState.QueryDistance(_vector.Span, nextIndex, ref _vectorReadCounter);
                         if (nearestEdgesQ.Count < _internalNumberOfCandidates)
                         {
                             candidatesQ.Enqueue(nextIndex, -nextDist);
@@ -281,17 +309,42 @@ public unsafe partial class Hnsw
             private void ProcessResults()
             {
                 _candidates.Clear();
-                _candidates.EnsureCapacityFor(_searchState._nearestEdgesQ.Count);
 
-                while (_searchState._nearestEdgesQ.TryDequeue(out var edgeId, out var d))
+                if (_searchState._int8Enabled)
                 {
-                    if (_hasFilterMatch && _alreadyReturnedEdges!.Add(edgeId) == false)
-                        continue;
+                    // Int8 was used as primary distance during search. Re-compute f32 distances
+                    // for final ranking to ensure accurate results.
+                    var refinePQ = new PriorityQueue<int, float>();
+                    while (_searchState._nearestEdgesQ.TryDequeue(out var edgeId, out var d))
+                    {
+                        if (_hasFilterMatch && _alreadyReturnedEdges!.Add(edgeId) == false)
+                            continue;
 
-                    _candidates.AddUnsafe(edgeId);
+                        // Compute accurate f32 distance for final ranking
+                        float f32Dist = _searchState.QueryDistance(_vector.Span, edgeId, ref _vectorReadCounter);
+                        refinePQ.Enqueue(edgeId, f32Dist);
+                    }
+
+                    _candidates.EnsureCapacityFor(refinePQ.Count);
+                    while (refinePQ.TryDequeue(out var edgeId, out _))
+                    {
+                        _candidates.AddUnsafe(edgeId);
+                    }
                 }
+                else
+                {
+                    _candidates.EnsureCapacityFor(_searchState._nearestEdgesQ.Count);
 
-                _candidates.Inner.Reverse();
+                    while (_searchState._nearestEdgesQ.TryDequeue(out var edgeId, out var d))
+                    {
+                        if (_hasFilterMatch && _alreadyReturnedEdges!.Add(edgeId) == false)
+                            continue;
+
+                        _candidates.AddUnsafe(edgeId);
+                    }
+
+                    _candidates.Inner.Reverse();
+                }
             }
             
             public bool ShouldContinueSearch(long filterDocsCount)
