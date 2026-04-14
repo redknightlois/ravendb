@@ -314,21 +314,71 @@ public unsafe partial class Hnsw
                 {
                     // Int8 was used as primary distance during search. Re-compute f32 distances
                     // for final ranking to ensure accurate results.
-                    var refinePQ = new PriorityQueue<int, float>();
-                    while (_searchState._nearestEdgesQ.TryDequeue(out var edgeId, out var d))
+                    // Optimization: only compute NEW f32 distances for the top refineCutoff candidates
+                    // (dequeued last from the min-heap, i.e. the best candidates by mixed distance).
+                    // Candidates in the tail that already have cached f32 (from boundary-zone
+                    // computation during beam search) are included at their cached distance.
+                    // Tail candidates with only int8 distance are appended at the end — they are
+                    // extremely unlikely to be in the final top-K.
+                    const int refineCutoff = 64;
+                    int totalCount = _searchState._nearestEdgesQ.Count;
+
+                    // Drain the PQ into an array. Min-heap dequeues worst-first (most negative priority),
+                    // so allEdges[0] = worst, allEdges[totalCount-1] = best.
+                    Span<int> allEdges = totalCount <= 512
+                        ? stackalloc int[totalCount]
+                        : new int[totalCount];
+                    int edgeCount = 0;
+                    while (_searchState._nearestEdgesQ.TryDequeue(out var edgeId, out _))
                     {
                         if (_hasFilterMatch && _alreadyReturnedEdges!.Add(edgeId) == false)
                             continue;
-
-                        // Compute accurate f32 distance for final ranking
-                        float f32Dist = _searchState.QueryDistance(_vector.Span, edgeId, ref _vectorReadCounter);
-                        refinePQ.Enqueue(edgeId, f32Dist);
+                        allEdges[edgeCount++] = edgeId;
                     }
 
-                    _candidates.EnsureCapacityFor(refinePQ.Count);
+                    // The best candidates are at the end. Refine the last refineCutoff entries with f32.
+                    int refineStart = Math.Max(0, edgeCount - refineCutoff);
+                    var refinePQ = new PriorityQueue<int, float>();
+                    int unrefinedCount = 0;
+                    Span<int> unrefined = refineStart <= 512
+                        ? stackalloc int[Math.Max(refineStart, 1)]
+                        : new int[refineStart];
+
+                    // Process tail (worst candidates, positions 0..refineStart-1):
+                    // only include if they have cached f32 from boundary zone.
+                    for (int i = 0; i < refineStart; i++)
+                    {
+                        int eid = allEdges[i];
+                        ref var node = ref _searchState.GetNodeByIndex(eid);
+                        if (node.QueryDistanceVersion == _searchState._visitsCounter)
+                        {
+                            // Already has f32 from boundary zone — include at cached distance
+                            refinePQ.Enqueue(eid, node.QueryDistanceValue);
+                        }
+                        else
+                        {
+                            // Int8-only, deep in ranking: skip f32, append at end
+                            unrefined[unrefinedCount++] = eid;
+                        }
+                    }
+
+                    // Process top candidates (positions refineStart..edgeCount-1): always refine with f32
+                    for (int i = refineStart; i < edgeCount; i++)
+                    {
+                        int eid = allEdges[i];
+                        float f32Dist = _searchState.QueryDistance(_vector.Span, eid, ref _vectorReadCounter);
+                        refinePQ.Enqueue(eid, f32Dist);
+                    }
+
+                    _candidates.EnsureCapacityFor(refinePQ.Count + unrefinedCount);
                     while (refinePQ.TryDequeue(out var edgeId, out _))
                     {
                         _candidates.AddUnsafe(edgeId);
+                    }
+                    // Append unrefined tail (won't be in top K)
+                    for (int i = 0; i < unrefinedCount; i++)
+                    {
+                        _candidates.AddUnsafe(unrefined[i]);
                     }
                 }
                 else
