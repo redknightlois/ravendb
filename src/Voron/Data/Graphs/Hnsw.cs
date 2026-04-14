@@ -726,6 +726,27 @@ public unsafe partial class Hnsw
        }
 
        /// <summary>
+       /// Issues a software prefetch hint for the start of a node's int8 vector data.
+       /// Called 1-ahead during edge iteration to overlap the initial L3 cache-miss latency
+       /// (~35ns) with the current node's screening computation (~55-250ns).
+       /// A single prefetch for the first cache line is sufficient: the hardware sequential
+       /// prefetcher detects the contiguous access pattern and streams the remaining lines.
+       /// Only prefetches if the node's int8 data has been quantized (scale != 0).
+       /// Prefetch is a CPU hint with no correctness impact — safe even if GC moves the array.
+       /// </summary>
+       [MethodImpl(MethodImplOptions.AggressiveInlining)]
+       public void PrefetchInt8Vector(int nodeIndex)
+       {
+           if (!_int8Enabled || _int8Vectors == null ||
+               nodeIndex >= _int8Scales.Length || _int8Scales[nodeIndex] == 0)
+               return;
+
+           int offset = nodeIndex * _int8Dims;
+           ref sbyte startRef = ref _int8Vectors[offset];
+           Sse.Prefetch0((byte*)Unsafe.AsPointer(ref startRef));
+       }
+
+       /// <summary>
        /// Symmetric int8 quantization: q[i] = round(v[i] * 127 / max(|v[i]|)).
        /// Returns the scale factor (127 / max_abs), or 0 for zero vectors.
        /// </summary>

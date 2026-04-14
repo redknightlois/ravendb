@@ -323,9 +323,13 @@ public unsafe partial class Hnsw
                     ref var node = ref _searchState.GetNodeByIndex(idx);
                     if (node.Visited == visitedCounter)
                         continue;
-                    if (node.TryGetVectorAddress(out byte* address, out int length) == false)
-                        return; // vector not loaded yet, skip prefetch
-                    PrefetchVectorData(address, length);
+                    // Prefetch int8 vector data first (needed for TryGetInt8Screening).
+                    // This overlaps L3 miss latency (~35ns/line × 24 lines = ~150ns for 1536B)
+                    // with the current node's int8 screening (~55ns) + distance computation.
+                    _searchState.PrefetchInt8Vector(idx);
+                    // Prefetch f32 vector data (needed if boundary zone triggers full distance).
+                    if (node.TryGetVectorAddress(out byte* address, out int length))
+                        PrefetchVectorData(address, length);
                     return;
                 }
             }
