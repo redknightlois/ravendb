@@ -171,10 +171,22 @@ public partial class Hnsw
                     ref var candidate = ref _searchState.GetNodeByIndex(cur);
                     candidate.Visited = visitedCounter;
 
-                    ref var edges = ref candidate.EdgesPerLevel[_level];
-
-                    _nodeIds.ResetAndCopyFrom(allocator, edges.ToSpan());
-                    _searchState.LoadNodeIndexes(ref _nodeIds, ref _indexes);
+                    if (candidate.EdgesIndexesPerLevel.Count > _level &&
+                        candidate.EdgesIndexesPerLevel[_level].Count == candidate.EdgesPerLevel[_level].Count)
+                    {
+                        _indexes.ResetAndCopyFrom(allocator, candidate.EdgesIndexesPerLevel[_level].ToSpan());
+                    }
+                    else
+                    {
+                        _nodeIds.ResetAndCopyFrom(allocator, candidate.EdgesPerLevel[_level].ToSpan());
+                        _searchState.LoadNodeIndexes(ref _nodeIds, ref _indexes);
+                        candidate = ref _searchState.GetNodeByIndex(cur);
+                        candidate.EdgesIndexesPerLevel.SetCapacity(allocator, _level + 1);
+                        ref var edgesIndexes = ref candidate.EdgesIndexesPerLevel[_level];
+                        edgesIndexes.ResetAndEnsureCapacity(allocator, _indexes.Count);
+                        for (int idx = 0; idx < _indexes.Count; idx++)
+                            edgesIndexes.AddUnsafe(_indexes[idx]);
+                    }
 
                     for (int i = 0; i < _indexes.Count; i++)
                     {

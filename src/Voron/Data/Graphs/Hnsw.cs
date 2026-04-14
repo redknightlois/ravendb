@@ -463,9 +463,22 @@ public unsafe partial class Hnsw
                     moved = false;
                     ref var n = ref GetNodeByIndex(currentNodeIndex);
                     Debug.Assert(n.EdgesPerLevel.Count > level, "n.EdgesPerLevel.Count > level");
-                    ref var edges = ref n.EdgesPerLevel[level];
-                    nodeIds.ResetAndCopyFrom(Llt.Allocator, edges.ToSpan());
-                    LoadNodeIndexes(ref nodeIds, ref indexes);
+                    if (n.EdgesIndexesPerLevel.Count > level &&
+                        n.EdgesIndexesPerLevel[level].Count == n.EdgesPerLevel[level].Count)
+                    {
+                        indexes.ResetAndCopyFrom(Llt.Allocator, n.EdgesIndexesPerLevel[level].ToSpan());
+                    }
+                    else
+                    {
+                        nodeIds.ResetAndCopyFrom(Llt.Allocator, n.EdgesPerLevel[level].ToSpan());
+                        LoadNodeIndexes(ref nodeIds, ref indexes);
+                        n = ref GetNodeByIndex(currentNodeIndex);
+                        n.EdgesIndexesPerLevel.SetCapacity(Llt.Allocator, level + 1);
+                        ref var edgesIndexes = ref n.EdgesIndexesPerLevel[level];
+                        edgesIndexes.ResetAndEnsureCapacity(Llt.Allocator, indexes.Count);
+                        for (int idx = 0; idx < indexes.Count; idx++)
+                            edgesIndexes.AddUnsafe(indexes[idx]);
+                    }
                     for (var i = 0; i < indexes.Count; i++)
                     {
                         var edgeIdx = indexes[i];
