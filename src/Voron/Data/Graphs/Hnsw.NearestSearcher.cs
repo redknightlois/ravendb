@@ -1,12 +1,14 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics.X86;
 using Voron.Global;
 using Voron.Util;
 
 namespace Voron.Data.Graphs;
 
-public partial class Hnsw
+public unsafe partial class Hnsw
 {
     public partial class SearchState
     {
@@ -184,6 +186,11 @@ public partial class Hnsw
                             continue; // already checked
                         next.Visited = visitedCounter;
 
+                        // Prefetch the next unvisited neighbor's vector data to overlap
+                        // cache-miss latency with the current distance computation.
+                        // SimilarityCalc is ~65% of query time, ~80% of which is data loading.
+                        PrefetchNextNeighborVector(i + 1, visitedCounter);
+
                         var isDeleted = (next.PostingListId & Constants.Graphs.VectorId.EnsureIsSingleMask) == Constants.Graphs.VectorId.Tombstone
                                         || (_hasFilterMatch && _alreadyReturnedEdges.Contains(nextIndex));
 
@@ -281,6 +288,42 @@ public partial class Hnsw
                 };
                 
                 return _vectorReadCounter < max;
+            }
+
+            /// <summary>
+            /// Finds the next unvisited neighbor starting from <paramref name="startFrom"/> and
+            /// issues software prefetch instructions for its vector data. This overlaps the
+            /// cache-miss latency (~500ns for 6KB from L3) with the current distance computation (~633ns).
+            /// </summary>
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            private void PrefetchNextNeighborVector(int startFrom, int visitedCounter)
+            {
+                for (int j = startFrom; j < _indexes.Count; j++)
+                {
+                    var idx = _indexes[j];
+                    ref var node = ref _searchState.GetNodeByIndex(idx);
+                    if (node.Visited == visitedCounter)
+                        continue;
+                    if (node.TryGetVectorAddress(out byte* address, out int length) == false)
+                        return; // vector not loaded yet, skip prefetch
+                    PrefetchVectorData(address, length);
+                    return;
+                }
+            }
+
+            /// <summary>
+            /// Issues software prefetch hints at 512-byte intervals across a vector's memory range.
+            /// This primes the hardware sequential prefetcher across page boundaries, bringing
+            /// the full vector into L1/L2 cache ahead of the SIMD distance computation.
+            /// </summary>
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            private static void PrefetchVectorData(byte* address, int length)
+            {
+                byte* end = address + length;
+                for (byte* p = address; p < end; p += 512)
+                {
+                    Sse.Prefetch0(p);
+                }
             }
 
             private static int GetPrefetchExtendSize(int numberOfCandidates) => numberOfCandidates switch
