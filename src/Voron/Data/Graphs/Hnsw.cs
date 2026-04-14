@@ -460,7 +460,9 @@ public unsafe partial class Hnsw
             // that the subsequent beam search (NearestSearcher.Search) will reuse, avoiding
             // lazy quantization overhead for nodes visited during the greedy descent.
             PrepareInt8Screening(vector);
-            // Same conservative margin as the beam search: 20× int8 quantization error std.
+            // Conservative margin for greedy walk: 20× int8 quantization error std.
+            // Greedy walk uses a wider margin than beam search (0.01 vs 0.003) because it's
+            // a single-path traversal — a false negative could cause premature convergence.
             const float int8ScreeningMargin = 0.01f;
 
             var visitCounter = ++_visitsCounter;

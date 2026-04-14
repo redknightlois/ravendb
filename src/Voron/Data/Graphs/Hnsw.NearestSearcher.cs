@@ -157,9 +157,11 @@ public unsafe partial class Hnsw
 
                 // Prepare int8 screening for this query (only active for f32 vectors)
                 _searchState.PrepareInt8Screening(_vector.Span);
-                // Int8 screening margin: conservative threshold to avoid false negatives.
-                // Quantization error for 1536D int8 dot product ≈ 0.0005 std; margin = ~20× that.
-                const float int8ScreeningMargin = 0.01f;
+                // Int8 screening margin: skip candidates clearly worse than current worst result.
+                // Quantization error for 1536D int8 dot product ≈ 0.0005 std; margin = 6σ.
+                // Candidates screened at this threshold would never be explored even if allowed
+                // into candidatesQ (termination condition catches them), so screening is free.
+                const float int8ScreeningMargin = 0.003f;
                 // Boundary zone: candidates within this distance of lowerBound use f32 for accuracy.
                 // Candidates clearly better (beyond this zone) safely use int8 approximate distance.
                 // Int8 pairwise ordering error std ≈ 0.0007; 0.003 = ~4σ coverage.
