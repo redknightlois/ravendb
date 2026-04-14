@@ -112,6 +112,7 @@ public unsafe partial class Hnsw
         private float[] _int8Scales; // per-node scale factor (127 / max_abs)
         private sbyte[] _int8Query; // quantized query vector
         private float _int8QueryScale; // query scale factor
+        private int _int8QuerySum; // sum of query int8 values (for pmaddubsw correction)
         private int _int8Dims; // number of float dimensions (VectorSizeBytes / 4)
         private bool _int8Enabled; // true when screening is active for current query
 
@@ -646,6 +647,14 @@ public unsafe partial class Hnsw
            _int8QueryScale = QuantizeVector(queryFloats, _int8Query.AsSpan(0, _int8Dims));
            _int8Enabled = true;
 
+           // Precompute sum of query int8 values for pmaddubsw unsigned correction.
+           // The XOR-with-0x80 trick converts sbyte→byte by adding 128, so each multiply
+           // gains +128*q[i]. Subtracting 128*sum(q) from the raw dot product corrects this.
+           int querySum = 0;
+           for (int j = 0; j < _int8Dims; j++)
+               querySum += _int8Query[j];
+           _int8QuerySum = querySum;
+
            // Ensure int8 buffers are large enough for current node count
            EnsureInt8BufferCapacity(_nodes.Count);
        }
@@ -714,7 +723,8 @@ public unsafe partial class Hnsw
            // Compute approximate cosine distance using int8 dot product
            int dotProduct = Int8DotProduct(
                _int8Query.AsSpan(0, _int8Dims),
-               _int8Vectors.AsSpan(offset, _int8Dims));
+               _int8Vectors.AsSpan(offset, _int8Dims),
+               _int8QuerySum);
 
            // Convert int8 dot product to approximate cosine similarity:
            // true_dot ≈ (int8_dot / (queryScale * dataScale))
@@ -753,49 +763,65 @@ public unsafe partial class Hnsw
 
        /// <summary>
        /// AVX-512 dot-product-only for int8 vectors (no norms needed).
-       /// Processes 32 sbytes per iteration using pmaddwd (i16×i16→i32 with horizontal pairs).
-       /// For 1536 dimensions: 48 iterations ≈ 50-60ns vs 633ns for full f32 cosine distance.
+       /// Uses pmaddubsw (byte×sbyte→i16) to process 64 bytes/iter instead of 32.
+       /// The querySum correction compensates for the XOR-with-0x80 unsigned conversion.
+       /// For 1536 dimensions: 24 iterations ≈ 30-40ns vs 633ns for full f32 cosine distance.
        /// </summary>
        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-       private static int Int8DotProduct(ReadOnlySpan<sbyte> a, ReadOnlySpan<sbyte> b)
+       private static int Int8DotProduct(ReadOnlySpan<sbyte> a, ReadOnlySpan<sbyte> b, int querySum)
        {
            if (Avx512BW.IsSupported)
-               return Int8DotProductAvx512(a, b);
+               return Int8DotProductAvx512(a, b, querySum);
 
            return Int8DotProductScalar(a, b);
        }
 
        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-       private static int Int8DotProductAvx512(ReadOnlySpan<sbyte> a, ReadOnlySpan<sbyte> b)
+       private static int Int8DotProductAvx512(ReadOnlySpan<sbyte> a, ReadOnlySpan<sbyte> b, int querySum)
        {
-           var abVec = Vector512<int>.Zero;
+           // pmaddubsw approach: process 64 bytes per iteration (2x previous).
+           // a = query (signed), b = data (signed). We XOR b with 0x80 to make it unsigned,
+           // then pmaddubsw(unsigned_b, signed_a) computes byte*sbyte→int16 with pair adds.
+           // pmaddwd(result, ones) widens int16→int32 with pair adds.
+           // Correction: XOR adds 128 to each b[i], so raw dot = true_dot + 128 * sum(a).
+           // Subtract 128 * querySum (= sum of a) to recover the true signed dot product.
+           var xorMask = Vector512.Create((byte)0x80);
+           var ones = Vector512.Create((short)1);
+           var accum = Vector512<int>.Zero;
            int i = a.Length;
 
            ref sbyte aRef = ref MemoryMarshal.GetReference(a);
-           ref sbyte bRef = ref MemoryMarshal.GetReference(b);
+           ref byte bRef = ref Unsafe.As<sbyte, byte>(ref MemoryMarshal.GetReference(b));
 
-           while (i >= Vector256<sbyte>.Count)
+           while (i >= Vector512<sbyte>.Count)
            {
-               Vector512<short> aVec = Avx512BW.ConvertToVector512Int16(Vector256.LoadUnsafe(ref aRef));
-               Vector512<short> bVec = Avx512BW.ConvertToVector512Int16(Vector256.LoadUnsafe(ref bRef));
-               abVec = Avx512F.Add(abVec, Avx512BW.MultiplyAddAdjacent(aVec, bVec));
+               var dataVec = Vector512.Xor(Vector512.LoadUnsafe(ref bRef), xorMask);
+               var queryVec = Vector512.LoadUnsafe(ref aRef);
+               var shorts = Avx512BW.MultiplyAddAdjacent(dataVec, queryVec);
+               var ints = Avx512BW.MultiplyAddAdjacent(shorts, ones);
+               accum = Avx512F.Add(accum, ints);
 
-               i -= Vector256<sbyte>.Count;
-               aRef = ref Unsafe.Add(ref aRef, Vector256<sbyte>.Count);
-               bRef = ref Unsafe.Add(ref bRef, Vector256<sbyte>.Count);
+               i -= Vector512<sbyte>.Count;
+               aRef = ref Unsafe.Add(ref aRef, Vector512<sbyte>.Count);
+               bRef = ref Unsafe.Add(ref bRef, Vector512<sbyte>.Count);
            }
 
-           int result = Vector512.Sum(abVec);
+           int result = Vector512.Sum(accum);
 
+           // Scalar tail for remaining elements (< 64)
+           ref sbyte aRefSigned = ref aRef;
+           ref sbyte bRefSigned = ref Unsafe.As<byte, sbyte>(ref bRef);
            while (i > 0)
            {
-               result += aRef * bRef;
+               result += aRefSigned * bRefSigned;
                i--;
-               aRef = ref Unsafe.Add(ref aRef, 1);
-               bRef = ref Unsafe.Add(ref bRef, 1);
+               aRefSigned = ref Unsafe.Add(ref aRefSigned, 1);
+               bRefSigned = ref Unsafe.Add(ref bRefSigned, 1);
            }
 
-           return result;
+           // Correct for the XOR-with-0x80 unsigned conversion: each b[i] was shifted by +128,
+           // so raw dot = true_dot + 128 * sum(a). Subtract to recover the true signed dot product.
+           return result - 128 * querySum;
        }
 
        private static int Int8DotProductScalar(ReadOnlySpan<sbyte> a, ReadOnlySpan<sbyte> b)
