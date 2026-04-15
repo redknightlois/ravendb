@@ -35,6 +35,8 @@ public sealed unsafe partial class IndexSearcher : IDisposable
     private Dictionary<string, Slice> _dynamicFieldNameMapping;
 
     private readonly IndexFieldsMapping _fieldMapping;
+    private Dictionary<Slice, Hnsw.SearchState> _vectorSearchStateCache;
+    private Dictionary<Slice, Hnsw.NodeCache> _vectorNodeCaches;
     private HashSet<long> _nullTermsMarkers;
     private HashSet<long> _nonExistingTermsMarkers;
     private long[] _vectorFieldsMarkers;
@@ -480,8 +482,47 @@ public sealed unsafe partial class IndexSearcher : IDisposable
     }
 
     
+    /// <summary>
+    /// Returns a shared SearchState for the given vector field, creating one if needed.
+    /// The SearchState is cached per field name and disposed when the IndexSearcher is disposed.
+    /// This lets multiple vector search operations against the same field share loaded
+    /// node topology and vector pointers. Distance caching is per-search-operation only
+    /// (keyed by <c>_visitsCounter</c>) — different sub-searches with different query vectors
+    /// do not share distances.
+    /// </summary>
+    internal Hnsw.SearchState GetOrCreateVectorSearchState(Slice fieldName)
+    {
+        _vectorSearchStateCache ??= new(SliceComparer.Instance);
+        ref var state = ref CollectionsMarshal.GetValueRefOrAddDefault(_vectorSearchStateCache, fieldName, out bool exists);
+        if (exists == false)
+        {
+            // Look for a shared NodeCache for this field
+            Hnsw.NodeCache nodeCache = null;
+            _vectorNodeCaches?.TryGetValue(fieldName, out nodeCache);
+            state = new Hnsw.SearchState(_transaction.LowLevelTransaction, fieldName, nodeCache);
+        }
+        return state;
+    }
+
+    /// <summary>
+    /// Attach shared, pre-warmed HNSW node caches to this IndexSearcher.
+    /// The caches are read-only and shared across all queries on the same index snapshot.
+    /// Each query's SearchState will use the cache for fast node lookups.
+    /// </summary>
+    public void AttachVectorNodeCaches(Dictionary<Slice, Hnsw.NodeCache> caches)
+    {
+        _vectorNodeCaches = caches;
+    }
+
     public void Dispose()
     {
+        if (_vectorSearchStateCache != null)
+        {
+            foreach (var kvp in _vectorSearchStateCache)
+                kvp.Value.Dispose();
+            _vectorSearchStateCache = null;
+        }
+
         if (_ownsTransaction)
             _transaction?.Dispose();
 

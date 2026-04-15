@@ -44,6 +44,13 @@ public partial class Hnsw
 
             public IEnumerable<bool> Search()
             {
+                // Bump the visit counter to invalidate QueryDistance caches from any prior query
+                // on a shared SearchState. Without this, a subsequent vector query reading a node
+                // whose QueryDistanceVersion still matches _visitsCounter would receive the previous
+                // query's cached distance instead of computing its own, producing wrong ordering
+                // and duplicate results across sub-queries in MultiVectorSearch.
+                ++_searchState._visitsCounter;
+
                 _pq = new PriorityQueue<long, float>();
                 Span<byte> vector = _vector.Span;
                 IEnumerable<long> toScan = _nodesToScan.HasValue ? _nodesToScan.Value.Iterate() : AllNodes();
