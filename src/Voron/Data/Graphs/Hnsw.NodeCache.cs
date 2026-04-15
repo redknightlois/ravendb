@@ -13,12 +13,13 @@ namespace Voron.Data.Graphs;
 public unsafe partial class Hnsw
 {
     /// <summary>
-    /// Immutable, self-contained cache of HNSW graph node topology at a specific transaction.
-    /// Built synchronously in the commit hook using the committing tx's LLT; all data is copied
-    /// into managed arrays so the cache does not retain the transaction. Vector bytes are NOT
-    /// copied — the cache stores the container id and queries read the bytes on demand via
-    /// their own read transaction, which is MVCC-safe because caches are rebuilt on every commit
-    /// and queries are routed to the cache whose <see cref="AsOfTxId"/> matches their snapshot.
+    /// Immutable, self-contained snapshot of HNSW graph node topology at a specific transaction.
+    /// <see cref="Build"/> walks the graph from a supplied <see cref="LowLevelTransaction"/> and
+    /// copies all node and edge data into managed arrays, so the cache never retains the
+    /// transaction. Vector bytes are not copied — the cache stores container ids and queries
+    /// read the bytes on demand through their own read transaction. Each cache is tagged with
+    /// the <see cref="AsOfTxId"/> of the LLT it was built from, so the consumer can match a
+    /// cache to a query snapshot.
     ///
     /// Per-query mutable search state (visited flags, distance cache, priority queues) lives in
     /// <see cref="SearchState"/>, not here. The GC reclaims caches once no transaction still
@@ -33,15 +34,13 @@ public unsafe partial class Hnsw
         private readonly Dictionary<long, int> _nodeIdToIdx;
         private readonly CachedNode[] _nodes;
 
-        // All nodes' edges concatenated into one array so we pay zero per-level managed-array
-        // header overhead. Bounds for node k's level L are
+        // Flat concatenation of every node's edges across every level, avoiding per-level
+        // managed-array header overhead. The edges for node k at level L live in
         // [_levelOffsets[k.FirstLevelOffsetIndex + L], _levelOffsets[k.FirstLevelOffsetIndex + L + 1]).
         //
-        // LOH note: for larger cache budgets _allEdges exceeds the 85 KB LOH threshold. This is
-        // acceptable here because caches are long-lived (rebuilt per commit, not per query) and
-        // the pattern LOH was designed for. If commit churn becomes a fragmentation issue,
-        // consider chunked storage rather than ArrayPool — the cache's lifetime is bounded by
-        // transactions that hold it via ImmutableExternalState, so we can't return it eagerly.
+        // For non-trivial cache budgets _allEdges exceeds the 85 KB LOH threshold. That is
+        // acceptable because a cache lives for the lifetime of an index snapshot: ArrayPool
+        // cannot return it eagerly since live transactions still reference it.
         private readonly long[] _allEdges;
         private readonly int[] _levelOffsets;
 
@@ -91,9 +90,9 @@ public unsafe partial class Hnsw
 
         /// <summary>
         /// Build a cache by expanding from the entry point level by level, top-down, until
-        /// <paramref name="maxNodes"/> is reached. Must be called with the committing tx's
-        /// LLT (or any read tx whose snapshot is the desired <see cref="AsOfTxId"/>); the LLT
-        /// can be disposed immediately after this returns.
+        /// <paramref name="maxNodes"/> is reached. The caller passes any <see cref="LowLevelTransaction"/>
+        /// whose snapshot should become this cache's <see cref="AsOfTxId"/>; data is copied into
+        /// managed memory before returning, so the LLT may be disposed immediately afterwards.
         /// </summary>
         public static NodeCache Build(LowLevelTransaction llt, Slice fieldName, int maxNodes)
         {
@@ -218,7 +217,15 @@ public unsafe partial class Hnsw
                 for (int i = 0; i < keys.Length; i++)
                 {
                     if (spans[i].Length == 0)
-                        continue;
+                    {
+                        // A node referenced as either the entry point or an incoming edge has no
+                        // container entry at the committed state. Tombstoned nodes keep their
+                        // container entry (with a tombstone marker), so a zero-length span here
+                        // means the graph references a node that does not exist — corruption.
+                        throw new InvalidDataException(
+                            $"HNSW node {_working[targetSlots[i]].NodeId} is referenced as an edge target " +
+                            "but has no container entry; the graph appears to be corrupt.");
+                    }
                     Node.Decode(_llt, spans[i].ToSpan()).LoadInto(ref _working[targetSlots[i]]);
                 }
 

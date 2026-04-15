@@ -31,8 +31,10 @@ public sealed class CoraxIndexPersistence : IndexPersistenceBase
     private readonly RavenLogger _logger;
     private readonly CoraxDocumentConverterBase _converter;
 
-    // Latest published cache. New read txs capture it into ImmutableExternalState at creation
-    // time, so each query sees the cache matching its own snapshot.
+    // Holds the cache published by the most recent successful commit (or by Initialize). Each new
+    // read transaction snapshots this reference into its ImmutableExternalState (see the
+    // subscription in Initialize), so a query always sees the cache that was current at the
+    // moment its transaction was created.
     private IndexTransactionCache _currentCache;
 
     public CoraxIndexPersistence(Index index, IIndexReadOperationFactory indexReadOperationFactory) : base(index, indexReadOperationFactory)
@@ -192,24 +194,45 @@ public sealed class CoraxIndexPersistence : IndexPersistenceBase
 
     public override void Initialize(StorageEnvironment environment)
     {
+        // Attach _currentCache to every newly created transaction. _currentCache may be null at
+        // this point; the assignment is still correct because readers treat a null
+        // ImmutableExternalState as "no cache available".
         environment.NewTransactionCreated += tx => tx.ImmutableExternalState = _currentCache;
-        // Force a no-op commit so the regular commit hook chain fires and populates
-        // _currentCache from existing HNSW data before any query arrives.
-        using var tx = environment.WriteTransaction();
-        tx.LowLevelTransaction.ModifyPage(0);
-        tx.Commit();
+
+        // Seed _currentCache from the current committed state so queries arriving before the
+        // first indexing batch find a populated cache. The build copies everything it needs
+        // into managed memory, so the read transaction can be released immediately.
+        using var roTx = environment.ReadTransaction();
+        _currentCache = BuildVectorCacheSnapshot(roTx);
     }
 
     public override void PublishIndexCacheToNewTransactions(IndexTransactionCache transactionCache)
     {
-        _currentCache = transactionCache;
+        // Corax builds and publishes its cache in RecreateSearcher rather than here.
+        // BuildStreamCacheAfterTx returns null, so this method is always invoked with null.
     }
 
     internal override IndexTransactionCache BuildStreamCacheAfterTx(Transaction tx)
     {
-        // Runs from LastChanceToReadFromWriteTransactionBeforeCommit. The write tx is still
-        // readable and reflects the just-committed state; the NodeCache copies into managed
-        // memory, so the tx can dispose as soon as we return.
+        // The actual vector cache build runs in RecreateSearcher, which is invoked from the
+        // post-commit hook — only after the commit is durable.
+        return null;
+    }
+
+    internal override void RecreateSearcher(Transaction asOfTx)
+    {
+        // Invoked from AfterCommitWhenNewTransactionsPrevented: at this point the commit is
+        // durable and no new read transaction can be created until this method returns. Building
+        // and assigning _currentCache here guarantees that the published cache reflects a state
+        // that is already visible on disk, and that every read transaction created afterwards
+        // captures it atomically via the NewTransactionCreated subscription in Initialize.
+        var newCache = BuildVectorCacheSnapshot(asOfTx);
+        if (newCache != null)
+            _currentCache = newCache;
+    }
+
+    private IndexTransactionCache BuildVectorCacheSnapshot(Transaction tx)
+    {
         var mapping = _converter?.GetKnownFieldsForQuerying();
         if (mapping is null)
             return null;
@@ -229,7 +252,7 @@ public sealed class CoraxIndexPersistence : IndexPersistenceBase
                 continue;
             vectorCaches ??= new Dictionary<Slice, Hnsw.NodeCache>(SliceComparer.Instance);
             // FieldName is allocated against _converter's persistent scope; _converter is
-            // disposed only in CoraxIndexPersistence.Dispose, which outlives any cache
+            // disposed only when this CoraxIndexPersistence is disposed, which outlives any cache
             // reachable from _currentCache or an open read tx's ImmutableExternalState.
             Debug.Assert(field.FieldName.HasValue && field.FieldName.Size > 0,
                 "Vector field name must be allocated and non-empty for cache keying");
@@ -237,13 +260,6 @@ public sealed class CoraxIndexPersistence : IndexPersistenceBase
         }
 
         return vectorCaches is null ? null : new IndexTransactionCache { VectorNodeCaches = vectorCaches };
-    }
-
-    internal override void RecreateSearcher(Transaction asOfTx)
-    {
-        // No-op for Corax: the cache is already attached to each new tx via ImmutableExternalState
-        // (see Initialize). BuildStreamCacheAfterTx + PublishIndexCacheToNewTransactions
-        // are the Corax equivalent of Lucene's RecreateSearcher in this pipeline.
     }
 
     internal override void RecreateSuggestionsSearchers(Transaction asOfTx)

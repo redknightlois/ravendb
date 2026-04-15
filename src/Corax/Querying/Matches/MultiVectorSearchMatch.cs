@@ -34,7 +34,8 @@ public struct MultiVectorSearchMatch : IQueryMatch
     private GrowableBuffer<long, Constant<long>> _matches;
     private GrowableBuffer<float, Constant<float>> _distances;
 
-    // Voron VectorSearch Retriever — we keep a reference to the first retriever for score conversion methods.
+    // Reference to the first sub-query's retriever, kept so Score can call its distance-to-score
+    // conversion methods after all retrievers have been disposed.
     private Hnsw.VectorSearchRetriever _firstRetriever;
     private ContextBoundNativeList<long> _nodesIdsToScan;
     private bool _vectorRetrieverInitialized;
@@ -105,8 +106,8 @@ public struct MultiVectorSearchMatch : IQueryMatch
             }
         }
 
-        // Use the IndexSearcher's shared SearchState cache so that cached node data
-        // (edges, vectors, distance computations) persists across all vector searches for this field.
+        // Obtain the IndexSearcher-scoped SearchState for this field; sub-queries below reuse it
+        // so loaded node data (edges, vectors) is shared across them.
         var sharedSearchState = _indexSearcher.GetOrCreateVectorSearchState(_metadata.FieldName);
 
         _isEmpty = sharedSearchState.IsEmpty || (_filterQuery != null && _filterResults!.Value.Count == 0);
@@ -141,16 +142,18 @@ public struct MultiVectorSearchMatch : IQueryMatch
         if (_isEmpty)
             return;
 
-        // Create and consume each retriever sequentially so they never coexist on the
-        // same shared SearchState queues (_candidatesQ, _nearestEdgesQ).
+        // Construct and fully consume each retriever before moving to the next; the shared
+        // SearchState has a single pair of priority queues (_candidatesQ, _nearestEdgesQ) that
+        // cannot be interleaved across retrievers.
         var sharedSearchState = _indexSearcher.GetOrCreateVectorSearchState(_metadata.FieldName);
 
         _matches.Init(_indexSearcher.Allocator, 128);
         _distances.Init(_indexSearcher.Allocator, 128);
         for (var i = 0; i < _vectorsToSearch.Length; ++i)
         {
-            // The prior retriever's Dispose must have cleared the shared queues; if not,
-            // the next NearestSearcher.Search would inherit its candidates and corrupt results.
+            // Invariant: when a new retriever starts, the shared priority queues on SearchState
+            // must be empty. Violating this causes the new traversal to read leftover entries
+            // from the previous sub-query.
             sharedSearchState.AssertSharedQueuesClean();
 
             var vector = _vectorsToSearch[i].GetEmbeddingMemory();

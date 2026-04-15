@@ -32,12 +32,12 @@ namespace Raven.Server.Indexing
         public Dictionary<string, CollectionEtags> Collections = new Dictionary<string, CollectionEtags>(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
-        /// Per-field pre-warmed HNSW node caches for vector search. Populated by Corax indexes
-        /// only; null or empty for Lucene indexes and for Corax indexes without vector fields.
-        /// The cache is keyed by vector field name. Because this is attached to
-        /// <see cref="Voron.Impl.LowLevelTransaction.ImmutableExternalState"/>, every read tx
-        /// sees exactly the cache that matches its snapshot — no explicit holder or ref-counting
-        /// is needed; the GC reclaims old caches once all referencing transactions have disposed.
+        /// Per-field HNSW node caches for vector search, keyed by field name. Populated by Corax
+        /// indexes only (null or empty for Lucene indexes and for Corax indexes without vector
+        /// fields). Attached to a transaction via
+        /// <see cref="Voron.Impl.LowLevelTransaction.ImmutableExternalState"/>, so a read tx
+        /// always sees the cache that matches its snapshot; old caches become unreachable and
+        /// are reclaimed by GC once no transaction still references them.
         /// </summary>
         public Dictionary<Slice, Hnsw.NodeCache> VectorNodeCaches;
     }
