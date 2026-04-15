@@ -96,6 +96,7 @@ public partial class Hnsw
 
                 lowerBound = float.MaxValue;
                 visitedCounter = ++_searchState._visitsCounter;
+                _searchState.OnQueryVector(_vector);
 
                 foreach (var nodeIdx in _startingPointIndexes)
                 {
@@ -123,6 +124,7 @@ public partial class Hnsw
                 Debug.Assert(nearestEdgesQ.Count == 0, "_nearestEdgesQ.Count == 0");
 
                 visitedCounter = ++_searchState._visitsCounter;
+                _searchState.OnQueryVector(_vector);
                 lowerBound = -_searchState.QueryDistance(_vector.Span, _startingPointIndex, ref _vectorReadCounter);
                 {
                     ref var startingPoint = ref _searchState.GetNodeByIndex(_startingPointIndex);
@@ -236,9 +238,9 @@ public partial class Hnsw
 
             // Reset the NearestSearcher state; however, it does not clear the data already stored inside SearchState.
             // This is important because it allows us to reduce I/O pressure during over-fetching and when restarting the query.
-            // Note: We don't need to loop over all nodes to reset Visited flags because the Visited field
-            // uses version-based invalidation — incrementing _visitsCounter in InitState() is sufficient
-            // to invalidate all previous visit markers in O(1).
+            // Node.Visited uses version-based invalidation keyed on SearchState._visitsCounter
+            // (incremented in InitState), and Node.QueryDistanceVersion uses a separate version
+            // keyed on the query vector, so neither needs a per-node reset here.
             private void Reset()
             {
                 _searchState._candidatesQ.Clear();

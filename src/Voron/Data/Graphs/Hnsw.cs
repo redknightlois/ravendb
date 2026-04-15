@@ -99,9 +99,14 @@ public unsafe partial class Hnsw
         private readonly Tree _tree;
         private readonly Lookup<Int64LookupKey> _nodeIdToLocations;
         public readonly LowLevelTransaction Llt;
-        // Start at 1 so that freshly-loaded nodes (QueryDistanceVersion == 0 and Visited == 0)
-        // never match the initial counter and are always treated as uncached/unvisited.
+        // _visitsCounter versions Node.Visited; every traversal start bumps it so the visited
+        // set is reset in O(1). _queryVectorVersion versions Node.QueryDistanceVersion; it is
+        // bumped by OnQueryVector only when the query vector changes, so a node's cached distance
+        // survives across traversals that reuse the same query vector. Both start at 1 so
+        // freshly-loaded nodes (fields default to 0) never spuriously match.
         private int _visitsCounter = 1;
+        private int _queryVectorVersion = 1;
+        private Memory<byte> _lastQueryVector;
         public readonly delegate*<ReadOnlySpan<byte>, ReadOnlySpan<byte>, float> SimilarityCalc;
         public readonly bool IsEmpty;
         private readonly NodeCache _nodeCache;
@@ -383,7 +388,7 @@ public unsafe partial class Hnsw
             }
 
             ref var to = ref GetNodeByIndex(toIdx);
-            if (to.QueryDistanceVersion == _visitsCounter)
+            if (to.QueryDistanceVersion == _queryVectorVersion)
                 return to.QueryDistanceValue;
 
             Span<byte> v2 = to.GetVector(this);
@@ -396,18 +401,30 @@ public unsafe partial class Hnsw
         public float QueryDistance(ReadOnlySpan<byte> vector, int toIdx, ref long vectorReadCounter)
         {
             ref var to = ref GetNodeByIndex(toIdx);
-            if (to.QueryDistanceVersion == _visitsCounter)
-            {
+            if (to.QueryDistanceVersion == _queryVectorVersion)
                 return to.QueryDistanceValue;
-            }
 
             Span<byte> v2 = to.GetVector(this);
             vectorReadCounter++;
             var distance = SimilarityCalc(vector, v2);
             to.QueryDistanceValue = distance;
-            to.QueryDistanceVersion = _visitsCounter;
-
+            to.QueryDistanceVersion = _queryVectorVersion;
             return distance;
+        }
+
+        /// <summary>
+        /// Records the query vector a searcher is about to use. Bumps <see cref="_queryVectorVersion"/>
+        /// iff the vector differs from the previously recorded one (compared by Memory identity, i.e.
+        /// same underlying buffer and range). A bump invalidates every cached QueryDistance; a no-op
+        /// keeps them valid.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal void OnQueryVector(Memory<byte> queryVector)
+        {
+            if (queryVector.Equals(_lastQueryVector))
+                return;
+            _lastQueryVector = queryVector;
+            ++_queryVectorVersion;
         }
 
         public void ReadPostingList(ContainerEntryId rawPostingListId, ref ContextBoundNativeList<long> listBuffer, ref FastPForDecoder pforDecoder, out int postingListSize)
@@ -679,10 +696,10 @@ public unsafe partial class Hnsw
        }
 
        /// <summary>
-       /// Asserts that the shared per-query queues are empty — safe to start a new sub-query.
-       /// When a SearchState is reused across sub-queries (e.g. MultiVectorSearch), each
-       /// searcher must dispose and clear the queues before the next one starts; otherwise
-       /// the next NearestSearcher.Search would inherit leftover candidates and corrupt results.
+       /// Debug-only check that the candidate and nearest-edges priority queues owned by this
+       /// SearchState are empty. A searcher that reuses a shared SearchState must leave these
+       /// queues empty on Dispose; this method catches a searcher that fails to do so before the
+       /// next one starts.
        /// </summary>
        [Conditional("DEBUG")]
        public void AssertSharedQueuesClean()
@@ -1190,10 +1207,11 @@ public unsafe partial class Hnsw
     }
 
     /// <summary>
-    /// Approximate nearest neighbor search using a caller-owned SearchState that may be reused
-    /// across multiple queries. The caller is responsible for disposing the SearchState.
-    /// Reusing the SearchState allows cached node data (edges, vectors) to persist across queries,
-    /// avoiding repeated LoadNodeIndexes and Container.Get calls for frequently-visited nodes.
+    /// Approximate nearest neighbor search using a caller-owned <see cref="SearchState"/>. The
+    /// caller keeps the SearchState alive across multiple queries and is responsible for
+    /// disposing it; node data loaded by earlier queries remains in SearchState for later ones,
+    /// so repeated traversals avoid the node-index resolution and container reads already paid
+    /// for on the first pass.
     /// </summary>
     public static VectorSearchRetriever ApproximateNearest(SearchState searchState, int numberOfCandidates, Memory<byte> vector, float minimumSimilarity, bool hasFilterMatch = false)
     {

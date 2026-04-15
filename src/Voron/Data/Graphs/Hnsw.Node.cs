@@ -21,8 +21,10 @@ public partial class Hnsw
         public NativeList<NativeList<int>> EdgesIndexesPerLevel;
         internal UnmanagedSpan _vectorSpan;
         public int Visited;
-        // QueryDistance is versioned: valid only when QueryDistanceVersion == SearchState._visitsCounter.
-        // This allows SearchState reuse across queries without explicit per-node resets.
+        // Cached distance between this node and the current query vector. Valid only when
+        // QueryDistanceVersion == SearchState._queryVectorVersion. SearchState bumps that
+        // version whenever the query vector changes (see OnQueryVector), which in turn
+        // invalidates this entry without touching the node.
         public float QueryDistanceValue;
         public int QueryDistanceVersion;
 
