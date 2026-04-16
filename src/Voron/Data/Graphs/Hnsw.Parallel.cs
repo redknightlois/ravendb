@@ -462,6 +462,8 @@ public partial class Hnsw
                 // Inlined descent from the entry point down to level 0, capturing the closest
                 // node at each level. Folding this into the placement loop removes the per-node
                 // enumerator allocation that a yielding helper would produce.
+                // (Per RavenDB-26152, the inlined descent calls MarkVisited(currentNodeIndex)
+                // below so the inserted node cannot discover itself.)
                 {
                     _nearestIndexes.Clear();
                     ClearVisited();
