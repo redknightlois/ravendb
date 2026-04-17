@@ -102,7 +102,7 @@ public unsafe partial class Hnsw
                 return null;
 
             var options = Unsafe.Read<Options>(tree.DirectRead(OptionsSlice));
-            var simCalc = ResolveSimilarity(options.SimilarityMethod);
+            var simCalc = GetDistanceKernel(options);
 
             int budget = (int)Math.Min(options.CountOfVectors, maxNodes);
             if (budget <= 0 || locations.TryGetValue(EntryPointId, out _) == false)
@@ -116,14 +116,6 @@ public unsafe partial class Hnsw
             var (nodes, edges, offsets) = builder.Freeze();
             return new NodeCache(llt.Id, options, simCalc, builder.NodeIdToIdx, nodes, edges, offsets);
         }
-
-        private static delegate*<ReadOnlySpan<byte>, ReadOnlySpan<byte>, float> ResolveSimilarity(SimilarityMethod method) => method switch
-        {
-            SimilarityMethod.CosineSimilaritySingles => &CosineDistanceSingles,
-            SimilarityMethod.CosineSimilarityI8 => &CosineDistanceI8,
-            SimilarityMethod.HammingDistance => &HammingDistance,
-            _ => throw new ArgumentOutOfRangeException(nameof(method), method, null)
-        };
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool TryGetNodeIndex(long nodeId, out int index) => _nodeIdToIdx.TryGetValue(nodeId, out index);

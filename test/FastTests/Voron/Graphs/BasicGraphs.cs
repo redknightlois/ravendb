@@ -299,10 +299,14 @@ public class BasicGraphs(ITestOutputHelper output) : StorageTest(output)
             Assert.Equal(2, read);
             var v1Pos = matches.AsSpan().Slice(0, read).IndexOf(1L);
             Assert.True(int.IsPositive(v1Pos));
-            Assert.Equal(Hnsw.CosineDistanceSingles(v1.GetEmbedding(), vQ.GetEmbedding()), distances[v1Pos]);
+            // The indexed/queried vectors are stored in NormalizedTensor at-rest form and the distance
+            // kernel now uses dot-on-unit-vectors; that is algebraically identical to
+            // CosineDistanceSingles but can differ in the last bit due to rounding order, so compare
+            // with a small relative tolerance.
+            Assert.Equal(Hnsw.CosineDistanceSingles(v1.GetEmbedding(), vQ.GetEmbedding()), distances[v1Pos], precision: 5);
             var v2Pos = matches.AsSpan().Slice(0, read).IndexOf(2L);
             Assert.True(int.IsPositive(v2Pos));
-            Assert.Equal(Hnsw.CosineDistanceSingles(v2.GetEmbedding(), vQ.GetEmbedding()), distances[v2Pos]);
+            Assert.Equal(Hnsw.CosineDistanceSingles(v2.GetEmbedding(), vQ.GetEmbedding()), distances[v2Pos], precision: 5);
         }
     }
     
