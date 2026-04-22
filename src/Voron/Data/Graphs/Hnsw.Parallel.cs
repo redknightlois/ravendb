@@ -243,14 +243,15 @@ public partial class Hnsw
                 var numberOfEdges = _searchState.Options.NumberOfEdges;
                 int graphSize = Math.Max(1, createdNodeIndex);
                 int targetSize = _searchState.CreatedNodes;
+                int nScaledEfC;
                 if (graphSize < targetSize)
                 {
                     double ratio = Math.Log2(graphSize + 1) / Math.Log2(targetSize + 1);
-                    _effectiveNumberOfCandidates = Math.Max(numberOfEdges, (int)(numberOfCandidates * ratio));
+                    nScaledEfC = Math.Max(numberOfEdges, (int)(numberOfCandidates * ratio));
                 }
                 else
                 {
-                    _effectiveNumberOfCandidates = numberOfCandidates;
+                    nScaledEfC = numberOfCandidates;
                 }
 
                 var currentMaxLevel = _searchState.Options.CurrentMaxLevel(_searchState.CreatedNodes - createdNodeIndex);
@@ -271,6 +272,9 @@ public partial class Hnsw
                 
                 for (int level = nodeRandomLevel; level >= 0; level--)
                 {
+                    _effectiveNumberOfCandidates = level == 0
+                        ? nScaledEfC
+                        : Math.Max(numberOfEdges, nScaledEfC >> level);
                     int startingPointIndex = _nearestIndexes[level];
                     foreach (var item in NearestEdges(startingPointIndex, currentNodeIndex, insertedVector, level))
                     {
