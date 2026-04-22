@@ -274,7 +274,7 @@ public partial class Hnsw
                 {
                     _effectiveNumberOfCandidates = level == 0
                         ? nScaledEfC
-                        : Math.Max(numberOfEdges, nScaledEfC >> level);
+                        : numberOfEdges;
                     int startingPointIndex = _nearestIndexes[level];
                     foreach (var item in NearestEdges(startingPointIndex, currentNodeIndex, insertedVector, level))
                     {
