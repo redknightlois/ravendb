@@ -156,6 +156,7 @@ public partial class Hnsw
             private int[] _visitedBitmapVersion = [];
             private int _visitedVersion;
             private readonly LinkedListNode<int> _listNode = new(-1);
+            private int _effectiveNumberOfCandidates;
 
             // Pooled work items — reused across all yields to avoid per-yield heap allocations
             private readonly ProcessEdgesWorker _processEdgesWorker = new(runner);
@@ -238,6 +239,20 @@ public partial class Hnsw
 
             private IEnumerable<WorkItem> FindGraphPlacementForNode(int createdNodeIndex, int currentNodeIndex)
             {
+                var numberOfCandidates = _searchState.Options.NumberOfCandidates;
+                var numberOfEdges = _searchState.Options.NumberOfEdges;
+                int graphSize = Math.Max(1, createdNodeIndex);
+                int targetSize = _searchState.CreatedNodes;
+                if (graphSize < targetSize)
+                {
+                    double ratio = Math.Log2(graphSize + 1) / Math.Log2(targetSize + 1);
+                    _effectiveNumberOfCandidates = Math.Max(numberOfEdges, (int)(numberOfCandidates * ratio));
+                }
+                else
+                {
+                    _effectiveNumberOfCandidates = numberOfCandidates;
+                }
+
                 var currentMaxLevel = _searchState.Options.CurrentMaxLevel(_searchState.CreatedNodes - createdNodeIndex);
                 int nodeRandomLevel = GetLevelForNewNode(currentMaxLevel);
                 UnmanagedSpan insertedVector;
@@ -350,7 +365,7 @@ public partial class Hnsw
                 while (_candidatesQ.TryDequeue(out var cur, out var curDistance))
                 {
                     if (-curDistance < lowerBound &&
-                        _nearestEdgesQ.Count == _searchState.Options.NumberOfCandidates)
+                        _nearestEdgesQ.Count == _effectiveNumberOfCandidates)
                         break;
 
                     _processEdgesWorker.Reset(vector, lowerBound, cur, level);
@@ -471,7 +486,7 @@ public partial class Hnsw
                     var candidatesQ = Owner._candidatesQ;
                     var lowerBound  = LowerBound;
                     
-                    int numberOfCandidates = searchState.Options.NumberOfCandidates;
+                    int numberOfCandidates = Owner._effectiveNumberOfCandidates;
                     for (int i = 0; i < indexes.Count; i++)
                     {
                         var nextIndex = indexes[i];
