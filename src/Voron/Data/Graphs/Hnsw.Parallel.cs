@@ -633,7 +633,7 @@ public partial class Hnsw
             {
                 if (currentNodeIndex is -1)
                     return _indexes.Count > 0; // has work
-                
+
                 ref var n = ref _searchState.GetNodeByIndex(currentNodeIndex);
                 _indexes.Clear();
                 _vectors.Clear();
@@ -642,7 +642,9 @@ public partial class Hnsw
                     _indexes.Add(currentNodeIndex);
                     _vectors.Add(n.GetVectorUnmanagedSpan(_searchState));
                 }
-                
+
+                n.EdgesPerLevel.SetCapacity(_searchState.Llt.Allocator, level + 1);
+                n.EdgesIndexesPerLevel.SetCapacity(_searchState.Llt.Allocator, level + 1);
                 ref var edgesList = ref n.EdgesPerLevel[level];
                 ref var edgesIndexes = ref n.EdgesIndexesPerLevel[level];
                 if (edgesIndexes.Count != edgesList.Count)
@@ -687,6 +689,7 @@ public partial class Hnsw
             private readonly List<Exception> _errors = [];
             private readonly LinkedList<int> _inFlightIndexes = [];
 
+            private bool _allVectorsInMemory;
             public bool IsCancelled => _mainCts.IsCancellationRequested;
             
 
@@ -751,6 +754,25 @@ public partial class Hnsw
                         return; // done
                     }
 
+                    if (_allVectorsInMemory)
+                    {
+                        for (int index = 0; index < _items.Count; index++)
+                        {
+                            WorkItem item = _items[index];
+                            if (item.Owner.AfterPreloading(item.CurrentNodeIndex, item.Level))
+                            {
+                                ThreadPool.UnsafeQueueUserWorkItem(item, preferLocal: false);
+                            }
+                            else
+                            {
+                                Enqueue(item.Iterator);
+                            }
+                        }
+
+                        _items.Clear();
+                        continue;
+                    }
+
                     // we executed all that we could, now let's check if we have
                     // any edges to load that we can do in bulk
                     batch.Clear();
@@ -777,6 +799,10 @@ public partial class Hnsw
                     if (used > 0)
                     {
                         _searchState.PreloadNodesVectors(batchSpan[..used]);
+                    }
+                    else
+                    {
+                        _allVectorsInMemory = true;
                     }
 
                     foreach (var item in _items)
