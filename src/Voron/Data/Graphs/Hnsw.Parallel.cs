@@ -295,6 +295,15 @@ public partial class Hnsw
                         ref var edgeList = ref edge.EdgesPerLevel[level];
                         edgeList.Add(_searchState.Llt.Allocator, node.NodeId);
 
+                        if (edge.EdgesIndexesPerLevel.Count > level)
+                        {
+                            ref var edgeIndexes = ref edge.EdgesIndexesPerLevel[level];
+                            if (edgeIndexes.Count == edgeList.Count - 1)
+                            {
+                                edgeIndexes.Add(_searchState.Llt.Allocator, currentNodeIndex);
+                            }
+                        }
+
                         if (edgeList.Count <= _searchState.Options.NumberOfEdges)
                             continue;
 
@@ -322,6 +331,15 @@ public partial class Hnsw
                             foreach (var idx in _candidates)
                             {
                                 edgeList.AddUnsafe(_searchState.GetNodeByIndex(idx).NodeId);
+                            }
+                            if (edge.EdgesIndexesPerLevel.Count > level)
+                            {
+                                ref var edgeIndexes = ref edge.EdgesIndexesPerLevel[level];
+                                edgeIndexes.ResetAndEnsureCapacity(_searchState.Llt.Allocator, _candidates.Count);
+                                foreach (var idx in _candidates)
+                                {
+                                    edgeIndexes.AddUnsafe(idx);
+                                }
                             }
                         }
                     }
@@ -701,7 +719,7 @@ public partial class Hnsw
                 {
                     _ready.Wait();
                     _ready.Reset();
-                    
+
                     while(_placementTasks.TryDequeue(out var it))
                     {
                         if (it.MoveNext())
@@ -727,25 +745,23 @@ public partial class Hnsw
                             throw new AggregateException(_errors);
                         if (_errorCts.IsCancellationRequested == false && _mainCts.IsCancellationRequested)
                         {
-                            // If _mainCts is canceled and _errorCts is not, then we need to throw 
-                            // to indicate that we're done due to operation cancellation!
                             _mainCts.Token.ThrowIfCancellationRequested();
                         }
-                            
+
                         return; // done
                     }
-                    
+
                     // we executed all that we could, now let's check if we have
                     // any edges to load that we can do in bulk
                     batch.Clear();
                     for (int index = 0; index < _items.Count; index++)
                     {
                         WorkItem item = _items[index];
-                        if (item.RegisterForPreloading(_searchState, batch)) 
+                        if (item.RegisterForPreloading(_searchState, batch))
                             continue;
-                        
+
                         // we can run this directly, since there is nothing to preload
-                        
+
                         _items[index] = null; // skip it in the rest of the process
                         if (item.Owner.AfterPreloading(item.CurrentNodeIndex, item.Level) is false)
                         {
