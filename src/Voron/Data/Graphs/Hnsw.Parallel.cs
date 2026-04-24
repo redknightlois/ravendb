@@ -157,6 +157,9 @@ public partial class Hnsw
             private int _visitedVersion;
             private readonly LinkedListNode<int> _listNode = new(-1);
 
+            // Beam width used by the currently-processed level, tapered from Options.NumberOfCandidates.
+            private int _effectiveNumberOfCandidates;
+
             // Pooled work items — reused across all yields to avoid per-yield heap allocations
             private readonly ProcessEdgesWorker _processEdgesWorker = new(runner);
             private readonly FilterEdgesHeuristicWorker _filterEdgesWorker = new(runner);
@@ -248,14 +251,25 @@ public partial class Hnsw
                     insertedVector = n.GetVectorUnmanagedSpan(_searchState);
                     AddEdgesFromInFlightNodes(ref n, createdNodeIndex);
                 }
-                
+
+                // Beam-width taper during batch construction, applied in the per-level loop below.
+                // At level 0 we scale efC down by log2(graphSize+1)/log2(targetSize+1) with a floor
+                // of M, so the beam matches the pool of reachable neighbors while the graph is
+                // still filling. At upper levels we use efC=M directly: those levels are routing
+                // hops, not precision-critical selection, and level 0 still runs with the full
+                // (tapered) beam and the heuristic filter.
+                int numberOfCandidates = _searchState.Options.NumberOfCandidates;
+                int numberOfEdges = _searchState.Options.NumberOfEdges;
+                int level0EfC = ComputeTaperedEfConstructionForLevel0(createdNodeIndex, numberOfCandidates, numberOfEdges);
+
                 foreach(var item in SearchNearestAcrossLevels(insertedVector, currentMaxLevel, currentNodeIndex))
                 {
                     yield return item;
                 }
-                
+
                 for (int level = nodeRandomLevel; level >= 0; level--)
                 {
+                    _effectiveNumberOfCandidates = level == 0 ? level0EfC : numberOfEdges;
                     int startingPointIndex = _nearestIndexes[level];
                     foreach (var item in NearestEdges(startingPointIndex, currentNodeIndex, insertedVector, level))
                     {
@@ -332,6 +346,17 @@ public partial class Hnsw
                 }
             }
 
+            private int ComputeTaperedEfConstructionForLevel0(int createdNodeIndex, int numberOfCandidates, int numberOfEdges)
+            {
+                int graphSize = Math.Max(1, createdNodeIndex);
+                int targetSize = _searchState.CreatedNodes;
+                if (graphSize >= targetSize)
+                    return numberOfCandidates;
+
+                double ratio = Math.Log2(graphSize + 1) / Math.Log2(targetSize + 1);
+                return Math.Max(numberOfEdges, (int)(numberOfCandidates * ratio));
+            }
+
             private void AddEdgesFromInFlightNodes(ref Node n, int createdNodeIndex)
             {
                 // Here we add "number of edges" previously added items to as the edges in all their levels
@@ -373,7 +398,7 @@ public partial class Hnsw
                 while (_candidatesQ.TryDequeue(out var cur, out var curDistance))
                 {
                     if (-curDistance < lowerBound &&
-                        _nearestEdgesQ.Count == _searchState.Options.NumberOfCandidates)
+                        _nearestEdgesQ.Count == _effectiveNumberOfCandidates)
                         break;
 
                     _processEdgesWorker.Reset(vector, lowerBound, cur, level);
@@ -494,11 +519,11 @@ public partial class Hnsw
                     var candidatesQ = Owner._candidatesQ;
                     var lowerBound  = LowerBound;
                     
-                    int numberOfCandidates = searchState.Options.NumberOfCandidates;
+                    int numberOfCandidates = Owner._effectiveNumberOfCandidates;
                     for (int i = 0; i < indexes.Count; i++)
                     {
                         var nextIndex = indexes[i];
-                        Debug.Assert(searchState.Nodes[nextIndex].EdgesPerLevel.Count > Level); 
+                        Debug.Assert(searchState.Nodes[nextIndex].EdgesPerLevel.Count > Level);
                    
                         float nextDist = -searchState.Distance(_vector, vectors[i]);
                         if (nearestEdgesQ.Count < numberOfCandidates)
