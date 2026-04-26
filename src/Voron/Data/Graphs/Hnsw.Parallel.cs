@@ -134,10 +134,10 @@ public partial class Hnsw
                 _searchState.RegisterNodeLocation(EntryPointId, entryPointNode);
             }
 
-            // Run 1..MaxConcurrentBatches batches here, depending on how much work we have to run
-            int numberOfBatches = Math.Max(1, _searchState.CreatedNodes / MaxConcurrentBatches);
-            // but not too much...
-            int maxTasks = Math.Min(numberOfBatches, MaxConcurrentBatches);
+            // Scale MCB with graph size: at small N keep default (512), at large N use up to 2048
+            int effectiveMcb = Math.Max(MaxConcurrentBatches, Math.Min(2048, _searchState.CreatedNodes / 48));
+            int numberOfBatches = Math.Max(1, _searchState.CreatedNodes / effectiveMcb);
+            int maxTasks = Math.Min(numberOfBatches, effectiveMcb);
             NodePlacementRunner runner = new(this, maxTasks, token);
             runner.Run();
         }
