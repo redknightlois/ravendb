@@ -110,8 +110,19 @@ public unsafe partial class Hnsw
             using var builder = new Builder(llt, locations, budget);
             builder.Seed(EntryPointId);
             int maxLevel = builder.NodeLevelsAt(0) - 1;
-            for (int level = maxLevel; level >= 0 && builder.HasBudget; level--)
+            for (int level = maxLevel; level > 0 && builder.HasBudget; level--)
                 builder.ExpandAtLevel(level);
+
+            // Level 0 needs full BFS, not a single hop: under the standard HNSW level
+            // formula most nodes live only at level 0 and many sit >1 hop from any
+            // upper-level seed, so one ExpandAtLevel(0) call leaves them out.
+            while (builder.HasBudget)
+            {
+                int before = builder.NodeIdToIdx.Count;
+                builder.ExpandAtLevel(0);
+                if (builder.NodeIdToIdx.Count == before)
+                    break;
+            }
             var (nodes, edges, offsets) = builder.Freeze();
             return new NodeCache(llt.Id, options, simCalc, builder.NodeIdToIdx, nodes, edges, offsets);
         }
