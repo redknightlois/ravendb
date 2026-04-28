@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Sparrow.Server\Sparrow.Server.csproj"/>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(IsAnyOS)' == 'true' OR '$(IsLinux64)' == 'true'">
+    <None Include="..\..\libs\librvnpal\librvnpal.linux.x64.so" Link="librvnpal.linux.x64.so">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\..\libs\libzstd\libzstd.linux.x64.so" Link="libzstd.linux.x64.so">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>
