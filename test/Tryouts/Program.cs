@@ -27,6 +27,13 @@ public static class Program
         var sources = EventSource.GetSources();
         var runtime = sources.FirstOrDefault(x => x.Name == "System.Runtime");
         runtime?.Dispose();
+
+        if (Environment.GetEnvironmentVariable("RAVEN_BENCH_HNSW_QPS") == "1")
+        {
+            Tryouts.HnswBench.HnswQpsBench.Run();
+            return;
+        }
+
         for (int i = 0; i < 1; i++)
         {
             Console.WriteLine($"Starting to run {i}");
