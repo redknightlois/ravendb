@@ -3,11 +3,13 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Numerics.Tensors;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using Sparrow.Server;
 using Sparrow.Threading;
 using Voron;
 using Voron.Data.Graphs;
+using Voron.Impl;
 
 namespace Tryouts.HnswBench;
 
@@ -28,6 +30,10 @@ namespace Tryouts.HnswBench;
 ///   RAVEN_BENCH_TOPK        top-K result, default 10
 ///   RAVEN_BENCH_REPS        timed pass repetitions, default 3 (median reported)
 ///   RAVEN_BENCH_RECALL      compute recall vs SIFT1M native ground truth (requires N=1M)
+///   RAVEN_BENCH_USE_CACHE   wire HnswIndexCache.WarmFromScratch and pass it to SearchState
+///                           (mirrors the production Corax path); default off
+///   RAVEN_BENCH_INCLUDE_LEAVES  when USE_CACHE=1 and the WarmFromScratch overload supports it
+///                               (RavenDB-26537+), admit level-0 leaves into the cache
 /// </summary>
 internal static class HnswQpsBench
 {
@@ -41,6 +47,8 @@ internal static class HnswQpsBench
         int topK = ParseInt("RAVEN_BENCH_TOPK", 10);
         int reps = ParseInt("RAVEN_BENCH_REPS", 3);
         bool measureRecall = Environment.GetEnvironmentVariable("RAVEN_BENCH_RECALL") == "1";
+        bool useCache = Environment.GetEnvironmentVariable("RAVEN_BENCH_USE_CACHE") == "1";
+        bool includeLeaves = Environment.GetEnvironmentVariable("RAVEN_BENCH_INCLUDE_LEAVES") == "1";
 
         const int dim = Sift1MLoader.VectorDim;
         const int numberOfEdges = 12;
@@ -64,6 +72,7 @@ internal static class HnswQpsBench
         Console.WriteLine($"== HNSW search QPS bench (SIFT1M)");
         Console.WriteLine($"   dim={dim}, nodes={nodeCount:N0}, queries={queryCount:N0}, M={numberOfEdges}, ef={ef}, topK={topK}, reps={reps}");
         Console.WriteLine($"   db={dbPath}{(reuseExisting ? " (reused)" : "")}");
+        Console.WriteLine($"   cache={(useCache ? (includeLeaves ? "on (leaf-inclusive)" : "on (promoted-only)") : "off")}");
 
         try
         {
@@ -96,15 +105,28 @@ internal static class HnswQpsBench
             var matches = new long[beam];
             var distances = new float[beam];
 
+            HnswIndexCache cache = null;
+            if (useCache)
+            {
+                using var roTx = env.ReadTransaction();
+                var llt = roTx.LowLevelTransaction;
+                var sw = Stopwatch.StartNew();
+                cache = WarmCache(llt, fieldName, nodeCount, includeLeaves);
+                sw.Stop();
+                if (cache is null)
+                    throw new InvalidOperationException("HnswIndexCache.WarmFromScratch returned null (no graph at field?)");
+                Console.WriteLine($"   warm cache in {sw.Elapsed.TotalMilliseconds:N0} ms");
+            }
+
             // JIT warmup: one untimed pass so the search hot path is compiled before timing.
-            _ = TimeQueries(env, fieldName, queries, beam, topK, matches, distances, returnedPerQuery: null);
+            _ = TimeQueries(env, fieldName, queries, beam, topK, matches, distances, cache, returnedPerQuery: null);
 
             var qps = new double[reps];
             long[][] returned = measureRecall ? new long[queries.Length][] : null;
             for (int rep = 0; rep < reps; rep++)
             {
-                var pass = TimeQueries(env, fieldName, queries, beam, topK, matches, distances,
-                    returnedPerQuery: rep == reps - 1 ? returned : null);
+                var pass = TimeQueries(env, fieldName, queries, beam, topK, matches, distances, cache,
+                    rep == reps - 1 ? returned : null);
                 qps[rep] = pass.Qps;
                 Console.WriteLine($"   rep {rep}: {pass.ElapsedMs,8:N1} ms  {pass.Qps,8:N1} qps  avgCands={pass.AvgCandidates:N1}");
             }
@@ -136,11 +158,14 @@ internal static class HnswQpsBench
         int topK,
         long[] matches,
         float[] distances,
+        HnswIndexCache cache,
         long[][] returnedPerQuery)
     {
         using var roTx = env.ReadTransaction();
         var llt = roTx.LowLevelTransaction;
-        using var searchState = new Hnsw.SearchState(llt, fieldName);
+        using var searchState = cache is null
+            ? new Hnsw.SearchState(llt, fieldName)
+            : new Hnsw.SearchState(llt, fieldName, cache);
 
         // Single untimed query so SearchState lazy state is populated before the clock starts.
         RunOne(searchState, queries[0], beam, matches, distances);
@@ -236,5 +261,30 @@ internal static class HnswQpsBench
     private static int ParseInt(string envVar, int fallback)
     {
         return int.TryParse(Environment.GetEnvironmentVariable(envVar), out var v) && v > 0 ? v : fallback;
+    }
+
+    /// <summary>
+    /// Build a populated <see cref="HnswIndexCache"/> using whichever WarmFromScratch overload
+    /// the loaded assembly exposes. The 4-arg form with <c>includeLeaves</c> is RavenDB-26537+;
+    /// older branches only have the 3-arg promoted-only form. Reflection keeps the bench source
+    /// portable across the graduated stack.
+    /// </summary>
+    private static HnswIndexCache WarmCache(LowLevelTransaction llt, Slice fieldName, int maxNodes, bool includeLeaves)
+    {
+        var t = typeof(HnswIndexCache);
+        if (includeLeaves)
+        {
+            var withLeaves = t.GetMethod("WarmFromScratch", BindingFlags.Public | BindingFlags.Static,
+                new[] { typeof(LowLevelTransaction), typeof(Slice), typeof(int), typeof(bool) });
+            if (withLeaves is not null)
+                return (HnswIndexCache)withLeaves.Invoke(null, new object[] { llt, fieldName, maxNodes, true });
+            Console.WriteLine("   warning: RAVEN_BENCH_INCLUDE_LEAVES=1 but no 4-arg WarmFromScratch overload on this branch; falling back to promoted-only");
+        }
+
+        var threeArg = t.GetMethod("WarmFromScratch", BindingFlags.Public | BindingFlags.Static,
+            new[] { typeof(LowLevelTransaction), typeof(Slice), typeof(int) });
+        if (threeArg is null)
+            throw new InvalidOperationException("HnswIndexCache.WarmFromScratch(llt, fieldName, maxNodes) overload not found");
+        return (HnswIndexCache)threeArg.Invoke(null, new object[] { llt, fieldName, maxNodes });
     }
 }
