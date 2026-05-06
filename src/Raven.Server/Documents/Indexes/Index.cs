@@ -13,7 +13,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Corax.Utils;
 using Microsoft.AspNetCore.Http;
-using Nito.AsyncEx;
 using Raven.Client.Documents.Changes;
 using Raven.Client.Documents.DataArchival;
 using Raven.Client.Documents.Indexes;
@@ -247,7 +246,7 @@ namespace Raven.Server.Documents.Indexes
         private Lazy<Size?> _transactionSizeLimit;
         private bool _scratchSpaceLimitExceeded;
 
-        private readonly AsyncReaderWriterLock _currentlyRunningQueriesLock = new AsyncReaderWriterLock();
+        private readonly ReaderDrainLock _currentlyRunningQueriesLock = new ReaderDrainLock();
         private readonly AsyncLocal<bool> _isRunningQueriesWriteLockTaken = new AsyncLocal<bool>();
         private readonly MultipleUseFlag _priorityChanged = new MultipleUseFlag();
         private readonly MultipleUseFlag _hadRealIndexingWorkToDo = new MultipleUseFlag();
@@ -812,7 +811,7 @@ namespace Raven.Server.Documents.Indexes
             try
             {
                 using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
-                    currentlyRunningQueriesWriteLock = _currentlyRunningQueriesLock.WriterLock(cts.Token);
+                    currentlyRunningQueriesWriteLock = _currentlyRunningQueriesLock.EnterWrite(cts.Token);
 
                 _isRunningQueriesWriteLockTaken.Value = true;
             }
@@ -5451,18 +5450,9 @@ namespace Raven.Server.Documents.Indexes
 
             private static readonly TimeSpan ExtendedLockTimeout = TimeSpan.FromSeconds(30);
 
-            private static readonly CancellationToken CancelledToken;
-
-            static IndexQueryDoneRunning()
-            {
-                var cts = new CancellationTokenSource();
-                cts.Cancel();
-
-                CancelledToken = cts.Token;
-            }
-
             private readonly Index _parent;
-            private IDisposable _lock;
+            private ReaderDrainLock.ReadHandle _lock;
+            private bool _heldLock;
 
             public IndexQueryDoneRunning(Index parent)
             {
@@ -5475,13 +5465,14 @@ namespace Raven.Server.Documents.Indexes
                     ? ExtendedLockTimeout
                     : DefaultLockTimeout;
 
-                if (_lock != null)
+                if (_heldLock)
                     ThrowLockAlreadyTaken();
 
                 try
                 {
                     using (var cts = new CancellationTokenSource(timeout))
-                        _lock = _parent._currentlyRunningQueriesLock.ReaderLock(cts.Token);
+                        _lock = _parent._currentlyRunningQueriesLock.EnterRead(cts.Token);
+                    _heldLock = true;
                 }
                 catch (OperationCanceledException)
                 {
@@ -5489,40 +5480,21 @@ namespace Raven.Server.Documents.Indexes
                 }
             }
 
-            public async ValueTask HoldLockAsync()
+            public ValueTask HoldLockAsync()
             {
-                var timeout = _parent._isReplacing
-                    ? ExtendedLockTimeout
-                    : DefaultLockTimeout;
-
-                if (_lock != null)
-                    ThrowLockAlreadyTaken();
-
-                try
-                {
-                    using (var cts = new CancellationTokenSource(timeout))
-                        _lock = await _parent._currentlyRunningQueriesLock.ReaderLockAsync(cts.Token);
-                }
-                catch (OperationCanceledException)
-                {
-                    ThrowLockTimeoutException();
-                }
+                HoldLock();
+                return ValueTask.CompletedTask;
             }
 
             public bool TryHoldLock()
             {
-                if (_lock != null)
+                if (_heldLock)
                     ThrowLockAlreadyTaken();
 
-                try
-                {
-                    _lock = _parent._currentlyRunningQueriesLock.ReaderLock(CancelledToken);
-                }
-                catch (OperationCanceledException)
-                {
+                if (_parent._currentlyRunningQueriesLock.TryEnterRead(out _lock) == false)
                     return false;
-                }
 
+                _heldLock = true;
                 return true;
             }
 
@@ -5542,8 +5514,11 @@ namespace Raven.Server.Documents.Indexes
 
             public void ReleaseLock()
             {
-                _lock?.Dispose();
-                _lock = null;
+                if (_heldLock == false)
+                    return;
+                _lock.Dispose();
+                _lock = default;
+                _heldLock = false;
             }
 
             public void Dispose()
