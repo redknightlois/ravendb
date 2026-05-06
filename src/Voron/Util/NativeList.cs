@@ -103,7 +103,7 @@ public unsafe struct NativeList<T>
         ToSpan().Fill(value);
     }
 
-    public void ResetAndCopyFrom(ByteStringContext allocator,Span<T> src)
+    public void ResetAndCopyFrom(ByteStringContext allocator, ReadOnlySpan<T> src)
     {
         ResetAndEnsureCapacity(allocator, src.Length);
         AddRangeUnsafe(src);

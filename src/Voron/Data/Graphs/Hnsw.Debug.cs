@@ -34,13 +34,15 @@ public unsafe partial class Hnsw
             var node = searchState.GetNodeById(nodeId);
             int nodeIndex = searchState.GetNodeIndexById(nodeId);
             long[] entries = GetEntries(llt, node.PostingListId);
-            var edgesByLevel = new (long NodeId, float Distance)[node.EdgesPerLevel.Count][];
-            for (int i = 0; i < node.EdgesPerLevel.Count; i++)
+            int levelCount = searchState.GetLevelCount(ref searchState.Nodes[nodeIndex]);
+            var edgesByLevel = new (long NodeId, float Distance)[levelCount][];
+            for (int i = 0; i < levelCount; i++)
             {
-                edgesByLevel[i] = new (long NodeId, float Distance)[node.EdgesPerLevel[i].Count];
-                for (int j = 0; j <  node.EdgesPerLevel[i].Count; j++)
+                var edges = searchState.GetEdgesSpan(ref searchState.Nodes[nodeIndex], i);
+                edgesByLevel[i] = new (long NodeId, float Distance)[edges.Length];
+                for (int j = 0; j < edges.Length; j++)
                 {
-                    long id = node.EdgesPerLevel[i][j];
+                    long id = edges[j];
                     int index = searchState.GetNodeIndexById(id);
                     edgesByLevel[i][j] = (id, searchState.Distance(ReadOnlySpan<byte>.Empty, nodeIndex, index));
                 }
@@ -172,16 +174,17 @@ table, th, td {
                 {
                     var nodeIdx = searchState.GetNodeIndexById(j);
                     ref var n = ref searchState.Nodes[nodeIdx];
-                    if (level >= n.EdgesPerLevel.Count)
+                    if (level >= searchState.GetLevelCount(ref n))
                         continue;
 
                     var dist = searchState.Distance(vector, -1, nodeIdx);
                     var isPath = path[level] == nodeIdx ? "path" : "";
                     var isResult =  level == 0 && edges.Inner.Items.Contains(nodeIdx) ? "result": "";
                     var nextId = level == 0 ? (edges.Inner.Items.Contains(nodeIdx) ?"***": "") : $"N_{path[level - 1]}_{level - 1}";
+                    var nEdges = searchState.GetEdgesSpan(ref n, level);
                     f.WriteLine($"<td> <table id='N_{j}_{level}'><tr><th class='{isPath} {isResult}'>N_{j}_{level} - {GetEntryId(llt,n.PostingListId)}</th>" +
-                                $"<th>{n.EdgesPerLevel[level].Count}</th><th>{dist} (<a href='#{nextId}'>{nextId}</a>)</th></tr><tr>");
-                    foreach (var to in n.EdgesPerLevel[level])
+                                $"<th>{nEdges.Length}</th><th>{dist} (<a href='#{nextId}'>{nextId}</a>)</th></tr><tr>");
+                    foreach (var to in nEdges)
                     {
                         dist = searchState.Distance(Span<byte>.Empty, nodeIdx, searchState.GetNodeIndexById(to));
                         var srcDist = searchState.Distance(vector, -1, searchState.GetNodeIndexById(to));

@@ -127,6 +127,7 @@ public partial class Hnsw
                 
                 _nextNodeIndex++; // do not attempt to insert the first node, since it is the graph root
                 ref Node startingNode = ref _searchState.Nodes[0];
+                _searchState.EnsureEdgesOwned(ref startingNode);
                 Span<byte> span = startingNode.Encode(ref byteBuffer);
                 var allocatedId = Container.Allocate(_searchState.Llt, _searchState.Options.Container, span.Length, out Span<byte> allocated);
                 entryPointNode = (long)allocatedId;
@@ -246,6 +247,7 @@ public partial class Hnsw
                 {
                     //  scoping n here, to avoid "leaking" the reference and async issues
                     ref var n = ref _searchState.GetNodeByIndex(currentNodeIndex);
+                    _searchState.EnsureEdgesOwned(ref n);
                     n.EdgesPerLevel.SetCapacity(_searchState.Llt.Allocator, nodeRandomLevel + 1);
                     insertedVector = n.GetVectorUnmanagedSpan(_searchState);
                     AddEdgesFromInFlightNodes(ref n, createdNodeIndex);
@@ -276,6 +278,7 @@ public partial class Hnsw
                     }
                     PortableExceptions.ThrowIf<InvalidOperationException>(_candidates.Count == 0, "Cannot add a node to the graph without any edges");
                     ref var node = ref _searchState.GetNodeByIndex(currentNodeIndex);
+                    _searchState.EnsureEdgesOwned(ref node);
                     ref var list = ref node.EdgesPerLevel[level];
                     // important - we cannot reset here, since we have added edges from the in flight nodes in AddEdgesFromInFlightNodes()
                     list.EnsureCapacityFor(_searchState.Llt.Allocator, _candidates.Count);
@@ -286,6 +289,7 @@ public partial class Hnsw
                         ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
                         list.AddUnsafe(edge.NodeId);
 
+                        _searchState.EnsureEdgesOwned(ref edge);
                         ref var edgeList = ref edge.EdgesPerLevel[level];
                         edgeList.Add(_searchState.Llt.Allocator, node.NodeId);
 
@@ -322,6 +326,7 @@ public partial class Hnsw
                         PortableExceptions.ThrowIf<InvalidOperationException>(_candidates.Count == 0 , "Cannot add a node to the graph without any edges after heuristic");
                         {
                             ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
+                            _searchState.EnsureEdgesOwned(ref edge);
                             ref var edgeList = ref edge.EdgesPerLevel[level];
                             edgeList.ResetAndEnsureCapacity(_searchState.Llt.Allocator, _candidates.Count);
                             foreach (var idx in _candidates)
@@ -369,10 +374,14 @@ public partial class Hnsw
                 for (int i = 0; i < used; i++)
                 {
                     ref var edge = ref _searchState.GetNodeByIndex(_indexes[i]);
-                    int sharedLevels = Math.Min(edge.EdgesPerLevel.Count, n.EdgesPerLevel.Count);
-                    for (int level = 0; level < sharedLevels; level++)
+                    int sharedLevels = Math.Min(_searchState.GetLevelCount(ref edge), _searchState.GetLevelCount(ref n));
+                    if (sharedLevels > 0)
                     {
-                        n.EdgesPerLevel[level].Add(_searchState.Llt.Allocator, edge.NodeId);
+                        _searchState.EnsureEdgesOwned(ref n);
+                        for (int level = 0; level < sharedLevels; level++)
+                        {
+                            n.EdgesPerLevel[level].Add(_searchState.Llt.Allocator, edge.NodeId);
+                        }
                     }
                 }
                 _indexes.Clear();
@@ -522,7 +531,7 @@ public partial class Hnsw
                     for (int i = 0; i < indexes.Count; i++)
                     {
                         var nextIndex = indexes[i];
-                        Debug.Assert(searchState.Nodes[nextIndex].EdgesPerLevel.Count > Level);
+                        Debug.Assert(searchState.GetLevelCount(ref searchState.Nodes[nextIndex]) > Level);
                    
                         float nextDist = -searchState.Distance(_vector, vectors[i]);
                         if (nearestEdgesQ.Count < numberOfCandidates)
@@ -656,15 +665,18 @@ public partial class Hnsw
                 // The slow path runs RegisterForPreloading first, which sizes both lists.
                 // The all-in-memory fast path skips that step, so we must guarantee the slot
                 // exists before we ref into it. SetCapacity is a no-op when already sized.
-                n.EdgesPerLevel.SetCapacity(_searchState.Llt.Allocator, level + 1);
+                // Skip EdgesPerLevel mutation for cache-loaned nodes - reads route through
+                // GetEdgesSpan/GetEdgesCount, which bounds-check via CachedLevelCount.
+                if (n.IsFromCache == false)
+                    n.EdgesPerLevel.SetCapacity(_searchState.Llt.Allocator, level + 1);
                 n.EdgesIndexesPerLevel.SetCapacity(_searchState.Llt.Allocator, level + 1);
 
-                ref var edgesList = ref n.EdgesPerLevel[level];
+                var edgesSpan = _searchState.GetEdgesSpan(ref n, level);
                 ref var edgesIndexes = ref n.EdgesIndexesPerLevel[level];
-                if (edgesIndexes.Count != edgesList.Count)
+                if (edgesIndexes.Count != edgesSpan.Length)
                 {
-                    edgesIndexes.ResetAndEnsureCapacity(_searchState.Llt.Allocator, edgesList.Count);
-                    foreach (var nodeId in edgesList)
+                    edgesIndexes.ResetAndEnsureCapacity(_searchState.Llt.Allocator, edgesSpan.Length);
+                    foreach (var nodeId in edgesSpan)
                     {
                         edgesIndexes.AddUnsafe(_searchState.GetNodeIndexById(nodeId));
                     }
@@ -940,19 +952,20 @@ public partial class Hnsw
                 if (n.VectorLoaded is false)
                     batch.Add(n.NodeId);
                 
-                n.EdgesPerLevel.SetCapacity(searchState.Llt.Allocator, Level + 1);
+                if (n.IsFromCache == false)
+                    n.EdgesPerLevel.SetCapacity(searchState.Llt.Allocator, Level + 1);
                 n.EdgesIndexesPerLevel.SetCapacity(searchState.Llt.Allocator, Level + 1);
 
-                ref var edgesList = ref n.EdgesPerLevel[Level];
+                var edgesSpan = searchState.GetEdgesSpan(ref n, Level);
                 ref var edgesIndexes = ref n.EdgesIndexesPerLevel[Level];
                 // turns out that the checks for the node id -> index are really expensive
                 // so we try to cache them
-                if (edgesIndexes.Count != edgesList.Count)
+                if (edgesIndexes.Count != edgesSpan.Length)
                 {
-                    edgesIndexes.ResetAndEnsureCapacity(searchState.Llt.Allocator, edgesList.Count);
-                    for (int i = 0; i < edgesList.Count; i++)
+                    edgesIndexes.ResetAndEnsureCapacity(searchState.Llt.Allocator, edgesSpan.Length);
+                    for (int i = 0; i < edgesSpan.Length; i++)
                     {
-                        var nodeId = edgesList[i];
+                        var nodeId = edgesSpan[i];
                         if (searchState.TryGetNodeById(nodeId, out var nodeIndex))
                         {
                             edgesIndexes.AddUnsafe(nodeIndex);
@@ -964,13 +977,13 @@ public partial class Hnsw
                         // we run, we'll re-do the whole check and find the node index
                     }
                 }
-                
+
                 for (int i = 0; i < edgesIndexes.Count; i++)
                 {
                     int index = edgesIndexes[i];
                     if (searchState.Nodes[index].VectorLoaded)
                         continue;
-                    batch.Add(edgesList[i]);
+                    batch.Add(edgesSpan[i]);
                 }
                 return old != batch.Count;
             }

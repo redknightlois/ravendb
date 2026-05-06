@@ -29,6 +29,14 @@ public partial class Hnsw
         public float QueryDistanceValue;
         public int QueryDistanceVersion;
 
+        // Cache provenance. CachedLevelCount > 0 means this node was populated from the
+        // shared NodeCache and EdgesPerLevel is empty - readers must consult the cache via
+        // SearchState.GetEdgesSpan/GetEdgesCount/GetLevelCount, and any code that mutates
+        // edges must first call SearchState.EnsureEdgesOwned to materialize EdgesPerLevel.
+        public int CachedNodeIndex;
+        public byte CachedLevelCount;
+        public bool IsFromCache => CachedLevelCount > 0;
+
         public bool VectorLoaded => _vectorSpan.Length > 0;
 
         /// <summary>

@@ -262,29 +262,97 @@ public unsafe partial class Hnsw
         }
 
         /// <summary>
-        /// Populate a local node from the shared NodeCache. Edge slices are copied into local
-        /// <see cref="NativeList{T}"/>s because NativeLists can't be shared across allocator
-        /// boundaries. Vector span is left default — <see cref="Node.GetVectorUnmanagedSpan"/>
-        /// lazily resolves it via <c>Llt</c>, which is MVCC-consistent because the holder
-        /// guarantees <c>cache.AsOfTxId ≤ Llt.Id</c>.
+        /// Populate a local node from the shared NodeCache without copying edges. The cache
+        /// holds an immutable, contiguous <c>long[]</c> backing store that lives at least as
+        /// long as the transaction, so edge spans into it are stable for the query. The local
+        /// node records the cache index in <see cref="Node.CachedNodeIndex"/> /
+        /// <see cref="Node.CachedLevelCount"/>; readers consult those via the SearchState
+        /// helpers below, and any code path that needs to mutate edges first calls
+        /// <see cref="EnsureEdgesOwned"/> to materialize <see cref="Node.EdgesPerLevel"/>.
         /// </summary>
-        private void CopyNodeFromCache(in NodeCache.CachedNode cached, ref Node local)
+        private void CopyNodeFromCache(int cachedNodeIndex, in NodeCache.CachedNode cached, ref Node local)
         {
             local.NodeId = cached.NodeId;
             local.PostingListId = cached.PostingListId;
             local.VectorId = cached.VectorId;
+            local.CachedNodeIndex = cachedNodeIndex;
+            local.CachedLevelCount = cached.LevelCount;
             // local._vectorSpan and per-query scratch (Visited, QueryDistance*) stay at default.
+            // local.EdgesPerLevel stays empty; the cache's _allEdges array is the source of truth.
+        }
 
-            local.EdgesPerLevel.EnsureCapacityFor(Llt.Allocator, cached.LevelCount);
-            for (int lvl = 0; lvl < cached.LevelCount; lvl++)
+        /// <summary>
+        /// Number of HNSW levels for a node, accounting for cache-loaned nodes whose
+        /// <see cref="Node.EdgesPerLevel"/> is empty.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public int GetLevelCount(ref Node node)
+            => node.IsFromCache ? node.CachedLevelCount : node.EdgesPerLevel.Count;
+
+        /// <summary>
+        /// Edge count at a level; routes through the NodeCache for cache-loaned nodes.
+        /// Returns 0 when <paramref name="level"/> exceeds the node's actual level count -
+        /// callers historically relied on SetCapacity-padded empty inner lists for this.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public int GetEdgesCount(ref Node node, int level)
+        {
+            if (node.IsFromCache)
+            {
+                if (level >= node.CachedLevelCount)
+                    return 0;
+                return _nodeCache.EdgesAtLevel(_nodeCache.GetNodeByIndex(node.CachedNodeIndex), level).Length;
+            }
+            if (level >= node.EdgesPerLevel.Count)
+                return 0;
+            return node.EdgesPerLevel[level].Count;
+        }
+
+        /// <summary>
+        /// Read-only edge span at a level; for cache-loaned nodes returns a span into the
+        /// cache's flat backing store rather than a per-query allocation. Returns
+        /// <see cref="ReadOnlySpan{T}.Empty"/> when <paramref name="level"/> is beyond the
+        /// node's actual level count.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public ReadOnlySpan<long> GetEdgesSpan(ref Node node, int level)
+        {
+            if (node.IsFromCache)
+            {
+                if (level >= node.CachedLevelCount)
+                    return ReadOnlySpan<long>.Empty;
+                return _nodeCache.EdgesAtLevel(_nodeCache.GetNodeByIndex(node.CachedNodeIndex), level);
+            }
+            if (level >= node.EdgesPerLevel.Count)
+                return ReadOnlySpan<long>.Empty;
+            return node.EdgesPerLevel[level].ToSpan();
+        }
+
+        /// <summary>
+        /// Materialize <see cref="Node.EdgesPerLevel"/> from the NodeCache for a cache-loaned
+        /// node, then clear its cache provenance. Must be called before any code path that
+        /// mutates the node's edges (insert / persist / sort / capacity changes).
+        /// No-op if the node already owns its edges.
+        /// </summary>
+        public void EnsureEdgesOwned(ref Node node)
+        {
+            if (node.IsFromCache == false)
+                return;
+
+            ref readonly var cached = ref _nodeCache.GetNodeByIndex(node.CachedNodeIndex);
+            int levels = node.CachedLevelCount;
+            node.EdgesPerLevel.EnsureCapacityFor(Llt.Allocator, levels);
+            for (int lvl = 0; lvl < levels; lvl++)
             {
                 var src = _nodeCache.EdgesAtLevel(cached, lvl);
                 var dst = new NativeList<long>();
                 dst.EnsureCapacityFor(Llt.Allocator, src.Length);
                 for (int e = 0; e < src.Length; e++)
                     dst.AddUnsafe(src[e]);
-                local.EdgesPerLevel.AddUnsafe(dst);
+                node.EdgesPerLevel.AddUnsafe(dst);
             }
+            node.CachedLevelCount = 0;
+            node.CachedNodeIndex = 0;
         }
 
         /// <summary>
@@ -298,13 +366,13 @@ public unsafe partial class Hnsw
             ref var node = ref GetNodeByIndex(nodeIndex);
 
             if (node.EdgesIndexesPerLevel.Count > level &&
-                node.EdgesIndexesPerLevel[level].Count == node.EdgesPerLevel[level].Count)
+                node.EdgesIndexesPerLevel[level].Count == GetEdgesCount(ref node, level))
             {
                 indexes.ResetAndCopyFrom(Llt.Allocator, node.EdgesIndexesPerLevel[level].ToSpan());
                 return;
             }
 
-            nodeIds.ResetAndCopyFrom(Llt.Allocator, node.EdgesPerLevel[level].ToSpan());
+            nodeIds.ResetAndCopyFrom(Llt.Allocator, GetEdgesSpan(ref node, level));
             LoadNodeIndexes(ref nodeIds, ref indexes);
 
             node = ref GetNodeByIndex(nodeIndex);
@@ -333,7 +401,7 @@ public unsafe partial class Hnsw
                 if (_nodeCache != null && _nodeCache.TryGetNodeIndex(nodeIds[i], out var cachedIdx))
                 {
                     var localIdx = AllocateNodeIndex(nodeIds[i]);
-                    CopyNodeFromCache(in _nodeCache.GetNodeByIndex(cachedIdx), ref _nodes[localIdx]);
+                    CopyNodeFromCache(cachedIdx, in _nodeCache.GetNodeByIndex(cachedIdx), ref _nodes[localIdx]);
                     _nodeIdToIdx[nodeIds[i]] = localIdx;
                     indexes.AddUnsafe(localIdx);
                     nodeIds[i] = -1;
@@ -380,7 +448,7 @@ public unsafe partial class Hnsw
             if (_nodeCache != null && _nodeCache.TryGetNodeIndex(nodeId, out var cachedIdx))
             {
                 nodeIdx = AllocateNodeIndex(nodeId);
-                CopyNodeFromCache(in _nodeCache.GetNodeByIndex(cachedIdx), ref GetNodeByIndex(nodeIdx));
+                CopyNodeFromCache(cachedIdx, in _nodeCache.GetNodeByIndex(cachedIdx), ref GetNodeByIndex(nodeIdx));
                 return nodeIdx;
             }
 
@@ -518,7 +586,7 @@ public unsafe partial class Hnsw
                 var currentNodeIndex = nodesFromFilter.Current;
                 var nodeId = GetNodeIndexById(currentNodeIndex);
                 ref var entry = ref GetNodeByIndex(nodeId);
-                var currentNodeMaximumLevel = entry.EdgesPerLevel.Count;
+                var currentNodeMaximumLevel = GetLevelCount(ref entry);
 
                 if (nearestCandidates.Count < candidatesRequested)
                 {
@@ -556,7 +624,12 @@ public unsafe partial class Hnsw
             var currentNodeIndex = GetNodeIndexById(EntryPointId);
             var level = maxLevel;
             ref var entry = ref GetNodeByIndex(currentNodeIndex);
-            entry.EdgesPerLevel.SetCapacity(Llt.Allocator, maxLevel + 1);
+            // Cache-loaned nodes route reads through GetEdgesSpan, which bounds-checks against
+            // the cache's actual level count and returns empty for higher levels - no need to
+            // pad EdgesPerLevel with empty inner lists. For owned nodes we still SetCapacity
+            // to give the legacy code path empty slots beyond the node's level count.
+            if (entry.IsFromCache == false)
+                entry.EdgesPerLevel.SetCapacity(Llt.Allocator, maxLevel + 1);
             var distance = Distance(vector, dstIdx, currentNodeIndex);
             var indexes = new NativeList<int>();
             var nodeIds = new NativeList<long>();
@@ -567,7 +640,7 @@ public unsafe partial class Hnsw
                 do
                 {
                     moved = false;
-                    Debug.Assert(GetNodeByIndex(currentNodeIndex).EdgesPerLevel.Count > level, "n.EdgesPerLevel.Count > level");
+                    Debug.Assert(GetLevelCount(ref GetNodeByIndex(currentNodeIndex)) > level, "GetLevelCount(node) > level");
                     ResolveEdgeIndexes(currentNodeIndex, level, ref nodeIds, ref indexes);
                     for (var i = 0; i < indexes.Count; i++)
                     {
@@ -1173,6 +1246,7 @@ public unsafe partial class Hnsw
 
         void PersistNode(ref Node node, ref ContextBoundNativeList<byte> byteBuffer)
         {
+            _searchState.EnsureEdgesOwned(ref node);
             var encoded = node.Encode(ref byteBuffer);
             if (_searchState.TryGetLocationForNode(node.NodeId, out var locationId))
             {
