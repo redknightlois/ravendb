@@ -701,8 +701,47 @@ public partial class Hnsw
         /// whenever it wants to offload a computation, and the runner is then taking care of running the code,
         /// 
         /// </summary>
+        private const int DispatchBatchK = 8; // items per ThreadPool dispatch (coalescing factor)
+
+        private sealed class BatchExecutor : IThreadPoolWorkItem
+        {
+            public readonly WorkItem[] Items = new WorkItem[DispatchBatchK];
+            public int Count;
+
+            public void Execute()
+            {
+                int n = Count;
+                if (n == 0)
+                    return;
+                NodePlacementRunner runner = Items[0].Runner;
+                for (int i = 0; i < n; i++)
+                {
+                    Items[i].ExecuteDeferred(); // no _ready.Set per item
+                    Items[i] = null;
+                }
+                Count = 0;
+                runner.SignalReady(); // single signal for the whole batch
+            }
+        }
+
         private class NodePlacementRunner
         {
+            // Instrumentation: dispatch volume per Run() invocation.
+            private long _waveCount;
+            private long _dispatchCount;          // total UnsafeQueueUserWorkItem calls (BATCH dispatches)
+            private long _itemsCount;             // total WorkItems handed off (>= _dispatchCount with batching)
+            private long _waveItemsMin = long.MaxValue;
+            private long _waveItemsMax;
+            private long _waveItemsSum;
+            private long _waveTicksSum;           // total wall ticks across all waves (excluding initial Wait)
+            private long _preloadDispatches;      // batch dispatches via slow path (with bulk preload)
+            private long _fastPathDispatches;     // batch dispatches via _allVectorsInMemory fast path
+            private long _reEnqueues;             // items re-enqueued (no work after preloading)
+            private long _itemsCoalesced;         // items packed into batches
+
+            // Pending batch buffer used while emitting a wave. Allocated lazily; reused across waves.
+            private BatchExecutor _pendingBatch;
+
             private readonly int _activeTasksCount;
             private int _completed;
             private readonly ManualResetEventSlim _ready = new();
@@ -750,12 +789,14 @@ public partial class Hnsw
             
             public void Run()
             {
+                var totalSw = System.Diagnostics.Stopwatch.StartNew();
                 List<long> batch = [];
                 while (true)
                 {
                     _ready.Wait();
                     _ready.Reset();
-                    
+                    var waveSw = System.Diagnostics.Stopwatch.StartNew();
+
                     while(_placementTasks.TryDequeue(out var it))
                     {
                         if (it.MoveNext())
@@ -781,11 +822,11 @@ public partial class Hnsw
                             throw new AggregateException(_errors);
                         if (_errorCts.IsCancellationRequested == false && _mainCts.IsCancellationRequested)
                         {
-                            // If _mainCts is canceled and _errorCts is not, then we need to throw 
+                            // If _mainCts is canceled and _errorCts is not, then we need to throw
                             // to indicate that we're done due to operation cancellation!
                             _mainCts.Token.ThrowIfCancellationRequested();
                         }
-                            
+                        EmitRunSummary(totalSw.ElapsedMilliseconds);
                         return; // done
                     }
                     
@@ -794,18 +835,27 @@ public partial class Hnsw
                         // Fast path: every previously touched node is resident, so the bulk preload
                         // scan has nothing to find. Dispatch each item directly through AfterPreloading
                         // and skip RegisterForPreloading entirely.
+                        long fastDispatchedThisWave = 0;
+                        bool anyReenqueue = false;
                         for (int index = 0; index < _items.Count; index++)
                         {
                             WorkItem item = _items[index];
                             if (item.Owner.AfterPreloading(item.CurrentNodeIndex, item.Level))
                             {
-                                ThreadPool.UnsafeQueueUserWorkItem(item, preferLocal: false);
+                                DispatchBatched(item, ref fastDispatchedThisWave);
                             }
                             else
                             {
-                                Enqueue(item.Iterator);
+                                EnqueueDeferred(item.Iterator);
+                                _reEnqueues++;
+                                anyReenqueue = true;
                             }
                         }
+                        FlushPendingBatch(ref fastDispatchedThisWave);
+                        if (anyReenqueue)
+                            SignalReady();
+                        _fastPathDispatches += fastDispatchedThisWave;
+                        AccountWave(fastDispatchedThisWave, waveSw.ElapsedTicks);
 
                         _items.Clear();
                         continue;
@@ -814,6 +864,8 @@ public partial class Hnsw
                     // we executed all that we could, now let's check if we have
                     // any edges to load that we can do in bulk
                     batch.Clear();
+                    long slowDispatchedThisWave = 0;
+                    bool anyReenqueueSlow = false;
                     for (int index = 0; index < _items.Count; index++)
                     {
                         WorkItem item = _items[index];
@@ -825,11 +877,13 @@ public partial class Hnsw
                         _items[index] = null; // skip it in the rest of the process
                         if (item.Owner.AfterPreloading(item.CurrentNodeIndex, item.Level) is false)
                         {
-                            Enqueue(item.Iterator);
+                            EnqueueDeferred(item.Iterator);
+                            _reEnqueues++;
+                            anyReenqueueSlow = true;
                             continue; // no work to do, everything was already visited
                         }
 
-                        ThreadPool.UnsafeQueueUserWorkItem(item, preferLocal: false);
+                        DispatchBatched(item, ref slowDispatchedThisWave);
                     }
 
                     var batchSpan = CollectionsMarshal.AsSpan(batch);
@@ -850,18 +904,78 @@ public partial class Hnsw
 
                         if (item.Owner.AfterPreloading(item.CurrentNodeIndex, item.Level))
                         {
-                            ThreadPool.UnsafeQueueUserWorkItem(item, preferLocal: false);
+                            DispatchBatched(item, ref slowDispatchedThisWave);
                         }
                         else
                         {
                             // this means that there is no work to do (all the nodes were already visited)
                             // so we can re-schedule this immediately
-                            Enqueue(item.Iterator);
+                            EnqueueDeferred(item.Iterator);
+                            _reEnqueues++;
+                            anyReenqueueSlow = true;
                         }
                     }
+                    FlushPendingBatch(ref slowDispatchedThisWave);
+                    if (anyReenqueueSlow)
+                        SignalReady();
+                    _preloadDispatches += slowDispatchedThisWave;
+                    AccountWave(slowDispatchedThisWave, waveSw.ElapsedTicks);
 
                     _items.Clear();
                 }
+            }
+
+            // Adds an item to the pending batch buffer; flushes (dispatches) when full.
+            // Returns the running per-wave dispatch count delta.
+            private void DispatchBatched(WorkItem item, ref long batchDispatchesThisWave)
+            {
+                _itemsCoalesced++;
+                var pending = _pendingBatch ??= new BatchExecutor();
+                pending.Items[pending.Count++] = item;
+                if (pending.Count >= DispatchBatchK)
+                {
+                    ThreadPool.UnsafeQueueUserWorkItem(pending, preferLocal: false);
+                    batchDispatchesThisWave++;
+                    _pendingBatch = new BatchExecutor();
+                }
+            }
+
+            // Flush any partial batch at the end of the wave.
+            private void FlushPendingBatch(ref long batchDispatchesThisWave)
+            {
+                var pending = _pendingBatch;
+                if (pending != null && pending.Count > 0)
+                {
+                    ThreadPool.UnsafeQueueUserWorkItem(pending, preferLocal: false);
+                    batchDispatchesThisWave++;
+                    _pendingBatch = null;
+                }
+            }
+
+            private void AccountWave(long batchDispatches, long elapsedTicks)
+            {
+                _waveCount++;
+                _dispatchCount += batchDispatches;
+                if (batchDispatches < _waveItemsMin) _waveItemsMin = batchDispatches;
+                if (batchDispatches > _waveItemsMax) _waveItemsMax = batchDispatches;
+                _waveItemsSum += batchDispatches;
+                _waveTicksSum += elapsedTicks;
+            }
+
+            private void EmitRunSummary(long totalMs)
+            {
+                if (_waveCount == 0)
+                    return;
+                long minBatches = _waveItemsMin == long.MaxValue ? 0 : _waveItemsMin;
+                double avgBatches = (double)_waveItemsSum / _waveCount;
+                double avgWaveMs = _waveTicksSum / (double)System.Diagnostics.Stopwatch.Frequency * 1000.0 / _waveCount;
+                double itemsPerBatch = _dispatchCount == 0 ? 0 : (double)_itemsCoalesced / _dispatchCount;
+                Console.WriteLine(
+                    $"[HNSW.Run] tasks={_activeTasksCount} K={DispatchBatchK} waves={_waveCount} " +
+                    $"batchDispatches={_dispatchCount} items={_itemsCoalesced} avgItemsPerBatch={itemsPerBatch:F2} " +
+                    $"fast={_fastPathDispatches} slow={_preloadDispatches} reenq={_reEnqueues} " +
+                    $"batches/wave min={minBatches} avg={avgBatches:F1} max={_waveItemsMax} " +
+                    $"wave_avg_ms={avgWaveMs:F2} run_ms={totalMs}");
             }
             
             
@@ -881,10 +995,24 @@ public partial class Hnsw
             }
 
             public void Enqueue(IEnumerator<WorkItem> it)
-            { 
+            {
                 _placementTasks.Enqueue(it);
                 _ready.Set();
             }
+
+            // Variant for callers that will batch multiple enqueues and then call SignalReady() once.
+            // Avoids redundant _ready.Set() calls (each Set has a memory barrier + allocation cost).
+            public void EnqueueDeferred(IEnumerator<WorkItem> it)
+            {
+                _placementTasks.Enqueue(it);
+            }
+
+            public void ErrorDeferred(IEnumerator<WorkItem> it, Exception exception)
+            {
+                _placementErrors.Enqueue((exception, it));
+            }
+
+            public void SignalReady() => _ready.Set();
 
             public void Error(IEnumerator<WorkItem> it, Exception exception)
             {
@@ -915,8 +1043,24 @@ public partial class Hnsw
         {
             public NodePlacement Owner;
             public IEnumerator<WorkItem> Iterator;
+            public NodePlacementRunner Runner => runner;
 
             protected abstract void DoWork();
+
+            // Used by BatchExecutor: runs work and enqueues result without signaling _ready
+            // (BatchExecutor signals once after the whole batch).
+            internal void ExecuteDeferred()
+            {
+                try
+                {
+                    DoWork();
+                    runner.EnqueueDeferred(Iterator);
+                }
+                catch (Exception e)
+                {
+                    runner.ErrorDeferred(Iterator, e);
+                }
+            }
 
             void IThreadPoolWorkItem.Execute()
             {
