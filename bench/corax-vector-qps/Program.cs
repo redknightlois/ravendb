@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Corax;
 using Corax.Indexing;
 using Corax.Mappings;
@@ -38,10 +39,26 @@ bool verify  = args.Contains("--verify");
 bool withInt8 = verify || args.Contains("--with-int8");
 bool skipQps = args.Contains("--no-qps");
 bool forceBigDataset = args.Contains("--big-dataset");
+bool reuse   = args.Contains("--reuse");
+bool cycle   = args.Contains("--cycle"); // cache-friendly: workers cycle through queryBytes (queries repeat); off = partitioned (each query executed once)
 int commitEvery = int.MaxValue;
+int nqOverride = -1;
+int workersOverride = -1;
 for (int ai = 0; ai < args.Length; ai++)
+{
     if (args[ai] == "--commit-every" && ai + 1 < args.Length && int.TryParse(args[ai + 1], out var ce))
         commitEvery = ce;
+    if (args[ai] == "--nq" && ai + 1 < args.Length && int.TryParse(args[ai + 1], out var nq))
+        nqOverride = nq;
+    if (args[ai] == "--workers" && ai + 1 < args.Length && int.TryParse(args[ai + 1], out var w))
+        workersOverride = w;
+}
+int Workers = workersOverride > 0 ? workersOverride : Math.Max(1, Environment.ProcessorCount);
+
+int nodeCacheSize = 0;
+for (int ai = 0; ai < args.Length; ai++)
+    if (args[ai] == "--node-cache" && ai + 1 < args.Length && int.TryParse(args[ai + 1], out var nc))
+        nodeCacheSize = nc;
 
 int N, NQ;
 if (big) { N = verify ? 250_000 : 100_000; NQ = verify ? 1000 : 500; }
@@ -50,9 +67,14 @@ else     { N = verify ? 100_000 :  25_000; NQ = verify ?  500 : 200; }
 for (int ai = 0; ai < args.Length; ai++)
 {
     if (args[ai] == "--commit-every") { ai++; continue; } // skip value
+    if (args[ai] == "--nq") { ai++; continue; }
+    if (args[ai] == "--workers") { ai++; continue; }
+    if (args[ai] == "--node-cache") { ai++; continue; }
     if (args[ai].StartsWith("--")) continue;              // bool flag
     if (int.TryParse(args[ai], out var nArg)) { N = nArg; NQ = Math.Max(NQ, 500); }
 }
+
+if (nqOverride > 0) NQ = nqOverride;
 
 const int EmbDataFieldIdx = 3;
 const string BenchRoot = "/mnt/work/tq-bench";
@@ -60,7 +82,7 @@ const double QueryGateSeconds = 10.0;
 
 Console.WriteLine($"TQ-Insert DBpedia-OpenAI3 (D={D}): N≤{N} NQ={NQ} k={K}  M={M} efC={EfConstruction}");
 Console.WriteLine($"Mode: {(big ? "BIG" : "STD")} {(verify ? "verify" : "dev")}  Int8: {(withInt8 ? "yes" : "no")}");
-Console.WriteLine($"EF:   {string.Join(", ", EfValues)}  query-gate: {QueryGateSeconds:F0}s per ef");
+Console.WriteLine($"EF:   {string.Join(", ", EfValues)}  query-gate: {QueryGateSeconds:F0}s per ef  workers: {Workers}  query-mode: {(cycle ? "cycle (cache-friendly)" : "partition (cache-hostile)")}  node-cache: {(nodeCacheSize > 0 ? nodeCacheSize.ToString("N0") + " nodes" : "disabled")}");
 Console.WriteLine();
 
 // ---- dataset ----
@@ -83,12 +105,18 @@ var rng = new Random(42);
 var qIdx = Enumerable.Range(0, N).OrderBy(_ => rng.Next()).Take(NQ).ToArray();
 var queries = qIdx.Select(i => (float[])allVectors[i].Clone()).ToArray();
 
+// Recall ground truth scales O(NQ × N), so we cap it: only the first
+// `truthCap` queries get a real top-K reference set; the rest get an
+// empty set (CountHits returns 0 for those, so they don't move recall).
+// QPS, however, is measured across ALL NQ queries.
+int truthCap = Math.Min(NQ, 2000);
 var truth = new HashSet<long>[NQ];
+for (int q = truthCap; q < NQ; q++) truth[q] = new HashSet<long>();
 if (!skipQps)
 {
-    Console.Write("Computing ground truth (brute force)... ");
+    Console.Write($"Computing ground truth (brute force, first {truthCap:N0} of {NQ:N0})... ");
     sw.Restart();
-    Parallel.For(0, NQ, q =>
+    Parallel.For(0, truthCap, q =>
     {
         var sims = new (float sim, long id)[N];
         var qv = queries[q];
@@ -108,7 +136,7 @@ if (!skipQps)
 }
 else
 {
-    for (int q = 0; q < NQ; q++) truth[q] = new HashSet<long>();
+    for (int q = 0; q < truthCap; q++) truth[q] = new HashSet<long>();
     Console.WriteLine("(skipping ground truth — --no-qps)");
 }
 Console.WriteLine();
@@ -136,9 +164,12 @@ void RunVariant(string label, VectorEmbeddingType embType, Func<float[], byte[]>
 {
     string slug = label.Replace(" ", "_").Replace("(", "").Replace(")", "");
     string indexPath = Path.Combine(BenchRoot, slug);
-    if (Directory.Exists(indexPath))
-        Directory.Delete(indexPath, true);
-    Directory.CreateDirectory(indexPath);
+    if (!reuse)
+    {
+        if (Directory.Exists(indexPath))
+            Directory.Delete(indexPath, true);
+        Directory.CreateDirectory(indexPath);
+    }
 
     var mapping = IndexFieldsMappingBuilder
         .CreateForWriter(false)
@@ -153,22 +184,26 @@ void RunVariant(string label, VectorEmbeddingType embType, Func<float[], byte[]>
 
     // Precompute vector byte payloads so the insert loop measures the HNSW path,
     // not quantization cost (quantization is I/O-free and always amortized).
-    var vecBytes = new byte[N][];
-    for (int i = 0; i < N; i++)
+    // Skip when --reuse: we won't insert, no need for the 6 GB byte buffer.
+    var vecBytes = reuse ? null! : new byte[N][];
+    if (!reuse)
     {
-        vecBytes[i] = quantize != null
-            ? quantize(allVectors[i])
-            : MemoryMarshal.AsBytes<float>(allVectors[i]).ToArray();
-        // Release per-vector float buffer as we go — at N=1M each float[] is ~6 KB,
-        // total ~6 GB; holding both allVectors and vecBytes is the usual OOM trigger.
-        // Queries are cloned earlier (qIdx) so they survive this nulling.
+        for (int i = 0; i < N; i++)
+        {
+            vecBytes[i] = quantize != null
+                ? quantize(allVectors[i])
+                : MemoryMarshal.AsBytes<float>(allVectors[i]).ToArray();
+            // Release per-vector float buffer as we go — at N=1M each float[] is ~6 KB,
+            // total ~6 GB; holding both allVectors and vecBytes is the usual OOM trigger.
+            // Queries are cloned earlier (qIdx) so they survive this nulling.
+            if (skipQps)
+                allVectors[i] = null!;
+        }
         if (skipQps)
-            allVectors[i] = null!;
-    }
-    if (skipQps)
-    {
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
     }
 
     var queryBytes = new byte[NQ][];
@@ -182,52 +217,67 @@ void RunVariant(string label, VectorEmbeddingType embType, Func<float[], byte[]>
     // transaction retains ~32KB scratch per vector (big overflow pages), so
     // holding 500K+ uncommitted thrashes the memory-mapped scratch buffer.
     // Commit every `commitEvery` records to bound scratch working set.
-    Console.Write($"  [{label}] inserting {N:N0} vectors... ");
-    var insertSw = Stopwatch.StartNew();
+    double insertSec = 0;
+    double insertVps = 0;
+    if (!reuse)
     {
-        var envOpts = StorageEnvironmentOptions.ForPathForTests(indexPath);
-        using var env = new StorageEnvironment(envOpts);
-        long regMsTotal = 0, commitMsTotal = 0;
-        long lastMs = 0;
-        long regStep = skipQps ? 50_000 : long.MaxValue;
-        var regSw = new Stopwatch();
-        var commitSw2 = new Stopwatch();
-
-        int batchStart = 0;
-        while (batchStart < N)
+        Console.Write($"  [{label}] inserting {N:N0} vectors... ");
+        var insertSw = Stopwatch.StartNew();
         {
-            int batchEnd = (int)Math.Min((long)batchStart + commitEvery, N);
-            var writer = new IndexWriter(env, mapping, SupportedFeatures.All);
-            regSw.Restart();
-            for (int i = batchStart; i < batchEnd; i++)
+            var envOpts = StorageEnvironmentOptions.ForPathForTests(indexPath);
+            using var env = new StorageEnvironment(envOpts);
+            long regMsTotal = 0, commitMsTotal = 0;
+            long lastMs = 0;
+            long regStep = skipQps ? 50_000 : long.MaxValue;
+            var regSw = new Stopwatch();
+            var commitSw2 = new Stopwatch();
+
+            int batchStart = 0;
+            int batchIdx = 0;
+            while (batchStart < N)
             {
-                var id = $"vec/{i + 1}";
-                using var entry = writer.Index(id);
-                entry.Write(0, System.Text.Encoding.UTF8.GetBytes(id));
-                entry.WriteVector(1, "Vector", vecBytes[i]);
-                entry.EndWriting();
-                if ((i + 1) % regStep == 0)
+                int batchEnd = (int)Math.Min((long)batchStart + commitEvery, N);
+                var writer = new IndexWriter(env, mapping, SupportedFeatures.All);
+                regSw.Restart();
+                for (int i = batchStart; i < batchEnd; i++)
                 {
-                    long now = insertSw.ElapsedMilliseconds;
-                    long step = now - lastMs;
-                    long workingSetMb = Process.GetCurrentProcess().WorkingSet64 >> 20;
-                    long gen2 = GC.CollectionCount(2);
-                    Console.Error.WriteLine($"    reg[{(i + 1) / 1000}K] step={step}ms total={now}ms RSS={workingSetMb}MB gen2={gen2}");
-                    lastMs = now;
+                    var id = $"vec/{i + 1}";
+                    using var entry = writer.Index(id);
+                    entry.Write(0, System.Text.Encoding.UTF8.GetBytes(id));
+                    entry.WriteVector(1, "Vector", vecBytes[i]);
+                    entry.EndWriting();
+                    if ((i + 1) % regStep == 0)
+                    {
+                        long now = insertSw.ElapsedMilliseconds;
+                        long step = now - lastMs;
+                        long workingSetMb = Process.GetCurrentProcess().WorkingSet64 >> 20;
+                        long gen2 = GC.CollectionCount(2);
+                        Console.Error.WriteLine($"    reg[{(i + 1) / 1000}K] step={step}ms total={now}ms RSS={workingSetMb}MB gen2={gen2}");
+                        lastMs = now;
+                    }
                 }
+                long batchRegMs = regSw.ElapsedMilliseconds;
+                regMsTotal += batchRegMs;
+                commitSw2.Restart();
+                writer.Commit();
+                long batchCommitMs = commitSw2.ElapsedMilliseconds;
+                commitMsTotal += batchCommitMs;
+                writer.Dispose();
+                long rssMb = Process.GetCurrentProcess().WorkingSet64 >> 20;
+                Console.Error.WriteLine($"    batch[{batchIdx,3}] {batchStart / 1000}K..{batchEnd / 1000}K  reg={batchRegMs,5}ms commit={batchCommitMs,5}ms  RSS={rssMb}MB");
+                batchStart = batchEnd;
+                batchIdx++;
             }
-            regMsTotal += regSw.ElapsedMilliseconds;
-            commitSw2.Restart();
-            writer.Commit();
-            commitMsTotal += commitSw2.ElapsedMilliseconds;
-            writer.Dispose();
-            batchStart = batchEnd;
+            Console.Write($"[reg={regMsTotal}ms commit={commitMsTotal}ms commitEvery={(commitEvery == int.MaxValue ? "∞" : commitEvery.ToString())}] ");
         }
-        Console.Write($"[reg={regMsTotal}ms commit={commitMsTotal}ms commitEvery={(commitEvery == int.MaxValue ? "∞" : commitEvery.ToString())}] ");
+        insertSec = insertSw.Elapsed.TotalSeconds;
+        insertVps = N / insertSec;
+        Console.WriteLine($"{insertSec:F1}s ({insertVps:F0} vec/s)");
     }
-    double insertSec = insertSw.Elapsed.TotalSeconds;
-    double insertVps = N / insertSec;
-    Console.WriteLine($"{insertSec:F1}s ({insertVps:F0} vec/s)");
+    else
+    {
+        Console.WriteLine($"  [{label}] --reuse: skipping insert, querying existing graph at {indexPath}");
+    }
 
     // -- QUERIES --
     var qps = new double[EfValues.Length];
@@ -238,12 +288,39 @@ void RunVariant(string label, VectorEmbeddingType embType, Func<float[], byte[]>
         using var env = new StorageEnvironment(envOpts);
         using var bsc = new ByteStringContext(SharedMultipleUseFlag.None);
 
+        // Build a single NodeCache for the "Vector" field if requested. Mirrors
+        // CoraxIndexPersistence.BuildVectorCacheSnapshot: keyed by the field-name
+        // slice via SliceComparer, immutable after construction so all workers
+        // can share it.
+        Dictionary<Slice, Hnsw.NodeCache> caches = null;
+        Slice fieldNameSlice = default;
+        IDisposable fieldNameScope = null;
+        if (nodeCacheSize > 0)
+        {
+            fieldNameScope = Slice.From(bsc, "Vector", out fieldNameSlice);
+            using var rtx = env.ReadTransaction();
+            var cacheBuildSw = Stopwatch.StartNew();
+            var cache = Hnsw.NodeCache.Build(rtx.LowLevelTransaction, fieldNameSlice, nodeCacheSize);
+            cacheBuildSw.Stop();
+            if (cache != null && cache.Count > 0)
+            {
+                caches = new Dictionary<Slice, Hnsw.NodeCache>(SliceComparer.Instance) { [fieldNameSlice] = cache };
+                Console.WriteLine($"  [{label}] node-cache: built {cache.Count:N0} nodes in {cacheBuildSw.Elapsed.TotalSeconds:F1}s (budget {nodeCacheSize:N0})");
+            }
+            else
+            {
+                Console.WriteLine($"  [{label}] node-cache: empty (budget {nodeCacheSize:N0}) — disabled");
+            }
+        }
+
         Warmup(env, mapping, bsc, queryBytes);
 
         for (int e = 0; e < EfValues.Length; e++)
         {
-            (qps[e], recall[e]) = RunQueriesGated(env, mapping, bsc, queryBytes, truth, EfValues[e]);
+            (qps[e], recall[e]) = RunQueriesGated(env, mapping, queryBytes, truth, EfValues[e], Workers, cycle, caches);
         }
+
+        fieldNameScope?.Dispose();
     }
 
     // -- row --
@@ -257,33 +334,78 @@ void RunVariant(string label, VectorEmbeddingType embType, Func<float[], byte[]>
 }
 
 static (double qps, double recall) RunQueriesGated(
-    StorageEnvironment env, IndexFieldsMapping mapping, ByteStringContext bsc,
-    byte[][] queryBytes, HashSet<long>[] truth, int ef)
+    StorageEnvironment env, IndexFieldsMapping mapping,
+    byte[][] queryBytes, HashSet<long>[] truth, int ef, int parallelism, bool cycle,
+    Dictionary<Slice, Hnsw.NodeCache> nodeCaches)
 {
-    using var searcher = new IndexSearcher(env, mapping);
-    var metadata = mapping.GetByFieldId(1).Metadata;
-    var ids = new long[K * 2];
-
-    int passes = 0;
-    int hits = 0, total = 0;
-    double elapsed;
+    long totalHits = 0, totalCount = 0, totalQueries = 0;
     var sw = Stopwatch.StartNew();
-    do
-    {
-        for (int q = 0; q < queryBytes.Length; q++)
-        {
-            using var vv = MakeVectorValue(bsc, queryBytes[q]);
-            var match = searcher.VectorSearch(metadata, vv, -1f, ef, false, true, null, scanningThreshold: 0);
-            int c = match.Fill(ids);
-            hits += CountHits(ids, c, truth[q]);
-            total += Math.Min(c, K);
-        }
-        passes++;
-        elapsed = sw.Elapsed.TotalSeconds;
-    } while (elapsed < QueryGateSeconds);
 
-    double qps = (queryBytes.Length * passes) / elapsed;
-    double recall = total > 0 ? (double)hits / total : 0;
+    // Two modes:
+    //   cycle=true  (cache-friendly): every worker round-robins through the
+    //                full queryBytes, so the same query vectors are
+    //                re-executed many times within the gate. L3 stays hot
+    //                across iterations — gives "best-case" QPS.
+    //   cycle=false (cache-hostile, default): workers partition queryBytes
+    //                into disjoint slices and walk their slice once. No
+    //                query is executed twice across all workers — gives
+    //                "worst-case / production-traffic-shape" QPS.
+    var po = new ParallelOptions { MaxDegreeOfParallelism = parallelism };
+    int chunk = queryBytes.Length / parallelism;
+    Parallel.For(0, parallelism, po, t =>
+    {
+        using var searcher = new IndexSearcher(env, mapping);
+        if (nodeCaches != null) searcher.AttachVectorNodeCaches(nodeCaches);
+        using var bsc = new ByteStringContext(SharedMultipleUseFlag.None);
+        var metadata = mapping.GetByFieldId(1).Metadata;
+        var ids = new long[K * 2];
+        long localHits = 0, localCount = 0, localQueries = 0;
+
+        if (cycle)
+        {
+            int idx = t;
+            while (sw.Elapsed.TotalSeconds < QueryGateSeconds)
+            {
+                int q = idx % queryBytes.Length;
+                using var vv = MakeVectorValue(bsc, queryBytes[q]);
+                var match = searcher.VectorSearch(metadata, vv, -1f, ef, false, true, null, scanningThreshold: 0);
+                int c = match.Fill(ids);
+                if (truth[q].Count > 0)
+                {
+                    localHits += CountHits(ids, c, truth[q]);
+                    localCount += Math.Min(c, K);
+                }
+                localQueries++;
+                idx++;
+            }
+        }
+        else
+        {
+            int start = t * chunk;
+            int end = (t == parallelism - 1) ? queryBytes.Length : start + chunk;
+
+            for (int q = start; q < end && sw.Elapsed.TotalSeconds < QueryGateSeconds; q++)
+            {
+                using var vv = MakeVectorValue(bsc, queryBytes[q]);
+                var match = searcher.VectorSearch(metadata, vv, -1f, ef, false, true, null, scanningThreshold: 0);
+                int c = match.Fill(ids);
+                if (truth[q].Count > 0)
+                {
+                    localHits += CountHits(ids, c, truth[q]);
+                    localCount += Math.Min(c, K);
+                }
+                localQueries++;
+            }
+        }
+
+        Interlocked.Add(ref totalHits, localHits);
+        Interlocked.Add(ref totalCount, localCount);
+        Interlocked.Add(ref totalQueries, localQueries);
+    });
+
+    double elapsed = sw.Elapsed.TotalSeconds;
+    double qps = totalQueries / elapsed;
+    double recall = totalCount > 0 ? (double)totalHits / totalCount : 0;
     return (qps, recall);
 }
 
