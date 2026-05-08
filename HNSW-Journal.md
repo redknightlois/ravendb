@@ -738,3 +738,109 @@ A/B is push-button.
 The pre-Vamana state (K=8 + bench infra) is captured on
 `v7.2-hnsw-parallel-batch-k8` (commits `5457307fd11`,
 `cc70c18ef59`). All §18+ work happens on a branch off that snapshot.
+
+## §18 — Vamana-lite v0 landed
+
+Branch: `v7.2-hnsw-vamana-lite`. Companion design note:
+`DESIGN-VAMANA-LITE.md`.
+
+### Shape
+
+`NodePlacementRunner.RunTwoPhase` replaces the wave-based `Run` when
+env-var `RAVEN_HNSW_TWO_PHASE=1` is set. Default off; the wave path
+remains the fallback so unset env var = bit-for-bit current behavior.
+
+Four phases, batched per Voron tx:
+
+- **A — parallel search.** N workers (`_activeTasksCount`) each grab
+  next-unassigned new-node via `Interlocked.Increment`, run the
+  full search loop inline (no yields, no ThreadPool round-trips), and
+  write a `PlacementPlan` to `plans[idx]`. Pure read over
+  `_searchState`; per-thread scratch in `NodePlacement`.
+- **B — serial apply (LLT thread).** Walk plans in original
+  new-node order, append candidates to the new node's edge list and
+  back-edges to each candidate's edge list. Collect any
+  `(level, edgeIdx)` whose list overflows M into `overfullCollector`.
+- **C — parallel prune compute.** Workers run
+  `FilterEdgesHeuristicWorker.RunInline` over the overfull set.
+  Pure read; result written to a per-pair `PrunedEdges` array.
+- **D — serial prune apply (LLT thread).** Walk results, rewrite
+  each overfull edge list to its pruned set. Mirror into
+  `EdgesIndexesPerLevel` when the cache is in sync.
+
+Phase A is the win: each worker drives an entire node placement to
+completion without ever round-tripping to the coordinator, so the
+"84% wait" wave shape (§15) collapses to compute-bound.
+
+### One real bug
+
+Phase A workers can't perform LLT-allocator side-effects, but
+the wave path's `RegisterForPreloading` quietly calls
+`SetCapacity` on `EdgesPerLevel` for every node it's about to read
+(`Hnsw.Parallel.cs:1698`). Phase A skips that, so when Phase B's
+candidate loop reaches `edge.EdgesPerLevel[level]` for a node whose
+out-edges happen to live at lower levels (e.g. the entry point in
+the first batch), the indexer dereferences a null storage pointer
+and `NativeList<T>.this[int]` returns a ref to nullspace —
+`NullReferenceException` on first access.
+
+Fix: Phase B's candidate loop calls `SetCapacity(level + 1)` on
+both `EdgesPerLevel` and `EdgesIndexesPerLevel` before the indexer
+access, gated on `IsFromCache == false` (cached nodes already have
+the storage). This replicates the LLT-side-effect that Phase A
+deferred.
+
+Diagnosis: on a hung Release build, neither dbg nor netcoredbg
+breakpoints fired (Release optimizations strip line-boundary stops).
+The actual breakthrough was the index-errors HTTP endpoint — it
+captured the NRE stack with file:line and pointed straight at
+`NativeList.cs:67`. Recorded in feedback memory; in retrospect, that
+endpoint should be the first stop for any "indexing hung" diagnosis
+in this repo.
+
+### Wallclock
+
+Same machine, same git, same dataset (Sphere-1M, 1M docs,
+768-dim float32 cosine, M=16, efConstruction=200). Median of three
+fresh-build runs each, `--Logs.Mode=None`:
+
+| build              | 1M wall | delta |
+|--------------------|---------|-------|
+| wave (v7.2-K8)     | 163.91s | —     |
+| Vamana-lite (env=1)| 102.06s | -38%  |
+
+Top-of-htop CPU during build: wave ≈ 360% (3-4 cores), Vamana-lite
+≈ 1900-2200% (19-22 cores). The ThreadPool actually saturates
+because Phase A workers don't park waiting for the coordinator.
+
+### Recall validation
+
+Both branches built fresh from the same Sphere-1M docs. Then
+`RavenBench recall` (brute-force `exact()` ground truth) at K=1/5/10
+across efSearch=64/128/256:
+
+| efSearch | wave recall@10 | two-phase recall@10 | delta  |
+|----------|----------------|---------------------|--------|
+| 64       | 55.80 %        | 54.80 %             | -1.0pp |
+| 128      | 61.70 %        | 59.80 %             | -1.9pp |
+| 256      | 67.20 %        | 65.70 %             | -1.5pp |
+
+All three deltas inside the design doc's 2pp tolerance. Two-phase
+loses ≤2pp consistently, exactly the cost predicted from giving up
+in-flight visibility within a Phase A batch.
+
+(Sphere-1M absolute recall numbers being mediocre at low ef is a
+separate concern with the dataset/index parameters — the same shape
+shows on wave. It's not a regression introduced here.)
+
+### Open follow-ups
+
+- Per-pair overfull dedup (`overfullKeys` HashSet) in Phase B is a
+  logical no-op once Phase C is deterministic per `(level, edgeIdx)`;
+  could be removed for clarity. Kept for now since the cost is trivial.
+- `AddEdgesFromInFlightNodes` is disabled in two-phase. Recall
+  numbers don't motivate bringing it back; if it ever does, the
+  fix is mini-batches inside Phase A (each mini-batch sees prior
+  mini-batches' Phase B writes via a serial flush in between).
+- Wave path retained as fallback. Once Vamana-lite has bake time
+  in nightly, flip the default and delete the wave path.
