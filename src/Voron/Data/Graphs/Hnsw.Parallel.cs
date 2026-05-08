@@ -118,13 +118,21 @@ public partial class Hnsw
 
         public int MaxConcurrentBatches = 512;
 
+        // Vamana-lite gate. Set RAVEN_HNSW_TWO_PHASE=1 to dispatch InsertVectorsToGraph
+        // to the two-phase build (search-then-link) instead of the wave-based runner.
+        // Read once per process so tests can tweak via env without bouncing the server,
+        // but a stable gate during a single index reset.
+        private static readonly bool UseTwoPhaseBuild =
+            string.Equals(Environment.GetEnvironmentVariable("RAVEN_HNSW_TWO_PHASE"), "1",
+                StringComparison.Ordinal);
+
         private void InsertVectorsToGraph(ref ContextBoundNativeList<byte> byteBuffer, CancellationToken token)
         {
             if (_searchState.TryGetLocationForNode(EntryPointId, out var entryPointNode) is false)
             {
                 if (_searchState.CreatedNodes is 0)
                     return;
-                
+
                 _nextNodeIndex++; // do not attempt to insert the first node, since it is the graph root
                 ref Node startingNode = ref _searchState.Nodes[0];
                 _searchState.EnsureEdgesOwned(ref startingNode);
@@ -139,7 +147,37 @@ public partial class Hnsw
             int numberOfBatches = Math.Max(1, _searchState.CreatedNodes / effectiveMaxConcurrentBatches);
             int maxTasks = Math.Min(numberOfBatches, effectiveMaxConcurrentBatches);
             NodePlacementRunner runner = new(this, maxTasks, token);
-            runner.Run();
+            if (UseTwoPhaseBuild)
+                runner.RunTwoPhase();
+            else
+                runner.Run();
+        }
+
+        // Captures the result of Phase A (parallel search-only) for one node.
+        // Phase B walks an array of these in node-index order and applies the
+        // mutations on the LLT thread.
+        internal struct PlacementPlan
+        {
+            // -1 means this slot was never populated (Phase A skipped or aborted).
+            public int NodeRandomLevel;
+            public int CurrentMaxLevel;
+            // CandidatesPerLevel[level] = node-indexes selected as out-edges from
+            // the new node at that level. Length == NodeRandomLevel + 1.
+            // Order matches what the wave path's _candidates list produces (closest-first
+            // after .Reverse() in NearestEdges).
+            public int[][] CandidatesPerLevel;
+
+            public bool IsValid => NodeRandomLevel >= 0;
+        }
+
+        // Captures one (level, existing-node-index) pair whose edge list overflowed M
+        // during Phase B back-edge addition. Phase C computes the heuristic-pruned
+        // replacement in PrunedEdges (parallel, read-only); Phase D writes it back.
+        internal struct OverfullPrune
+        {
+            public int Level;
+            public int EdgeIdx;
+            public int[] PrunedEdges; // null until Phase C populates
         }
 
         private class NodePlacement(Registration parent, NodePlacementRunner runner)
@@ -692,6 +730,344 @@ public partial class Hnsw
 
                 return _indexes.Count > 0; // has work
             }
+
+            // ----- Vamana-lite Phase A (search-only, parallel, no graph mutation) -----
+
+            // Replicates the per-WorkItem _indexes/_vectors setup that the wave path's
+            // RegisterForPreloading + AfterPreloading would do, but **without** invoking
+            // any LLT-thread allocator. Phase A worker threads must never allocate
+            // through the Voron transaction; this routine only reads. It uses the
+            // EdgesIndexesPerLevel cache when it is in sync with EdgesPerLevel, and
+            // otherwise resolves NodeIds via TryGetNodeById without rebuilding the cache.
+            // (The cache is left stale; Phase B / next batch will rebuild lazily.)
+            private void SetupSearchStateAtLevel(int currentNodeIndex, int level)
+            {
+                if (currentNodeIndex < 0)
+                    return;
+
+                ref var n = ref _searchState.GetNodeByIndex(currentNodeIndex);
+                _indexes.Clear();
+                _vectors.Clear();
+                if (MarkVisited(currentNodeIndex))
+                {
+                    _indexes.Add(currentNodeIndex);
+                    _vectors.Add(n.GetVectorUnmanagedSpan(_searchState));
+                }
+
+                if (_searchState.GetLevelCount(ref n) <= level)
+                    return; // node has no edges at this level — nothing more to add
+
+                var edgesSpan = _searchState.GetEdgesSpan(ref n, level);
+                bool cacheReady = n.EdgesIndexesPerLevel.Count > level
+                                  && n.EdgesIndexesPerLevel[level].Count == edgesSpan.Length;
+                if (cacheReady)
+                {
+                    ref var edgesIndexes = ref n.EdgesIndexesPerLevel[level];
+                    foreach (var idx in edgesIndexes)
+                    {
+                        if (MarkVisited(idx) is false)
+                            continue;
+                        _indexes.Add(idx);
+                        ref var edge = ref _searchState.GetNodeByIndex(idx);
+                        _vectors.Add(edge.GetVectorUnmanagedSpan(_searchState));
+                    }
+                }
+                else
+                {
+                    for (int i = 0; i < edgesSpan.Length; i++)
+                    {
+                        if (_searchState.TryGetNodeById(edgesSpan[i], out var idx) is false)
+                            continue;
+                        if (MarkVisited(idx) is false)
+                            continue;
+                        _indexes.Add(idx);
+                        ref var edge = ref _searchState.GetNodeByIndex(idx);
+                        _vectors.Add(edge.GetVectorUnmanagedSpan(_searchState));
+                    }
+                }
+            }
+
+            // Inline equivalent of SearchNearestAcrossLevels. No yields; calls the
+            // FindNearest worker's DoWork directly. Populates _nearestIndexes the same way.
+            private void SearchNearestAcrossLevelsInline(UnmanagedSpan from, int maxLevel, int insertedNodeIndex)
+            {
+                _nearestIndexes.Clear();
+                ClearVisited();
+                MarkVisited(insertedNodeIndex);
+                var currentNodeIndex = _searchState.GetNodeIndexById(EntryPointId);
+                var level = maxLevel;
+                var distance = float.MaxValue;
+                while (level >= 0)
+                {
+                    do
+                    {
+                        _findNearestWorker.Reset(from, currentNodeIndex, level);
+                        SetupSearchStateAtLevel(currentNodeIndex, level);
+                        _findNearestWorker.RunInline();
+                        if (_findNearestWorker.Distance >= distance)
+                            break;
+                        currentNodeIndex = _findNearestWorker.CurrentNodeIndex;
+                        distance = _findNearestWorker.Distance;
+                    } while (true);
+
+                    _nearestIndexes.Add(currentNodeIndex);
+                    level--;
+                }
+
+                _nearestIndexes.Reverse();
+            }
+
+            // Inline equivalent of NearestEdges. Populates _candidates with the level's
+            // selected neighbor set (same ordering convention as the yielding version:
+            // closest-first after the post-loop Reverse).
+            private void NearestEdgesInline(int startingPointIndex, int currentNodeIndex, UnmanagedSpan vector, int level)
+            {
+                Debug.Assert(_candidatesQ.Count == 0);
+                Debug.Assert(_nearestEdgesQ.Count == 0);
+                Debug.Assert(startingPointIndex != currentNodeIndex);
+
+                float lowerBound = float.MaxValue;
+                ClearVisited();
+                MarkVisited(currentNodeIndex);
+
+                _candidatesQ.Enqueue(startingPointIndex, -lowerBound);
+
+                while (_candidatesQ.TryDequeue(out var cur, out var curDistance))
+                {
+                    if (-curDistance < lowerBound &&
+                        _nearestEdgesQ.Count == _effectiveNumberOfCandidates)
+                        break;
+
+                    _processEdgesWorker.Reset(vector, lowerBound, cur, level);
+                    SetupSearchStateAtLevel(cur, level);
+                    _processEdgesWorker.RunInline();
+                    lowerBound = _processEdgesWorker.LowerBound;
+                }
+
+                _candidatesQ.Clear();
+                _candidates.Clear();
+                while (_nearestEdgesQ.TryDequeue(out var edgeId, out _))
+                {
+                    _candidates.Add(edgeId);
+                }
+                _candidates.Reverse();
+
+                if (_candidates.Count <= _searchState.Options.NumberOfEdges)
+                    return;
+
+                _indexes.Clear();
+                _vectors.Clear();
+                foreach (var candidate in _candidates)
+                {
+                    ref var n = ref _searchState.GetNodeByIndex(candidate);
+                    _indexes.Add(candidate);
+                    _vectors.Add(n.GetVectorUnmanagedSpan(_searchState));
+                }
+
+                _filterEdgesWorker.Reset(vector, -1, level);
+                _filterEdgesWorker.RunInline();
+            }
+
+            // Phase A entry: pure search, no graph mutation. Builds a PlacementPlan
+            // describing what edges this node would link to at each level. Only reads
+            // from _searchState; writes only to per-NodePlacement scratch and to
+            // plans[createdNodeIndex].
+            internal void ComputePlacementPlanInline(int createdNodeIndex, int currentNodeIndex, out PlacementPlan plan)
+            {
+                int currentMaxLevel = _searchState.Options.CurrentMaxLevel(_searchState.CreatedNodes - createdNodeIndex);
+                int nodeRandomLevel = GetLevelForNewNode(currentMaxLevel);
+
+                plan = new PlacementPlan
+                {
+                    NodeRandomLevel = nodeRandomLevel,
+                    CurrentMaxLevel = currentMaxLevel,
+                    CandidatesPerLevel = new int[nodeRandomLevel + 1][]
+                };
+
+                UnmanagedSpan insertedVector;
+                {
+                    ref var n = ref _searchState.GetNodeByIndex(currentNodeIndex);
+                    // No EnsureEdgesOwned, no SetCapacity, no AddEdgesFromInFlightNodes —
+                    // those are LLT-thread mutations deferred to ApplyPlacementPlan.
+                    insertedVector = n.GetVectorUnmanagedSpan(_searchState);
+                }
+
+                int numberOfCandidates = _searchState.Options.NumberOfCandidates;
+                int numberOfEdges = _searchState.Options.NumberOfEdges;
+                int level0EfC = ComputeTaperedEfConstructionForLevel0(createdNodeIndex, numberOfCandidates, numberOfEdges);
+
+                SearchNearestAcrossLevelsInline(insertedVector, currentMaxLevel, currentNodeIndex);
+
+                for (int level = nodeRandomLevel; level >= 0; level--)
+                {
+                    _effectiveNumberOfCandidates = level == 0 ? level0EfC : numberOfEdges;
+                    int startingPointIndex = _nearestIndexes[level];
+                    NearestEdgesInline(startingPointIndex, currentNodeIndex, insertedVector, level);
+
+                    if (_candidates.Count == 0)
+                        throw new InvalidOperationException(
+                            $"Vamana-lite Phase A: empty candidate set for level {level} (createdIdx={createdNodeIndex})");
+
+                    plan.CandidatesPerLevel[level] = _candidates.ToArray();
+                }
+            }
+
+            // Phase B entry: applies the new node's forward edges and the back-edges
+            // to its candidates. Runs on the LLT thread. Pruning of overfull existing
+            // nodes is deferred — Phase C computes prunes in parallel, Phase D applies
+            // them. Edge lists may temporarily exceed M between Phase B and Phase D;
+            // this is fine because nothing reads them during that window (Voron tx is
+            // suspended; no concurrent search on this graph state).
+            //
+            // Each (level, existing-edge-index) that overflowed M is recorded into
+            // overfullCollector. Duplicates within a single batch are suppressed via
+            // overfullKeys (a HashSet shared across plans by the caller).
+            internal void ApplyPlacementPlanDeferredPrune(
+                int currentNodeIndex,
+                in PlacementPlan plan,
+                List<OverfullPrune> overfullCollector,
+                HashSet<long> overfullKeys)
+            {
+                int numberOfEdges = _searchState.Options.NumberOfEdges;
+                {
+                    ref var n = ref _searchState.GetNodeByIndex(currentNodeIndex);
+                    _searchState.EnsureEdgesOwned(ref n);
+                    n.EdgesPerLevel.SetCapacity(_searchState.Llt.Allocator, plan.NodeRandomLevel + 1);
+                }
+
+                for (int level = plan.NodeRandomLevel; level >= 0; level--)
+                {
+                    var candidates = plan.CandidatesPerLevel[level];
+                    if (candidates is null || candidates.Length == 0)
+                        throw new InvalidOperationException("Vamana-lite Phase B: missing candidates for level " + level);
+
+                    ref var node = ref _searchState.GetNodeByIndex(currentNodeIndex);
+                    _searchState.EnsureEdgesOwned(ref node);
+                    ref var list = ref node.EdgesPerLevel[level];
+                    list.EnsureCapacityFor(_searchState.Llt.Allocator, candidates.Length);
+
+                    foreach (var edgeIdx in candidates)
+                    {
+                        Debug.Assert(edgeIdx != currentNodeIndex);
+                        ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
+                        list.AddUnsafe(edge.NodeId);
+
+                        _searchState.EnsureEdgesOwned(ref edge);
+                        // Phase A skipped the search-side-effect SetCapacity that the wave path
+                        // performs in RegisterForPreloading (Hnsw.Parallel.cs:1698). For
+                        // candidates that have never been touched at this level (e.g. the entry
+                        // point in the first batch, or any existing node whose own out-edges
+                        // happen to live at lower levels), EdgesPerLevel is unsized here and
+                        // an indexer access at [level] would deref a null storage pointer.
+                        if (edge.IsFromCache == false)
+                            edge.EdgesPerLevel.SetCapacity(_searchState.Llt.Allocator, level + 1);
+                        edge.EdgesIndexesPerLevel.SetCapacity(_searchState.Llt.Allocator, level + 1);
+
+                        ref var edgeList = ref edge.EdgesPerLevel[level];
+                        edgeList.Add(_searchState.Llt.Allocator, node.NodeId);
+
+                        if (edge.EdgesIndexesPerLevel.Count > level)
+                        {
+                            ref var edgeIndexes = ref edge.EdgesIndexesPerLevel[level];
+                            if (edgeIndexes.Count == edgeList.Count - 1)
+                                edgeIndexes.Add(_searchState.Llt.Allocator, currentNodeIndex);
+                        }
+
+                        if (edgeList.Count <= numberOfEdges)
+                            continue;
+
+                        // Pack (level, edgeIdx) into a long key for cheap dedup.
+                        // Keys are valid because both fit in 32 bits (level is small,
+                        // edgeIdx is bounded by graph node count which fits in int).
+                        long key = ((long)level << 32) | (uint)edgeIdx;
+                        if (overfullKeys.Add(key))
+                        {
+                            overfullCollector.Add(new OverfullPrune { Level = level, EdgeIdx = edgeIdx });
+                        }
+                    }
+                }
+            }
+
+            // Phase C entry: computes the heuristic-pruned edge list for one
+            // (level, edgeIdx) pair. Pure read over _searchState (no mutation).
+            // Each Phase C worker thread has its own NodePlacement scratch state
+            // (_indexes/_vectors/_candidates/_visitedBitmap/etc), so independent
+            // calls do not race.
+            internal void ComputePruneInline(int edgeIdx, int level, out int[] prunedEdges)
+            {
+                UnmanagedSpan vector;
+                {
+                    ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
+                    vector = edge.GetVectorUnmanagedSpan(_searchState);
+                    ClearVisited();
+                    MarkVisited(edgeIdx);
+                }
+
+                SetupSearchStateAtLevel(edgeIdx, level);
+                _filterEdgesWorker.Reset(vector, edgeIdx, level);
+                _filterEdgesWorker.RunInline();
+
+                if (_candidates.Count == 0)
+                    throw new InvalidOperationException(
+                        $"Vamana-lite Phase C: empty candidate set after heuristic prune for edgeIdx={edgeIdx}");
+
+                prunedEdges = _candidates.ToArray();
+            }
+
+            // Phase D entry: applies one Phase C result. Runs on the LLT thread.
+            internal void ApplyPrune(in OverfullPrune prune)
+            {
+                ref Node edge = ref _searchState.GetNodeByIndex(prune.EdgeIdx);
+                _searchState.EnsureEdgesOwned(ref edge);
+                ref var edgeList = ref edge.EdgesPerLevel[prune.Level];
+                edgeList.ResetAndEnsureCapacity(_searchState.Llt.Allocator, prune.PrunedEdges.Length);
+                foreach (var idx in prune.PrunedEdges)
+                {
+                    edgeList.AddUnsafe(_searchState.GetNodeByIndex(idx).NodeId);
+                }
+                if (edge.EdgesIndexesPerLevel.Count > prune.Level)
+                {
+                    ref var edgeIndexes = ref edge.EdgesIndexesPerLevel[prune.Level];
+                    edgeIndexes.ResetAndEnsureCapacity(_searchState.Llt.Allocator, prune.PrunedEdges.Length);
+                    foreach (var idx in prune.PrunedEdges)
+                    {
+                        edgeIndexes.AddUnsafe(idx);
+                    }
+                }
+            }
+
+            // Wires the pooled WorkItem instances back to this placement instance.
+            // The wave-path Process() iterator does this in its preamble; the inline
+            // entry points (RunSearchPhase, ComputePruneInline) need the same setup.
+            public void InitWorkers()
+            {
+                _processEdgesWorker.Owner = this;
+                _filterEdgesWorker.Owner = this;
+                _findNearestWorker.Owner = this;
+            }
+
+            // Phase A worker entry: each worker thread calls this. Picks up next
+            // unassigned node-index via Interlocked.Increment(&_nextNodeIndex) and
+            // computes its placement plan into plans[idx]. Returns when the
+            // CreatedNodes range is exhausted or runner is cancelled.
+            public void RunSearchPhase(PlacementPlan[] plans)
+            {
+                InitWorkers();
+
+                int createdNodesLength = _searchState.CreatedNodes;
+                while (true)
+                {
+                    if (runner.IsCancelled)
+                        return;
+
+                    int createdNodeIndex = Interlocked.Increment(ref parent._nextNodeIndex) - 1;
+                    if (createdNodeIndex >= createdNodesLength)
+                        return;
+
+                    var currentNodeIndex = _searchState.GetCreatedNodeIndex(createdNodeIndex);
+                    ComputePlacementPlanInline(createdNodeIndex, currentNodeIndex, out plans[createdNodeIndex]);
+                }
+            }
         }
 
         /// <summary>
@@ -742,6 +1118,10 @@ public partial class Hnsw
             // Pending batch buffer used while emitting a wave. Allocated lazily; reused across waves.
             private BatchExecutor _pendingBatch;
 
+            // Stored to let RunTwoPhase spawn fresh NodePlacement instances without
+            // disturbing the wave-path constructor's iterator pre-queue.
+            private readonly Registration _parent;
+
             private readonly int _activeTasksCount;
             private int _completed;
             private readonly ManualResetEventSlim _ready = new();
@@ -778,12 +1158,192 @@ public partial class Hnsw
             public NodePlacementRunner(Registration parent, int activeTasksCount, CancellationToken token)
             {
                 _mainCts = CancellationTokenSource.CreateLinkedTokenSource(token, _errorCts.Token);
+                _parent = parent;
                 _activeTasksCount = activeTasksCount;
                 _searchState = parent._searchState;
                 for (int i = 0; i < activeTasksCount; i++)
                 {
                     Enqueue(new NodePlacement(parent, this).Process().GetEnumerator());
                 }
+            }
+
+            // Vamana-lite entry point. Runs Phase A (parallel search-only) on
+            // _activeTasksCount worker threads, each owning its own NodePlacement
+            // scratch state. Phase B (serial apply) runs on the calling thread,
+            // which is the LLT thread (Voron tx writes are thread-affine).
+            //
+            // The wave-path constructor pre-queued _activeTasksCount iterators that
+            // we won't drive; drain and dispose them here to avoid resource leaks.
+            public void RunTwoPhase()
+            {
+                while (_placementTasks.TryDequeue(out var staleIt))
+                    staleIt.Dispose();
+
+                var totalSw = System.Diagnostics.Stopwatch.StartNew();
+
+                int createdNodes = _searchState.CreatedNodes;
+                if (createdNodes == 0)
+                    return;
+
+                // Phase A worker count. _activeTasksCount is the L3-aware concurrency
+                // cap from ComputeTargetPlacementTasks; for very large batches it can be
+                // ~hundreds, which oversubscribes the 32-core machine and just thrashes.
+                // Phase A is purely CPU-bound (search + heuristic prune), so cap at the
+                // physical processor count.
+                int phaseAWorkers = Math.Min(_activeTasksCount, Environment.ProcessorCount);
+
+                // ---- Bulk preload (LLT thread) ----
+                // Voron's LowLevelTransaction is thread-affine. The wave path drip-feeds
+                // PreloadNodesVectors as work surfaces during the iterator advance.
+                // Phase A workers cannot call any LLT-touching path (Container.Get,
+                // Container.GetAll, page allocation), so we resolve every vector this
+                // batch will touch up-front, here on the LLT thread. After this call,
+                // every CreatedNode's VectorLoaded == true and GetVectorUnmanagedSpan
+                // returns a cached pointer with no Voron-tx interaction.
+                var preloadSw = System.Diagnostics.Stopwatch.StartNew();
+                {
+                    var ids = new long[createdNodes];
+                    for (int i = 0; i < createdNodes; i++)
+                    {
+                        int nodeIdx = _searchState.GetCreatedNodeIndex(i);
+                        ids[i] = _searchState.Nodes[nodeIdx].NodeId;
+                    }
+                    var idsSpan = ids.AsSpan();
+                    Sorting.SortAndRemoveDuplicates(idsSpan);
+                    _searchState.PreloadNodesVectors(idsSpan);
+                }
+                long preloadMs = preloadSw.ElapsedMilliseconds;
+
+                var phaseASw = System.Diagnostics.Stopwatch.StartNew();
+                var plans = new PlacementPlan[createdNodes];
+                for (int i = 0; i < plans.Length; i++)
+                    plans[i].NodeRandomLevel = -1;
+
+                var phaseAErrors = new ConcurrentQueue<Exception>();
+                var threads = new Thread[phaseAWorkers];
+                for (int t = 0; t < phaseAWorkers; t++)
+                {
+                    threads[t] = new Thread(() =>
+                    {
+                        try
+                        {
+                            new NodePlacement(_parent, this).RunSearchPhase(plans);
+                        }
+                        catch (Exception ex)
+                        {
+                            phaseAErrors.Enqueue(ex);
+                            _errorCts.Cancel();
+                        }
+                    })
+                    {
+                        IsBackground = true,
+                        Name = "Hnsw.RunTwoPhase.PhaseA"
+                    };
+                    threads[t].Start();
+                }
+                foreach (var th in threads)
+                    th.Join();
+
+                if (phaseAErrors.IsEmpty is false)
+                {
+                    var collected = new List<Exception>();
+                    while (phaseAErrors.TryDequeue(out var e)) collected.Add(e);
+                    throw new AggregateException(collected);
+                }
+
+                if (_errorCts.IsCancellationRequested == false && _mainCts.IsCancellationRequested)
+                    _mainCts.Token.ThrowIfCancellationRequested();
+
+                long phaseAMs = phaseASw.ElapsedMilliseconds;
+
+                // ---- Phase B: serial apply forward + back edges (LLT thread) ----
+                var phaseBSw = System.Diagnostics.Stopwatch.StartNew();
+                var applyPlacement = new NodePlacement(_parent, this);
+                var overfullList = new List<OverfullPrune>();
+                var overfullKeys = new HashSet<long>();
+                int appliedCount = 0;
+                for (int idx = 0; idx < createdNodes; idx++)
+                {
+                    if (_mainCts.IsCancellationRequested)
+                        _mainCts.Token.ThrowIfCancellationRequested();
+
+                    if (plans[idx].NodeRandomLevel < 0)
+                        continue;
+
+                    int currentNodeIndex = _searchState.GetCreatedNodeIndex(idx);
+                    applyPlacement.ApplyPlacementPlanDeferredPrune(
+                        currentNodeIndex, in plans[idx], overfullList, overfullKeys);
+                    appliedCount++;
+                    plans[idx].CandidatesPerLevel = null; // release for GC promptly
+                }
+                long phaseBMs = phaseBSw.ElapsedMilliseconds;
+                int overfullCount = overfullList.Count;
+
+                // ---- Phase C: parallel prune compute (worker threads, read-only) ----
+                // The graph is in an over-provisioned state — some nodes have edge
+                // lists temporarily exceeding M. No one reads them during this window
+                // (the LLT thread is sitting in the parallel-for join), so reading the
+                // current edge list per node is safe across threads.
+                var phaseCSw = System.Diagnostics.Stopwatch.StartNew();
+                long phaseCMs = 0;
+                if (overfullCount > 0)
+                {
+                    var overfullArr = overfullList.ToArray();
+                    int phaseCWorkers = Math.Min(phaseAWorkers, overfullCount);
+                    var phaseCErrors = new ConcurrentQueue<Exception>();
+                    long nextOverfull = -1;
+                    var cThreads = new Thread[phaseCWorkers];
+                    for (int t = 0; t < phaseCWorkers; t++)
+                    {
+                        cThreads[t] = new Thread(() =>
+                        {
+                            try
+                            {
+                                var p = new NodePlacement(_parent, this);
+                                p.InitWorkers();
+                                while (true)
+                                {
+                                    long i = Interlocked.Increment(ref nextOverfull);
+                                    if (i >= overfullArr.Length) return;
+                                    p.ComputePruneInline(
+                                        overfullArr[i].EdgeIdx,
+                                        overfullArr[i].Level,
+                                        out overfullArr[i].PrunedEdges);
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                phaseCErrors.Enqueue(ex);
+                                _errorCts.Cancel();
+                            }
+                        })
+                        {
+                            IsBackground = true,
+                            Name = "Hnsw.RunTwoPhase.PhaseC"
+                        };
+                        cThreads[t].Start();
+                    }
+                    foreach (var th in cThreads) th.Join();
+
+                    if (phaseCErrors.IsEmpty is false)
+                    {
+                        var collected = new List<Exception>();
+                        while (phaseCErrors.TryDequeue(out var e)) collected.Add(e);
+                        throw new AggregateException(collected);
+                    }
+                    phaseCMs = phaseCSw.ElapsedMilliseconds;
+
+                    // ---- Phase D: serial apply prune writes (LLT thread) ----
+                    var phaseDSw = System.Diagnostics.Stopwatch.StartNew();
+                    foreach (ref var prune in overfullArr.AsSpan())
+                    {
+                        applyPlacement.ApplyPrune(in prune);
+                    }
+                    _ = phaseDSw.ElapsedMilliseconds;
+                }
+
+                // Suppress unused-variable warnings on instrumentation kept for future telemetry.
+                _ = preloadMs; _ = phaseAMs; _ = phaseBMs; _ = phaseCMs; _ = totalSw.ElapsedMilliseconds;
             }
 
             
@@ -1046,6 +1606,11 @@ public partial class Hnsw
             public NodePlacementRunner Runner => runner;
 
             protected abstract void DoWork();
+
+            // Inline entry point used by Vamana-lite Phase A (RunTwoPhase). The caller
+            // owns iteration and dispatch; this just forwards to DoWork without going
+            // through the ThreadPool, the iterator queue, or the _ready signal.
+            internal void RunInline() => DoWork();
 
             // Used by BatchExecutor: runs work and enqueues result without signaling _ready
             // (BatchExecutor signals once after the whole batch).
