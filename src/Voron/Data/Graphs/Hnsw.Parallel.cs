@@ -261,19 +261,93 @@ public partial class Hnsw
                 int numberOfEdges = _searchState.Options.NumberOfEdges;
                 int level0EfC = ComputeTaperedEfConstructionForLevel0(createdNodeIndex, numberOfCandidates, numberOfEdges);
 
-                foreach(var item in SearchNearestAcrossLevels(insertedVector, currentMaxLevel, currentNodeIndex))
+                // Inlined SearchNearestAcrossLevels(insertedVector, currentMaxLevel, currentNodeIndex):
+                // descends from the entry point down to level 0, capturing the closest node at each
+                // level into _nearestIndexes. Inlined to drop the IEnumerator<WorkItem> class allocation
+                // that GetEnumerator() would produce per node call site.
                 {
-                    yield return item;
+                    _nearestIndexes.Clear();
+                    ClearVisited();
+                    MarkVisited(currentNodeIndex);
+                    var snalCurrentNodeIndex = _searchState.GetNodeIndexById(EntryPointId);
+                    var snalLevel = currentMaxLevel;
+                    var snalDistance = float.MaxValue;
+                    while (snalLevel >= 0)
+                    {
+                        do
+                        {
+                            _findNearestWorker.Reset(insertedVector, snalCurrentNodeIndex, snalLevel);
+                            yield return _findNearestWorker;
+                            if (_findNearestWorker.Distance >= snalDistance)
+                                break;
+                            snalCurrentNodeIndex = _findNearestWorker.CurrentNodeIndex;
+                            snalDistance = _findNearestWorker.Distance;
+                        } while (true);
+
+                        _nearestIndexes.Add(snalCurrentNodeIndex);
+                        snalLevel--;
+                    }
+
+                    _nearestIndexes.Reverse();
                 }
 
                 for (int level = nodeRandomLevel; level >= 0; level--)
                 {
                     _effectiveNumberOfCandidates = level == 0 ? level0EfC : numberOfEdges;
                     int startingPointIndex = _nearestIndexes[level];
-                    foreach (var item in NearestEdges(startingPointIndex, currentNodeIndex, insertedVector, level))
+
+                    // Inlined NearestEdges(startingPointIndex, currentNodeIndex, insertedVector, level):
+                    // beam-search candidate expansion + (conditional) heuristic edge filter. Inlined for
+                    // the same reason as SearchNearestAcrossLevels — this is the deepest yield site,
+                    // called once per level per node.
                     {
-                        yield return item;
+                        Debug.Assert(_candidatesQ.Count == 0);
+                        Debug.Assert(_nearestEdgesQ.Count == 0);
+                        Debug.Assert(startingPointIndex != currentNodeIndex);
+
+                        float lowerBound = float.MaxValue;
+                        ClearVisited();
+                        MarkVisited(currentNodeIndex); // we can't have an edge to itself
+
+                        _candidatesQ.Enqueue(startingPointIndex, -lowerBound);
+
+                        while (_candidatesQ.TryDequeue(out var cur, out var curDistance))
+                        {
+                            if (-curDistance < lowerBound &&
+                                _nearestEdgesQ.Count == _effectiveNumberOfCandidates)
+                                break;
+
+                            _processEdgesWorker.Reset(insertedVector, lowerBound, cur, level);
+                            yield return _processEdgesWorker;
+                            lowerBound = _processEdgesWorker.LowerBound;
+                        }
+
+                        _candidatesQ.Clear();
+                        _candidates.Clear();
+                        while (_nearestEdgesQ.TryDequeue(out var edgeId, out _))
+                        {
+                            _candidates.Add(edgeId);
+                        }
+                        _candidates.Reverse();
+
+                        if (_candidates.Count > _searchState.Options.NumberOfEdges)
+                        {
+                            _indexes.Clear();
+                            _vectors.Clear();
+                            foreach (var candidate in _candidates)
+                            {
+                                ref var cn = ref _searchState.GetNodeByIndex(candidate);
+                                _indexes.Add(candidate);
+                                _vectors.Add(cn.GetVectorUnmanagedSpan(_searchState));
+                            }
+
+                            // disable preloading - we already got everything from the
+                            // previous preloading step and are operating purely in memory
+                            _filterEdgesWorker.Reset(insertedVector, -1, level);
+                            yield return _filterEdgesWorker;
+                        }
                     }
+
                     PortableExceptions.ThrowIf<InvalidOperationException>(_candidates.Count == 0, "Cannot add a node to the graph without any edges");
                     ref var node = ref _searchState.GetNodeByIndex(currentNodeIndex);
                     ref var list = ref node.EdgesPerLevel[level];
@@ -376,59 +450,6 @@ public partial class Hnsw
                     }
                 }
                 _indexes.Clear();
-            }
-
-            private IEnumerable<WorkItem> NearestEdges(int startingPointIndex, int currentNodeIndex, UnmanagedSpan vector, int level)
-            {
-                Debug.Assert(_candidatesQ.Count == 0);
-                Debug.Assert(_nearestEdgesQ.Count == 0);
-                Debug.Assert(startingPointIndex != currentNodeIndex);
-                
-                float lowerBound = float.MaxValue;
-                ClearVisited();
-                MarkVisited(currentNodeIndex); // we can't have an edge to itself
- 
-                // candidates queue is sorted using the distance, so the lowest distance
-                // will always pop first.
-                // nearest edges is sorted using _reversed_ distance, so when we add a 
-                // new item to the queue, we'll pop the one with the largest distance
-                _candidatesQ.Enqueue(startingPointIndex, -lowerBound);
-
-                while (_candidatesQ.TryDequeue(out var cur, out var curDistance))
-                {
-                    if (-curDistance < lowerBound &&
-                        _nearestEdgesQ.Count == _effectiveNumberOfCandidates)
-                        break;
-
-                    _processEdgesWorker.Reset(vector, lowerBound, cur, level);
-                    yield return _processEdgesWorker;
-                    lowerBound = _processEdgesWorker.LowerBound;
-                }
-
-                _candidatesQ.Clear();
-                _candidates.Clear();
-                while (_nearestEdgesQ.TryDequeue(out var edgeId, out var d))
-                {
-                    _candidates.Add(edgeId);
-                }
-                _candidates.Reverse();
-
-                if (_candidates.Count <= _searchState.Options.NumberOfEdges) 
-                    yield break;
-                
-                _indexes.Clear();
-                _vectors.Clear();
-                foreach (var candidate in _candidates)
-                {
-                    ref var n = ref _searchState.GetNodeByIndex(candidate);
-                    _indexes.Add(candidate);
-                    _vectors.Add(n.GetVectorUnmanagedSpan(_searchState));
-                }
-
-                // disable preloading - we already got everything from the 
-                // previous preloading step and are operating purely in memory 
-                _filterEdgesWorker.Reset(vector, -1, level);
-                yield return _filterEdgesWorker;
             }
 
             private sealed class FilterEdgesHeuristicWorker(NodePlacementRunner runner) : WorkItem(runner)
@@ -548,33 +569,6 @@ public partial class Hnsw
                 
             }
 
-            private IEnumerable<WorkItem> SearchNearestAcrossLevels(UnmanagedSpan from, int maxLevel, int insertedNodeIndex)
-            {
-                _nearestIndexes.Clear();
-                ClearVisited();
-                MarkVisited(insertedNodeIndex);
-                var currentNodeIndex = _searchState.GetNodeIndexById(EntryPointId);
-                var level = maxLevel;
-                var distance = float.MaxValue;
-                while (level >= 0)
-                {
-                    do
-                    {
-                        _findNearestWorker.Reset(from, currentNodeIndex, level);
-                        yield return _findNearestWorker;
-                        if (_findNearestWorker.Distance >= distance)
-                            break;
-                        currentNodeIndex = _findNearestWorker.CurrentNodeIndex;
-                        distance = _findNearestWorker.Distance;
-                    } while (true);
-
-                    _nearestIndexes.Add(currentNodeIndex);
-                    level--;
-                }
-
-                _nearestIndexes.Reverse();
-            }
-
             private sealed class FindNearestWorker(NodePlacementRunner runner) : WorkItem(runner)
             {
                 private UnmanagedSpan _from;
@@ -630,28 +624,24 @@ public partial class Hnsw
             }
 
             /// <summary>
-            /// This is called after the Preload() call and we can assume that
-            /// all the vectors are now in memory.
+            /// LLT-thread half of the former AfterPreloading. Performs only the steps that
+            /// touch <see cref="SearchState.Llt"/> (and therefore must stay single-threaded):
+            /// allocating edge-list capacity and, when the EdgesIndexesPerLevel mirror is
+            /// stale, rebuilding it while force-loading any edge whose vector is still lazy.
+            /// The bitmap + per-edge _indexes/_vectors fill loop is now in
+            /// <see cref="PopulateWorkListsOnWorker"/>, which the WorkItem.Execute hook runs
+            /// on a ThreadPool worker before <see cref="WorkItem.DoWork"/>.
             ///
-            /// It setups the _indexes/_vectors with the new values, so the call to
-            /// WorkItem.Execute() can run without any waiting / hassles.
-            ///
-            /// This also checks if we have already visited these edges and avoid
-            /// running the distance computation if we already did that. 
+            /// We always return true now (modulo the -1 sentinel for "use the existing
+            /// _indexes from the previous yield") — the worker decides whether to call
+            /// DoWork based on the post-fill _indexes count.
             /// </summary>
-            public bool AfterPreloading(int currentNodeIndex, int level)
+            public bool PrepareEdgesOnLLT(int currentNodeIndex, int level)
             {
                 if (currentNodeIndex is -1)
-                    return _indexes.Count > 0; // has work
+                    return _indexes.Count > 0;
 
                 ref var n = ref _searchState.GetNodeByIndex(currentNodeIndex);
-                _indexes.Clear();
-                _vectors.Clear();
-                if (MarkVisited(currentNodeIndex))
-                {
-                    _indexes.Add(currentNodeIndex);
-                    _vectors.Add(n.GetVectorUnmanagedSpan(_searchState));
-                }
 
                 // The slow path runs RegisterForPreloading first, which sizes both lists.
                 // The all-in-memory fast path skips that step, so we must guarantee the slot
@@ -663,22 +653,65 @@ public partial class Hnsw
                 ref var edgesIndexes = ref n.EdgesIndexesPerLevel[level];
                 if (edgesIndexes.Count != edgesList.Count)
                 {
+                    // Mirror is stale: rebuild edgesIndexes AND, in the same pass, force-load any
+                    // edge whose vector is still lazy. This is the only path that introduces
+                    // freshly cache-resolved nodes (CopyNodeFromCache leaves _vectorSpan default),
+                    // so once we walk it, every entry in edgesIndexes references a Node with
+                    // VectorLoaded=true. _vectorSpan never resets, so subsequent calls on this
+                    // (node, level) keep that invariant — letting us skip the per-edge VectorLoaded
+                    // sweep entirely on the mirror-in-sync path. Profile (2026-05-09 split) had
+                    // that sweep at 6.4 s / 15 s of LLT exclusive (43 %) while only ~2 % of calls
+                    // actually triggered the rebuild.
                     edgesIndexes.ResetAndEnsureCapacity(_searchState.Llt.Allocator, edgesList.Count);
                     foreach (var nodeId in edgesList)
                     {
-                        edgesIndexes.AddUnsafe(_searchState.GetNodeIndexById(nodeId));
+                        int idx = _searchState.GetNodeIndexById(nodeId);
+                        edgesIndexes.AddUnsafe(idx);
+                        ref var edge = ref _searchState.GetNodeByIndex(idx);
+                        if (edge.VectorLoaded is false)
+                            _ = edge.GetVectorUnmanagedSpan(_searchState);
                     }
                 }
+
+                return true; // always dispatch; worker decides via _indexes.Count after fill
+            }
+
+            /// <summary>
+            /// Worker-thread half of the former AfterPreloading. Walks the edges of
+            /// <paramref name="currentNodeIndex"/> at <paramref name="level"/>, applying the
+            /// per-task visited bitmap and populating <see cref="_indexes"/> / <see cref="_vectors"/>
+            /// for the upcoming WorkItem.DoWork call. All state mutated here lives on the
+            /// owning NodePlacement (per-task, never shared) — the SearchState reads are
+            /// either field reads on already-loaded nodes (guaranteed by PrepareEdgesOnLLT)
+            /// or by-index lookups into the shared <see cref="SearchState.Nodes"/> array,
+            /// which is safe to read concurrently while the LLT thread is parked in dispatch.
+            /// Returns true iff DoWork has anything to compute.
+            /// </summary>
+            public bool PopulateWorkListsOnWorker(int currentNodeIndex, int level)
+            {
+                if (currentNodeIndex is -1)
+                    return _indexes.Count > 0;
+
+                ref var n = ref _searchState.GetNodeByIndex(currentNodeIndex);
+                _indexes.Clear();
+                _vectors.Clear();
+                if (MarkVisited(currentNodeIndex))
+                {
+                    _indexes.Add(currentNodeIndex);
+                    _vectors.Add(n.GetVectorUnmanagedSpan(_searchState));
+                }
+
+                ref var edgesIndexes = ref n.EdgesIndexesPerLevel[level];
                 foreach (var idx in edgesIndexes)
                 {
                     if (MarkVisited(idx) is false)
-                        continue; // already checked
+                        continue;
                     _indexes.Add(idx);
                     ref var edge = ref _searchState.GetNodeByIndex(idx);
                     _vectors.Add(edge.GetVectorUnmanagedSpan(_searchState));
                 }
 
-                return _indexes.Count > 0; // has work
+                return _indexes.Count > 0;
             }
         }
 
@@ -729,6 +762,15 @@ public partial class Hnsw
                 _mainCts = CancellationTokenSource.CreateLinkedTokenSource(token, _errorCts.Token);
                 _activeTasksCount = activeTasksCount;
                 _searchState = parent._searchState;
+
+                // Pre-size SearchState._nodes so that AllocateNodeIndex calls during the
+                // build never reallocate the underlying ByteString. Workers in
+                // PopulateWorkListsOnWorker hold ref Node values into that storage across
+                // LLT-side dispatch; a Grow → Release between dispatch and worker access
+                // would invalidate those refs. Headroom of 16 K covers edge nodes that get
+                // lazily loaded on top of CreatedNodes.
+                _searchState.EnsureNodesCapacity(_searchState.CreatedNodes + 16 * 1024);
+
                 for (int i = 0; i < activeTasksCount; i++)
                 {
                     Enqueue(new NodePlacement(parent, this).Process().GetEnumerator());
@@ -780,19 +822,15 @@ public partial class Hnsw
                     if (_allVectorsInMemory)
                     {
                         // Fast path: every previously touched node is resident, so the bulk preload
-                        // scan has nothing to find. Dispatch each item directly through AfterPreloading
-                        // and skip RegisterForPreloading entirely.
+                        // scan has nothing to find. Run the LLT-only edge prep here and always
+                        // dispatch — the worker's PopulateWorkListsOnWorker fills the visited
+                        // bitmap + _indexes/_vectors and decides whether DoWork has anything to
+                        // compute.
                         for (int index = 0; index < _items.Count; index++)
                         {
                             WorkItem item = _items[index];
-                            if (item.Owner.AfterPreloading(item.CurrentNodeIndex, item.Level))
-                            {
-                                ThreadPool.UnsafeQueueUserWorkItem(item, preferLocal: false);
-                            }
-                            else
-                            {
-                                Enqueue(item.Iterator);
-                            }
+                            item.Owner.PrepareEdgesOnLLT(item.CurrentNodeIndex, item.Level);
+                            ThreadPool.UnsafeQueueUserWorkItem(item, preferLocal: false);
                         }
 
                         _items.Clear();
@@ -809,14 +847,8 @@ public partial class Hnsw
                             continue;
 
                         // we can run this directly, since there is nothing to preload
-
                         _items[index] = null; // skip it in the rest of the process
-                        if (item.Owner.AfterPreloading(item.CurrentNodeIndex, item.Level) is false)
-                        {
-                            Enqueue(item.Iterator);
-                            continue; // no work to do, everything was already visited
-                        }
-
+                        item.Owner.PrepareEdgesOnLLT(item.CurrentNodeIndex, item.Level);
                         ThreadPool.UnsafeQueueUserWorkItem(item, preferLocal: false);
                     }
 
@@ -836,16 +868,8 @@ public partial class Hnsw
                     {
                         if (item is null) continue;
 
-                        if (item.Owner.AfterPreloading(item.CurrentNodeIndex, item.Level))
-                        {
-                            ThreadPool.UnsafeQueueUserWorkItem(item, preferLocal: false);
-                        }
-                        else
-                        {
-                            // this means that there is no work to do (all the nodes were already visited)
-                            // so we can re-schedule this immediately
-                            Enqueue(item.Iterator);
-                        }
+                        item.Owner.PrepareEdgesOnLLT(item.CurrentNodeIndex, item.Level);
+                        ThreadPool.UnsafeQueueUserWorkItem(item, preferLocal: false);
                     }
 
                     _items.Clear();
@@ -910,7 +934,16 @@ public partial class Hnsw
             {
                 try
                 {
-                    DoWork();
+                    // PopulateWorkListsOnWorker performs the bitmap-visit + per-edge
+                    // _indexes/_vectors fill that used to be in AfterPreloading on the LLT
+                    // thread. It returns false when there's nothing to compute (all edges
+                    // already visited this round) — in which case we skip DoWork and just
+                    // re-yield the iterator.
+                    if (Owner.PopulateWorkListsOnWorker(CurrentNodeIndex, Level))
+                    {
+                        DoWork();
+                    }
+
                     runner.Enqueue(Iterator);
                 }
                 catch (Exception e)
