@@ -1789,8 +1789,9 @@ public partial class Hnsw
                         {
                             WorkItem item = _items[index];
                             item.Owner.PrepareEdgesOnLLT(item.CurrentNodeIndex, item.Level);
-                            ThreadPool.UnsafeQueueUserWorkItem(item, preferLocal: false);
+                            DispatchBatched(item);
                         }
+                        FlushBatch();
 
                         _items.Clear();
                         continue;
@@ -1808,7 +1809,7 @@ public partial class Hnsw
                         // we can run this directly, since there is nothing to preload
                         _items[index] = null; // skip it in the rest of the process
                         item.Owner.PrepareEdgesOnLLT(item.CurrentNodeIndex, item.Level);
-                        ThreadPool.UnsafeQueueUserWorkItem(item, preferLocal: false);
+                        DispatchBatched(item);
                     }
 
                     var batchSpan = CollectionsMarshal.AsSpan(batch);
@@ -1828,11 +1829,41 @@ public partial class Hnsw
                         if (item is null) continue;
 
                         item.Owner.PrepareEdgesOnLLT(item.CurrentNodeIndex, item.Level);
-                        ThreadPool.UnsafeQueueUserWorkItem(item, preferLocal: false);
+                        DispatchBatched(item);
                     }
+                    FlushBatch();
 
                     _items.Clear();
                 }
+            }
+
+            // Lever A: amortise ThreadPool.UnsafeQueueUserWorkItem (~450 ns/call) across multiple
+            // WorkItems by packing up to WorkItemBatch.MaxItems into a single IThreadPoolWorkItem.
+            // The batch's Execute runs each WorkItem sequentially on a single worker thread, so the
+            // ordering invariants the LLT-side drain depends on (in-flight LinkedList membership,
+            // _completed counter) are unchanged — only the dispatch granularity shifts.
+            internal const int WorkItemBatchSize = 4;
+            private WorkItemBatch _pendingBatch;
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            private void DispatchBatched(WorkItem item)
+            {
+                _pendingBatch ??= new WorkItemBatch();
+                _pendingBatch.Items[_pendingBatch.Count++] = item;
+                if (_pendingBatch.Count == WorkItemBatchSize)
+                {
+                    ThreadPool.UnsafeQueueUserWorkItem(_pendingBatch, preferLocal: false);
+                    _pendingBatch = null;
+                }
+            }
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            private void FlushBatch()
+            {
+                if (_pendingBatch is null || _pendingBatch.Count == 0)
+                    return;
+                ThreadPool.UnsafeQueueUserWorkItem(_pendingBatch, preferLocal: false);
+                _pendingBatch = null;
             }
             
             
@@ -1882,6 +1913,24 @@ public partial class Hnsw
             }
         }
         
+        private sealed class WorkItemBatch : IThreadPoolWorkItem
+        {
+            public readonly WorkItem[] Items = new WorkItem[NodePlacementRunner.WorkItemBatchSize];
+            public int Count;
+
+            void IThreadPoolWorkItem.Execute()
+            {
+                int n = Count;
+                for (int i = 0; i < n; i++)
+                {
+                    var item = Items[i];
+                    Items[i] = null;
+                    ((IThreadPoolWorkItem)item).Execute();
+                }
+                Count = 0;
+            }
+        }
+
         private abstract class WorkItem(NodePlacementRunner runner) : IThreadPoolWorkItem
         {
             public NodePlacement Owner;
