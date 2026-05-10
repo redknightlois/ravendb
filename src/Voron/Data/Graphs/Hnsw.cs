@@ -907,14 +907,8 @@ public unsafe partial class Hnsw
                 return postingList.Hash;
             }
 
-            var vectorHash = hashBuffer.ToReadOnlySpan();
-            long vectorId;
-            if (_vectorsByHash.TryGetValue(vectorHash, out _, out vectorId) is false)
-            {
-                var vectorEntryId = RegisterVector(vector);
-                vectorId = (long)vectorEntryId;
-                _vectorsByHash.Add(vectorHash, vectorId);
-            }
+            var vectorEntryId = RegisterVector(vector);
+            long vectorId = (long)vectorEntryId;
 
             if (_nodesByVectorId.TryGetValue(vectorId, out var nodeId))
             {
