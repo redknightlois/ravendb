@@ -822,13 +822,42 @@ public unsafe partial class Hnsw
             }
 
             if (_vectorsByHash.TryGetValue(vectorHash, out var vectorId) is false)
-                PortableExceptions.Throw<InvalidOperationException>($"Unable to find the vector corresponding to the provided vector hash: base64({Convert.ToBase64String(vectorHash)}).");
+            {
+                // The skip-_vectorsByHash optimization in Register's hot path leaves
+                // _vectorsByHash unpopulated for nodes built after that change landed.
+                // First Remove that misses both the in-batch _vectorHashCache and the
+                // persistent tree triggers a one-shot rebuild from existing nodes.
+                EnsureVectorsByHashIsPopulated();
+                if (_vectorsByHash.TryGetValue(vectorHash, out vectorId) is false)
+                    PortableExceptions.Throw<InvalidOperationException>($"Unable to find the vector corresponding to the provided vector hash: base64({Convert.ToBase64String(vectorHash)}).");
+            }
 
             if (_nodesByVectorId.TryGetValue(vectorId, out var nodeId) is false)
                 PortableExceptions.Throw<InvalidOperationException>($"Unable to find the node corresponding to the provided vector hash: base64({Convert.ToBase64String(vectorHash)}) and VectorId({vectorId}).");
 
             int nodeIndex = _searchState.GetNodeIndexById(nodeId);
             postingList = (hashBuffer, nodeIndex, NativeList<long>.Create(_searchState.Llt.Allocator, entryId | RemovalMask));
+        }
+
+        private bool _vectorsByHashRebuilt;
+
+        private void EnsureVectorsByHashIsPopulated()
+        {
+            if (_vectorsByHashRebuilt)
+                return;
+            _vectorsByHashRebuilt = true;
+
+            var nodes = _searchState.Nodes;
+            for (int i = 0; i < nodes.Length; i++)
+            {
+                ref var node = ref nodes[i];
+                if (node.VectorId == 0)
+                    continue;
+                var vectorSpan = node.GetVectorUnmanagedSpan(_searchState).ToSpan();
+                var hashBuffer = ComputeHashFor(vectorSpan);
+                _vectorsByHash.Add(hashBuffer.ToReadOnlySpan(), node.VectorId);
+                _searchState.Llt.Allocator.Release(ref hashBuffer);
+            }
         }
 
         /// <summary>
