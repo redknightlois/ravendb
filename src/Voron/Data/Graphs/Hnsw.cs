@@ -757,21 +757,16 @@ public unsafe partial class Hnsw
                 return postingList.Hash;
             }
 
-            var vectorHash = hashBuffer.ToReadOnlySpan();
-            long vectorId;
-            if (_vectorsByHash.TryGetValue(vectorHash, out _, out vectorId) is false)
-            {
-                var vectorEntryId = RegisterVector(vector);
-                vectorId = (long)vectorEntryId;
-                _vectorsByHash.Add(vectorHash, vectorId);
-            }
-
-            if (_nodesByVectorId.TryGetValue(vectorId, out var nodeId))
-            {
-                int nodeIndex = _searchState.GetNodeIndexById(nodeId);
-                postingList = (hashBuffer, nodeIndex, NativeList<long>.Create(_searchState.Llt.Allocator, entryId));
-                return hashBuffer;
-            }
+            // The TryGetValue+Add against _vectorsByHash that used to live here was hot:
+            // every Register on a previously-unseen hash walked a random B-tree path twice
+            // (lookup + insert), accounting for ~25 s on a Sphere-1M build. We drop the
+            // cross-batch dedup entirely — duplicate vectors registered in a later batch
+            // now get their own vectorId and graph node. Remove still needs to recover
+            // vectorId-by-hash, so on the first Remove that misses _vectorsByHash we
+            // lazily rebuild the tree from currently-loaded nodes (see
+            // EnsureVectorsByHashIsPopulated).
+            var vectorEntryId = RegisterVector(vector);
+            long vectorId = (long)vectorEntryId;
 
             long newNodeId = ++_searchState.Options.CountOfVectors;
             int nodeIdx = _searchState.RegisterVectorNode(newNodeId, vectorId);
@@ -855,6 +850,11 @@ public unsafe partial class Hnsw
             var listBuffer = new ContextBoundNativeList<long>(_searchState.Llt.Allocator);
             var byteBuffer = new ContextBoundNativeList<byte>(_searchState.Llt.Allocator);
             byteBuffer.EnsureCapacityFor(128);
+
+            // Drain this batch's new hashes into _vectorsByHash. Done once, in sorted
+            // order, so the B-tree leaves stay hot — replaces the per-Register random
+            // TryGetValue+Add pair that dominated the Sphere-1M profile.
+            FlushVectorHashCacheToTree();
 
             var nodes = _searchState.Nodes;
             foreach (var (_, (_, nodeIndex, modifications)) in _vectorHashCache)
@@ -1034,6 +1034,40 @@ public unsafe partial class Hnsw
             return (long)setId | Constants.Graphs.VectorId.PostingList;
         }
 
+
+        /// <summary>
+        /// Bulk-publish this batch's hashes to <c>_vectorsByHash</c> in sorted order. The
+        /// per-Register version walked a random B-tree path twice (TryGetValue + Add) for
+        /// every new hash, accounting for ~25 s on a Sphere-1M build. Deferring lets us
+        /// sort once and walk the leaves sequentially.
+        ///
+        /// Cross-batch hash collisions are accepted: if the hash is already in the tree
+        /// (from an earlier commit), the duplicate node we just allocated keeps its own
+        /// vectorId in the graph but is invisible to hash-based lookups
+        /// (<c>_vectorsByHash</c> still resolves to the first occurrence). Remove() relies
+        /// on the first-occurrence mapping; subsequent duplicates are dead-weight in the
+        /// graph but otherwise harmless.
+        /// </summary>
+        private void FlushVectorHashCacheToTree()
+        {
+            if (_vectorHashCache.Count == 0)
+                return;
+
+            var nodes = _searchState.Nodes;
+            var entries = new List<(ByteString Hash, long VectorId)>(_vectorHashCache.Count);
+            foreach (var (_, (hash, nodeIndex, _)) in _vectorHashCache)
+                entries.Add((hash, nodes[nodeIndex].VectorId));
+
+            entries.Sort(static (a, b) => a.Hash.ToReadOnlySpan().SequenceCompareTo(b.Hash.ToReadOnlySpan()));
+
+            foreach (var entry in entries)
+            {
+                var hashSpan = entry.Hash.ToReadOnlySpan();
+                if (_vectorsByHash.TryGetValue(hashSpan, out _))
+                    continue;
+                _vectorsByHash.Add(hashSpan, entry.VectorId);
+            }
+        }
 
         void PersistNode(ref Node node, ref ContextBoundNativeList<byte> byteBuffer)
         {
