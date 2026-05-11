@@ -1844,11 +1844,21 @@ public partial class Hnsw
             // _completed counter) are unchanged — only the dispatch granularity shifts.
             internal const int WorkItemBatchSize = 4;
             private WorkItemBatch _pendingBatch;
+            // Pool of batches recycled between LLT (rents on dispatch) and workers
+            // (returns after Execute). Replaces ~7.5 M Gen0 allocations per build with
+            // a steady-state in-flight count (~30 batches/cycle, ~1 cycle in flight).
+            internal readonly ConcurrentStack<WorkItemBatch> BatchPool = new();
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             private void DispatchBatched(WorkItem item)
             {
-                _pendingBatch ??= new WorkItemBatch();
+                if (_pendingBatch is null)
+                {
+                    if (BatchPool.TryPop(out var pooled))
+                        _pendingBatch = pooled;
+                    else
+                        _pendingBatch = new WorkItemBatch(this);
+                }
                 _pendingBatch.Items[_pendingBatch.Count++] = item;
                 if (_pendingBatch.Count == WorkItemBatchSize)
                 {
@@ -1913,7 +1923,7 @@ public partial class Hnsw
             }
         }
         
-        private sealed class WorkItemBatch : IThreadPoolWorkItem
+        private sealed class WorkItemBatch(NodePlacementRunner runner) : IThreadPoolWorkItem
         {
             public readonly WorkItem[] Items = new WorkItem[NodePlacementRunner.WorkItemBatchSize];
             public int Count;
@@ -1928,6 +1938,7 @@ public partial class Hnsw
                     ((IThreadPoolWorkItem)item).Execute();
                 }
                 Count = 0;
+                runner.BatchPool.Push(this);
             }
         }
 
