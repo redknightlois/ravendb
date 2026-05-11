@@ -137,20 +137,25 @@ public class GraphsVectorRemovals(ITestOutputHelper output) : StorageTest(output
     {
         using var _ = Slice.From(Allocator, TreeNameConst, out var treeName);
         Random random = new(seed);
-        var v1Id = AddElement(1, register: true);
-        var v2Id = AddElement(2, register: true);
+        // Register both entries in the same batch so in-batch hash dedup folds them into
+        // a single graph node's posting list. Cross-batch hash dedup was removed, so
+        // separate batches would produce separate nodes and this test (which exercises
+        // posting-list growth from Single to SmallPostingList) would not apply.
+        var v1Id = AddElements([1, 2], register: true);
         var result = Read();
         Assert.Equal(2, result.Read);
-        Assert.Equal(result.Docs[..2], new[] { EntryId(1), EntryId(2)});
-        
-        RemoveElement(2, v2Id);
+        var first2 = (long[])result.Docs[..2].Clone();
+        Array.Sort(first2);
+        Assert.Equal(new[] { EntryId(1), EntryId(2) }, first2);
+
+        RemoveElement(2, v1Id);
         result = Read();
         Assert.Equal(1, result.Read);
         Assert.Equal(EntryId(1), result.Docs[0]);
 
-        long EntryId(int i) => i << 2; 
+        long EntryId(int i) => i << 2;
 
-        byte[] AddElement(int id, bool register = false)
+        byte[] AddElements(int[] ids, bool register = false)
         {
             float[] v1 = [0.1f, 0.2f, 0.3f, 0.4f];
             var v1AsBytes = MemoryMarshal.Cast<float, byte>(v1);
@@ -162,7 +167,8 @@ public class GraphsVectorRemovals(ITestOutputHelper output) : StorageTest(output
 
                 using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, "test", random))
                 {
-                    vecId = registration.Register(EntryId(id), v1AsBytes).ToSpan().ToArray();
+                    foreach (var id in ids)
+                        vecId = registration.Register(EntryId(id), v1AsBytes).ToSpan().ToArray();
                     registration.Commit(CancellationToken.None);
                 }
 

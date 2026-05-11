@@ -122,7 +122,10 @@ public class BasicGraphs(ITestOutputHelper output) : StorageTest(output)
             var options = state.Options;
             Assert.Equal(12, options.NumberOfCandidates);
             Assert.Equal(3, options.NumberOfEdges);
-            Assert.Equal(2, options.CountOfVectors);
+            // Each Register allocates its own vectorId/node; cross-batch hash dedup was
+            // removed for indexing throughput. Registering v1 in two separate batches
+            // yields two graph nodes for it.
+            Assert.Equal(3, options.CountOfVectors);
         }
 
         using (var txr = Env.ReadTransaction())
@@ -134,8 +137,10 @@ public class BasicGraphs(ITestOutputHelper output) : StorageTest(output)
             Assert.Equal(3, read);
             Assert.False(distances.Slice(0, read).ToArray().Any(float.IsNaN));
             Assert.Equal(2, matches[0]);
-            Assert.Equal(1, matches[1]);
-            Assert.Equal(3, matches[2]);
+            // EntryIds 1 and 3 share v1; ordering between them is traversal-dependent.
+            var equidistant = new[] { matches[1], matches[2] };
+            Array.Sort(equidistant);
+            Assert.Equal(new[] { 1L, 3L }, equidistant);
         }
     }
 
@@ -179,7 +184,10 @@ public class BasicGraphs(ITestOutputHelper output) : StorageTest(output)
             var options = state.Options;
             Assert.Equal(12, options.NumberOfCandidates);
             Assert.Equal(3, options.NumberOfEdges);
-            Assert.Equal(2, options.CountOfVectors);
+            // Each Register allocates its own vectorId/node; cross-batch hash dedup was
+            // removed for indexing throughput. Registering v1 in two separate batches
+            // yields two graph nodes for it.
+            Assert.Equal(3, options.CountOfVectors);
         }
 
         using (var txr = Env.ReadTransaction())
@@ -192,11 +200,14 @@ public class BasicGraphs(ITestOutputHelper output) : StorageTest(output)
             int read = nearest.Fill(matches, distances, filter: null);
             Assert.Equal(3, read);
             Assert.Equal(8, matches[0]);
-            Assert.Equal(4, matches[1]);
-            Assert.Equal(12, matches[2]);
+            // EntryIds 4 and 12 share the v1 vector; with cross-batch dedup gone they live
+            // in separate graph nodes at identical distance, so traversal order varies.
+            var equidistant = new[] { matches[1], matches[2] };
+            Array.Sort(equidistant);
+            Assert.Equal(new[] { 4L, 12L }, equidistant);
         }
     }
-    
+
     [RavenTheory(RavenTestCategory.Voron)]
     [InlineDataWithRandomSeed]
     [InlineDataWithRandomSeed]
@@ -502,7 +513,10 @@ public class BasicGraphs(ITestOutputHelper output) : StorageTest(output)
             var options = state.Options;
             Assert.Equal(12, options.NumberOfCandidates);
             Assert.Equal(3, options.NumberOfEdges);
-            Assert.Equal(2, options.CountOfVectors);
+            // Each Register allocates its own vectorId/node; cross-batch hash dedup was
+            // removed for indexing throughput. Registering v1 in two separate batches
+            // yields two graph nodes for it.
+            Assert.Equal(3, options.CountOfVectors);
         }
 
         using (var txr = Env.ReadTransaction())
