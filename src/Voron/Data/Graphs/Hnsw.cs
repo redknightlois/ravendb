@@ -634,6 +634,7 @@ public unsafe partial class Hnsw
         private readonly int _vectorBatchSizeInPages;
         private readonly ContainerId _globalVectorsContainerId;
         private PostingList _largePostingListSet;
+        private readonly List<(ByteString Hash, long VectorId)> _newVectorHashes = new();
 
         public int AmountOfModifiedVectorsInTransaction => _vectorHashCache.Count;
 
@@ -757,20 +758,26 @@ public unsafe partial class Hnsw
                 return postingList.Hash;
             }
 
+            // A persistent hash→vectorId map lets duplicate vectors registered in different
+            // commits share the same graph node. The probe stays on the hot path because hits
+            // are cheap once the leaves are cached; the publish is deferred to commit, where
+            // a sorted batch turns a stream of random leaf writes into a sequential walk.
             var vectorHash = hashBuffer.ToReadOnlySpan();
             long vectorId;
-            if (_vectorsByHash.TryGetValue(vectorHash, out _, out vectorId) is false)
+            if (_vectorsByHash.TryGetValue(vectorHash, out _, out vectorId))
+            {
+                if (_nodesByVectorId.TryGetValue(vectorId, out var nodeId))
+                {
+                    int nodeIndex = _searchState.GetNodeIndexById(nodeId);
+                    postingList = (hashBuffer, nodeIndex, NativeList<long>.Create(_searchState.Llt.Allocator, entryId));
+                    return hashBuffer;
+                }
+            }
+            else
             {
                 var vectorEntryId = RegisterVector(vector);
                 vectorId = (long)vectorEntryId;
-                _vectorsByHash.Add(vectorHash, vectorId);
-            }
-
-            if (_nodesByVectorId.TryGetValue(vectorId, out var nodeId))
-            {
-                int nodeIndex = _searchState.GetNodeIndexById(nodeId);
-                postingList = (hashBuffer, nodeIndex, NativeList<long>.Create(_searchState.Llt.Allocator, entryId));
-                return hashBuffer;
+                _newVectorHashes.Add((hashBuffer, vectorId));
             }
 
             long newNodeId = ++_searchState.Options.CountOfVectors;
@@ -855,6 +862,11 @@ public unsafe partial class Hnsw
             var listBuffer = new ContextBoundNativeList<long>(_searchState.Llt.Allocator);
             var byteBuffer = new ContextBoundNativeList<byte>(_searchState.Llt.Allocator);
             byteBuffer.EnsureCapacityFor(128);
+
+            // Publish the hash→vectorId mappings collected during Register. Sorting by
+            // hash matches the persistent map's key order, so the inserts visit leaves
+            // in one sequential pass instead of jumping around them per Register call.
+            FlushNewVectorHashes();
 
             var nodes = _searchState.Nodes;
             foreach (var (_, (_, nodeIndex, modifications)) in _vectorHashCache)
@@ -1034,6 +1046,23 @@ public unsafe partial class Hnsw
             return (long)setId | Constants.Graphs.VectorId.PostingList;
         }
 
+        // Writes the deferred hash→vectorId entries to the persistent map. Sorting by hash
+        // matches the map's key order so the inserts walk its leaves once instead of seeking
+        // back and forth. A duplicate check is unnecessary here: the hot-path probe in
+        // Register already established absence, and the transaction holding this Registration
+        // is the only writer, so nothing can have inserted the same hash in between.
+        private void FlushNewVectorHashes()
+        {
+            if (_newVectorHashes.Count == 0)
+                return;
+
+            _newVectorHashes.Sort(static (a, b) => a.Hash.ToReadOnlySpan().SequenceCompareTo(b.Hash.ToReadOnlySpan()));
+
+            foreach (var entry in _newVectorHashes)
+                _vectorsByHash.Add(entry.Hash.ToReadOnlySpan(), entry.VectorId);
+
+            _newVectorHashes.Clear();
+        }
 
         void PersistNode(ref Node node, ref ContextBoundNativeList<byte> byteBuffer)
         {
