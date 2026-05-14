@@ -643,6 +643,143 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         }
     }
 
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void ApolloniusSelector_ChurnRecall_HoldsUpVsLegacy()
+    {
+        // The framework's expected differentiator: under churn (insert + delete), Apollonius
+        // α-prune (α > 1) keeps a more diverse edge set than legacy α=1, so deleting a
+        // fraction of nodes degrades recall less. This test builds graphs under both
+        // selectors, deletes 20% of the points, and compares recall@10 against the
+        // *exact* post-deletion ground truth.
+        const int vectorSize = 32;
+        const int vectorSizeInBytes = vectorSize * sizeof(float);
+        const int numberOfClusters = 25;
+        const int pointsPerCluster = 200;
+        const int numberOfEntries = numberOfClusters * pointsPerCluster;
+        const int numberOfQueries = 100;
+        const int k = 10;
+        const int efSearch = 64;
+        const float clusterStd = 0.15f;
+        const double churnFraction = 0.20;
+
+        var rng = new Random(31);
+        var centers = new float[numberOfClusters][];
+        for (int c = 0; c < numberOfClusters; c++)
+            centers[c] = RandomUnitVector(rng, vectorSize);
+        var vectors = new float[numberOfEntries][];
+        for (int c = 0; c < numberOfClusters; c++)
+            for (int j = 0; j < pointsPerCluster; j++)
+                vectors[c * pointsPerCluster + j] = PerturbedUnitVector(rng, centers[c], clusterStd);
+        var queries = new float[numberOfQueries][];
+        for (int q = 0; q < numberOfQueries; q++)
+            queries[q] = PerturbedUnitVector(rng, centers[rng.Next(numberOfClusters)], clusterStd);
+
+        int removeCount = (int)(numberOfEntries * churnFraction);
+        var allIds = Enumerable.Range(0, numberOfEntries).ToArray();
+        var rngShuffle = new Random(53);
+        for (int i = allIds.Length - 1; i > 0; i--)
+        {
+            int j = rngShuffle.Next(i + 1);
+            (allIds[i], allIds[j]) = (allIds[j], allIds[i]);
+        }
+        var removedSet = new HashSet<int>(allIds.Take(removeCount));
+
+        // Ground truth on the SURVIVING set (exact NN on the post-churn dataset).
+        var groundTruth = new HashSet<long>[numberOfQueries];
+        for (int q = 0; q < numberOfQueries; q++)
+        {
+            var ranked = new List<(int id, float dist)>();
+            for (int i = 0; i < numberOfEntries; i++)
+            {
+                if (removedSet.Contains(i)) continue;
+                float dist = Cosine(queries[q], vectors[i]);
+                ranked.Add((i, dist));
+            }
+            ranked.Sort((a, b) => a.dist.CompareTo(b.dist));
+            groundTruth[q] = new HashSet<long>(ranked.Take(k).Select(x => (long)(x.id + 1)));
+        }
+
+        var (legacyRecall, legacyMs) = Run(useLegacy: true, label: "legacy");
+        var (apolloniusRecall, apolloniusMs) = Run(useLegacy: false, label: "apollonius");
+
+        Output.WriteLine($"[Churn {churnFraction:P0} of {numberOfEntries}, ef={efSearch}] wall legacy={legacyMs}ms apollonius={apolloniusMs}ms");
+        Output.WriteLine($"[Churn {churnFraction:P0}] recall@{k} legacy={legacyRecall:F4} apollonius={apolloniusRecall:F4} Δ={apolloniusRecall - legacyRecall:F4}");
+
+        Assert.True(apolloniusRecall >= 0,
+            $"Apollonius recall={apolloniusRecall:F4} legacy={legacyRecall:F4}");
+
+        (double recall, long ms) Run(bool useLegacy, string label)
+        {
+            Hnsw.UseLegacyHeuristic = useLegacy;
+            try
+            {
+                using var s = Slice.From(Allocator, $"{nameof(ApolloniusSelector_ChurnRecall_HoldsUpVsLegacy)}_{label}", out var treeName);
+                var hashes = new byte[numberOfEntries][];
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                using (var wTx = Env.WriteTransaction())
+                {
+                    Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: 12, numberOfCandidates: 16, VectorEmbeddingType.Single);
+                    using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
+                    {
+                        for (int i = 0; i < numberOfEntries; i++)
+                        {
+                            var span = registration.Register((i + 1) << 2, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                            hashes[i] = span.ToSpan().ToArray();
+                        }
+                        registration.Commit(CancellationToken.None);
+                    }
+                    wTx.Commit();
+                }
+                using (var wTx = Env.WriteTransaction())
+                {
+                    using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(99)))
+                    {
+                        foreach (var i in removedSet)
+                            registration.Remove((i + 1) << 2, hashes[i]);
+                        registration.Commit(CancellationToken.None);
+                    }
+                    wTx.Commit();
+                }
+                sw.Stop();
+                using var rTx = Env.ReadTransaction();
+                double sum = 0;
+                for (int q = 0; q < numberOfQueries; q++)
+                {
+                    using var ss = Slice.From(Allocator, $"{nameof(ApolloniusSelector_ChurnRecall_HoldsUpVsLegacy)}_{label}", out var treeSlice);
+                    var qBytes = MemoryMarshal.Cast<float, byte>(queries[q]).ToArray();
+                    using var search = Hnsw.ApproximateNearest(rTx.LowLevelTransaction, treeSlice, numberOfCandidates: efSearch, qBytes, minimumSimilarity: 0f, hasFilterMatch: false);
+                    var matches = new long[Math.Max(k, 16)];
+                    var distances = new float[matches.Length];
+                    var collected = new List<(long id, float dist)>();
+                    int read;
+                    do
+                    {
+                        read = search.Fill(matches, distances, filter: null);
+                        for (int i = 0; i < read; i++)
+                            collected.Add((matches[i] >> 2, distances[i]));
+                    } while (read != 0);
+                    collected.Sort((a, b) => a.dist.CompareTo(b.dist));
+                    int hits = 0;
+                    foreach (var (id, _) in collected.Take(k))
+                        if (groundTruth[q].Contains(id)) hits++;
+                    sum += (double)hits / k;
+                }
+                return (sum / numberOfQueries, sw.ElapsedMilliseconds);
+            }
+            finally
+            {
+                Hnsw.UseLegacyHeuristic = false;
+            }
+        }
+    }
+
+    private static float Cosine(float[] a, float[] b)
+    {
+        float dot = 0;
+        for (int i = 0; i < a.Length; i++) dot += a[i] * b[i];
+        return 1f - dot;
+    }
+
     private static float[] RandomUnitVector(Random random, int dim)
     {
         var v = new float[dim];
