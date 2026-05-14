@@ -104,6 +104,148 @@ public unsafe partial class Hnsw
         throw new NotSupportedException($"Got unknown {nameof(postingListId)} type: {postingListId}");
     }
 
+    /// <summary>
+    /// Per-query result of greedy descent-cover measurement.
+    /// </summary>
+    public readonly record struct DescentCoverPerQuery(
+        int PathLength,
+        int VisitedNodes,
+        int CoveredNodes,
+        int TotalWitnesses);
+
+    /// <summary>
+    /// Aggregate report from <see cref="MeasureDescentCover"/>.
+    /// </summary>
+    /// <param name="Rho">The descent factor used.</param>
+    /// <param name="QueriesSampled">Number of queries measured.</param>
+    /// <param name="MeanPathLength">Mean H(q) — number of moves made by greedy descent before termination.</param>
+    /// <param name="MeanVisitedNonterminal">Mean number of nodes visited per query during descent (where the witness invariant is checked).</param>
+    /// <param name="FractionUncovered">η̂ — fraction of (visited_node, query) pairs with zero ρ-descent witnesses.</param>
+    /// <param name="MeanWitnessesWhenCovered">Mean count of ρ-descent witnesses at nodes that were covered.</param>
+    public readonly record struct DescentCoverReport(
+        float Rho,
+        int QueriesSampled,
+        double MeanPathLength,
+        double MeanVisitedNonterminal,
+        double FractionUncovered,
+        double MeanWitnessesWhenCovered)
+    {
+        public override string ToString() =>
+            $"DescentCoverReport(ρ={Rho:F2}, queries={QueriesSampled}, " +
+            $"meanH={MeanPathLength:F2}, meanVisited={MeanVisitedNonterminal:F2}, " +
+            $"η̂={FractionUncovered:F4}, meanWitnesses={MeanWitnessesWhenCovered:F2})";
+    }
+
+    /// <summary>
+    /// Diagnostic: walks the graph as a pure greedy ρ-descent for each query and reports the
+    /// empirical descent-cover statistics (η̂, mean witness count, mean path length H).
+    /// This is the baseline measurement for the Apollonius descent-cover invariant
+    /// `Pr[failure] ≤ H(q)·(η + e^-Λ)`. Read-only, single-threaded, no production callers.
+    /// </summary>
+    /// <param name="queriesBlob">Concatenated query vectors (each of size <c>Options.VectorSizeBytes</c>).</param>
+    /// <param name="queryCount">Number of queries packed into <paramref name="queriesBlob"/>.</param>
+    /// <param name="rho">Descent factor in (0, 1). An edge u→v counts as a ρ-descent witness for q iff d(v,q) ≤ ρ·d(u,q).</param>
+    public static DescentCoverReport MeasureDescentCover(
+        LowLevelTransaction llt,
+        Slice name,
+        ReadOnlySpan<byte> queriesBlob,
+        int queryCount,
+        float rho)
+    {
+        if (rho <= 0f || rho >= 1f)
+            throw new ArgumentOutOfRangeException(nameof(rho), rho, "rho must be in (0, 1)");
+
+        var searchState = new SearchState(llt, name);
+        if (searchState.IsEmpty)
+            return new DescentCoverReport(rho, 0, 0, 0, 0, 0);
+
+        int vectorSizeBytes = searchState.Options.VectorSizeBytes;
+        if (queriesBlob.Length != queryCount * vectorSizeBytes)
+            throw new ArgumentException(
+                $"queriesBlob length {queriesBlob.Length} does not match queryCount {queryCount} * vectorSizeBytes {vectorSizeBytes}");
+
+        long totalPath = 0;
+        long totalVisited = 0;
+        long totalUncovered = 0;
+        long totalWitnessesOnCovered = 0;
+        long totalCovered = 0;
+
+        for (int q = 0; q < queryCount; q++)
+        {
+            var query = queriesBlob.Slice(q * vectorSizeBytes, vectorSizeBytes);
+            int pathLength = 0;
+            int visited = 0;
+            int covered = 0;
+            int witnessSumOnCovered = 0;
+
+            int currentIdx = searchState.GetNodeIndexById(EntryPointId);
+            float currentDist = searchState.Distance(query, -1, currentIdx);
+
+            for (int level = searchState.Options.MaxLevel; level >= 0; level--)
+            {
+                while (true)
+                {
+                    ref var node = ref searchState.GetNodeByIndex(currentIdx);
+                    if (node.EdgesPerLevel.Count <= level)
+                        break;
+
+                    ref var edges = ref node.EdgesPerLevel[level];
+
+                    int witnesses = 0;
+                    int bestEdgeIdx = -1;
+                    float bestDist = currentDist;
+                    float witnessCeiling = rho * currentDist;
+
+                    for (int i = 0; i < edges.Count; i++)
+                    {
+                        int neighborIdx = searchState.GetNodeIndexById(edges[i]);
+                        float d = searchState.Distance(query, -1, neighborIdx);
+                        if (d <= witnessCeiling)
+                            witnesses++;
+                        if (d < bestDist)
+                        {
+                            bestDist = d;
+                            bestEdgeIdx = neighborIdx;
+                        }
+                    }
+
+                    visited++;
+                    if (witnesses > 0)
+                    {
+                        covered++;
+                        witnessSumOnCovered += witnesses;
+                    }
+
+                    if (bestEdgeIdx == -1)
+                        break; // no improvement at this level — descend
+
+                    currentIdx = bestEdgeIdx;
+                    currentDist = bestDist;
+                    pathLength++;
+                }
+            }
+
+            totalPath += pathLength;
+            totalVisited += visited;
+            totalCovered += covered;
+            totalUncovered += visited - covered;
+            totalWitnessesOnCovered += witnessSumOnCovered;
+        }
+
+        double meanH = (double)totalPath / queryCount;
+        double meanVisited = (double)totalVisited / queryCount;
+        double frac = totalVisited == 0 ? 0.0 : (double)totalUncovered / totalVisited;
+        double meanWit = totalCovered == 0 ? 0.0 : (double)totalWitnessesOnCovered / totalCovered;
+
+        return new DescentCoverReport(rho, queryCount, meanH, meanVisited, frac, meanWit);
+    }
+
+    public static DescentCoverReport MeasureDescentCover(LowLevelTransaction llt, string name, ReadOnlySpan<byte> queriesBlob, int queryCount, float rho)
+    {
+        using (Slice.From(llt.Allocator, name, out var slice))
+            return MeasureDescentCover(llt, slice, queriesBlob, queryCount, rho);
+    }
+
     public static void RenderAndShow(LowLevelTransaction llt, string name, Span<byte> vector)
     {
         using (Slice.From(llt.Allocator, name, out var slice))
