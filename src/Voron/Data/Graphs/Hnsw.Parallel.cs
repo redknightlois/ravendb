@@ -415,9 +415,14 @@ public partial class Hnsw
 
             private sealed class FilterEdgesHeuristicWorker(NodePlacementRunner runner) : WorkItem(runner)
             {
-                // ρ-descent factor for the Apollonius cover. An edge u→v counts as a descent
-                // witness for query q iff d(v,q) ≤ ρ·d(u,q). ρ=0.85 is a balance between
-                // descent strength (smaller ρ ⇒ shorter paths) and coverage feasibility.
+                // ρ-descent factor. The framework's Apollonius cell A_ρ(u,v) is
+                // {q : d(v,q) ≤ ρ·d(u,q)}. The PRODUCTION path implements the DiskANN/Vamana
+                // α-prune rule with α = 1/ρ, which is RELATED to but NOT EQUIVALENT TO the
+                // Apollonius cover (α-prune compares d(v,w) to ρ·d(u,v); the cover compares
+                // d(v,q) to ρ·d(u,q) — the denominator differs). See Audit-A1.
+                //
+                // Must satisfy ρ ∈ (0, 1]. ρ > 1 silently flips to α < 1 which is looser
+                // than legacy and catastrophically regresses recall.
                 private const float Rho = 0.90f;
 
 
@@ -435,15 +440,13 @@ public partial class Hnsw
 
                 protected override void DoWork()
                 {
-                    // Apollonius query-space descent cover.
-                    //
-                    // Replaces the original HNSW Algorithm-4 / DiskANN robust-prune with a
-                    // greedy maximum-coverage selection over Apollonius ρ-descent cells. For
-                    // each candidate v, the cell A_ρ(u,v) = {q : d(v,q) ≤ ρ·d(u,q)} is the
-                    // region of query space where edge u→v gives multiplicative descent.
-                    // The selector picks M neighbors that maximize |⋃_v A_ρ(u,v) ∩ Q_u| via
-                    // greedy max-coverage (Theorem 9, capped survival coverage with Λ=1 and
-                    // uniform hazard) — standard (1−1/e) approximation to the optimum.
+                    // Production edge selector: DiskANN/Vamana α-prune (α = 1/ρ) with M-fill
+                    // top-up. Motivated by — but NOT EQUIVALENT TO — the framework's
+                    // Apollonius cover (Theorem 1). The Apollonius cover would compute
+                    // witness bits d(v,q) ≤ ρ·d(u,q) over Q_u and greedy-max-cover to M
+                    // picks (Theorem 9, (1-1/e) bound). That path is in DoWorkPointSampled
+                    // below; with Q_u = C it is locally sample-biased and empirically
+                    // regresses recall, so the production path is α-prune. See Audit-A1, A2.
 
                     var searchState = Owner._searchState;
                     var candidates = Owner._candidates;
@@ -455,17 +458,6 @@ public partial class Hnsw
                     if (N == 0)
                         return;
 
-                    // Per Theorem 11: the base layer (Level==0) is about local k-capture, not
-                    // descent quality. Robust-prune already balances close + diverse edges and
-                    // empirically beats pure-nearest capture on clustered data. Apollonius
-                    // descent helps upper layers (routing/steering) where long-range structure
-                    // dominates.
-                    // The Apollonius descent witness d(v,q) ≤ ρ·d(u,q) coincides with the
-                    // DiskANN/Vamana α-prune rule when the implicit query at each comparison
-                    // step is the just-picked w: keep v if for all w ∈ already_picked,
-                    // α·d(v,w) > d(u,v), with α = 1/ρ. The full point-sampled cover over
-                    // Q_u = C is an over-engineered re-statement of the same idea. Implement
-                    // the cleaner equivalent: legacy robust-prune with α = 1/ρ.
                     if (Hnsw.UseLegacyHeuristic)
                         DoWorkLegacyRobustPrune(searchState, candidates, vectors, indexes, N);
                     else
@@ -482,7 +474,9 @@ public partial class Hnsw
                     for (int i = 0; i < N; i++)
                         queue.Enqueue(i, searchState.Distance(_src, vectors[i]));
 
-                    while (candidates.Count <= searchState.Options.NumberOfEdges &&
+                    // Audit-A6: was `<= NumberOfEdges` (filled M+1). Apollonius path uses `< M`.
+                    // Equalising to `< M` removes a 1-extra-edge bias from every comparison.
+                    while (candidates.Count < searchState.Options.NumberOfEdges &&
                            queue.TryDequeue(out var cur, out var distance))
                     {
                         bool match = true;
@@ -513,6 +507,7 @@ public partial class Hnsw
                 // edge set (DiskANN's reasoning). Top up with nearest-to-u for k-capture.
                 private void DoWorkApolloniusAlphaPrune(SearchState searchState, List<int> candidates, List<UnmanagedSpan> vectors, List<int> indexes, int N)
                 {
+                    Debug.Assert(Rho > 0f && Rho <= 1f, $"ρ must be in (0,1], got {Rho}. ρ > 1 gives α < 1 (weaker than legacy α=1) and catastrophically regresses recall.");
                     const float Alpha = 1f / Rho;
                     int M = searchState.Options.NumberOfEdges;
                     var queue = Owner._candidatesQ;
@@ -520,8 +515,6 @@ public partial class Hnsw
                     for (int i = 0; i < N; i++)
                         queue.Enqueue(i, searchState.Distance(_src, vectors[i]));
 
-                    // Pass 1: α-prune. v survives iff for all already-picked w, α·d(v,w) ≥ d(u,v).
-                    // Rejected v's are remembered for the top-up pass.
                     Span<bool> picked = stackalloc bool[N <= 1024 ? N : 0];
                     Span<bool> rejected = stackalloc bool[N <= 1024 ? N : 0];
                     bool[] pickedHeap = null, rejectedHeap = null;
@@ -533,6 +526,22 @@ public partial class Hnsw
                         rejected = rejectedHeap;
                     }
 
+                    // Audit-A3: Theorem 11 explicit k-capture at base layer. At Level==0,
+                    // unconditionally reserve ⌈M/4⌉ slots for the true k-nearest neighbors
+                    // of u, ignoring the α-test. This guarantees the search can extract
+                    // top-k from a τ-terminal basin around q. Upper layers do not need
+                    // this — routing benefits from α-prune's diversity, not local capture.
+                    // M/4 is empirically the sweet spot: enough capture to honour Theorem 11
+                    // without crowding the diversity slots that produce the low-ef win.
+                    int kCapture = Level == 0 ? Math.Max(1, M / 4) : 0;
+                    while (candidates.Count < kCapture && queue.TryDequeue(out var cur, out _))
+                    {
+                        candidates.Add(cur);
+                        picked[cur] = true;
+                    }
+
+                    // Pass 1: α-prune. v survives iff for all already-picked w, α·d(v,w) ≥ d(u,v).
+                    // Rejected v's are remembered for the top-up pass.
                     while (candidates.Count < M && queue.TryDequeue(out var cur, out var distance))
                     {
                         bool keep = true;
