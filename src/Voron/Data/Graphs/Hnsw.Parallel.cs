@@ -426,15 +426,6 @@ public partial class Hnsw
                 private ulong[] _witness = [];
                 private bool[] _picked = [];
 
-                // Per-worker isotropic random unit-vector query samples for the Apollonius
-                // cover. Lazy-initialized on first DoWork; reused across all subsequent calls
-                // on this worker. Each worker has its own samples — across the full parallel
-                // batch the union of samples is isotropic. Used only when the index uses
-                // CosineSimilaritySingles (the default); other similarity methods retain the
-                // point-sampled Apollonius variant (Q_u = candidate pool) below.
-                private float[][] _querySamples;
-                private int _querySampleDim;
-
                 public void Reset(UnmanagedSpan src, int currentNodeIndex, int level)
                 {
                     _src = src;
@@ -469,10 +460,12 @@ public partial class Hnsw
                     // empirically beats pure-nearest capture on clustered data. Apollonius
                     // descent helps upper layers (routing/steering) where long-range structure
                     // dominates.
+                    // Point-sampled Apollonius (Q_u = candidate pool C) at upper layers tracks
+                    // the actual query distribution better than synthetic isotropic samples on
+                    // structured / clustered data, even though it biases toward cluster mates
+                    // (Theorem 7 representativeness caveat).
                     if (Hnsw.UseLegacyHeuristic || Level == 0)
                         DoWorkLegacyRobustPrune(searchState, candidates, vectors, indexes, N);
-                    else if (searchState.Options.SimilarityMethod == SimilarityMethod.CosineSimilaritySingles)
-                        DoWorkCosineSynthetic(searchState, candidates, vectors, indexes, N);
                     else
                         DoWorkPointSampled(searchState, candidates, vectors, indexes, N);
                 }
@@ -507,140 +500,6 @@ public partial class Hnsw
                     for (int i = 0; i < candidates.Count; i++)
                         candidates[i] = indexes[candidates[i]];
                     queue.Clear();
-                }
-
-                // Apollonius cover with synthetic isotropic random unit-vector query samples.
-                // Q_u is drawn from a per-worker pool of K = NumberOfCandidates random unit
-                // vectors. For random / isotropic data this satisfies Theorem 7's sample
-                // representativeness — coverage measured on real queries generalizes from
-                // coverage measured on the synthetic sample.
-                private void DoWorkCosineSynthetic(SearchState searchState, List<int> candidates, List<UnmanagedSpan> vectors, List<int> indexes, int N)
-                {
-                    int M = searchState.Options.NumberOfEdges;
-                    // K = M is the minimum sample size where greedy max-coverage is non-degenerate.
-                    // Larger K improves Theorem 7 generalization but multiplies witness-check cost
-                    // linearly. K=M trades a tighter sample for a much cheaper insert wall.
-                    int K = M;
-
-                    // Local k-capture (Theorem 11). At the base layer the search must extract the
-                    // true top-k from a τ-terminal basin around q, which requires NEAR-u edges
-                    // independent of descent quality. Upper layers steer routing and benefit
-                    // from descent cover (long-range edges between regions); the base layer
-                    // needs cluster-local edges so beam search can collect k-NN.
-                    //
-                    // Empirically (recall@10 on clustered data), giving the base layer mostly
-                    // capture slots (M_capture = 3M/4) prevents Apollonius cover from displacing
-                    // the local cluster-mate edges that real queries depend on.
-                    int mCapture = Level == 0 ? Math.Max(1, M * 3 / 4) : 0;
-                    int mDescent = M - mCapture;
-
-                    int dim = searchState.Options.VectorSizeBytes / sizeof(float);
-                    EnsureQuerySamples(K, dim);
-
-                    int wordsPerRow = (K + 63) >> 6;
-
-                    if (_distUQ.Length < K)
-                        _distUQ = new float[K];
-                    if (_witness.Length < N * wordsPerRow)
-                        _witness = new ulong[N * wordsPerRow];
-                    if (_picked.Length < N)
-                        _picked = new bool[N];
-
-                    Span<float> distUQ = _distUQ.AsSpan(0, K);
-                    Span<ulong> witness = _witness.AsSpan(0, N * wordsPerRow);
-                    Span<bool> picked = _picked.AsSpan(0, N);
-                    witness.Clear();
-                    picked.Clear();
-
-                    var srcSpan = _src.ToSpan();
-                    for (int k = 0; k < K; k++)
-                    {
-                        var qBytes = MemoryMarshal.Cast<float, byte>(_querySamples[k]);
-                        distUQ[k] = CosineDistanceSingles(srcSpan, qBytes);
-                    }
-
-                    for (int i = 0; i < N; i++)
-                    {
-                        var row = witness.Slice(i * wordsPerRow, wordsPerRow);
-                        var vSpan = vectors[i].ToSpan();
-                        for (int k = 0; k < K; k++)
-                        {
-                            var qBytes = MemoryMarshal.Cast<float, byte>(_querySamples[k]);
-                            float d = CosineDistanceSingles(vSpan, qBytes);
-                            if (d <= Rho * distUQ[k])
-                                row[k >> 6] |= 1UL << (k & 63);
-                        }
-                    }
-
-                    Span<ulong> covered = stackalloc ulong[wordsPerRow <= 32 ? wordsPerRow : 0];
-                    if (covered.Length == 0)
-                        covered = new ulong[wordsPerRow];
-
-                    while (candidates.Count < mDescent)
-                    {
-                        int bestI = -1;
-                        int bestGain = 0;
-                        for (int i = 0; i < N; i++)
-                        {
-                            if (picked[i])
-                                continue;
-                            var row = witness.Slice(i * wordsPerRow, wordsPerRow);
-                            int gain = 0;
-                            for (int w = 0; w < wordsPerRow; w++)
-                                gain += BitOperations.PopCount(row[w] & ~covered[w]);
-                            if (gain > bestGain)
-                            {
-                                bestGain = gain;
-                                bestI = i;
-                            }
-                        }
-                        if (bestI == -1)
-                            break;
-                        picked[bestI] = true;
-                        candidates.Add(bestI);
-                        var bestRow = witness.Slice(bestI * wordsPerRow, wordsPerRow);
-                        for (int w = 0; w < wordsPerRow; w++)
-                            covered[w] |= bestRow[w];
-                    }
-
-                    if (candidates.Count < M)
-                    {
-                        // Top up to M with nearest-to-u picks. At the base layer this is the
-                        // explicit M_capture reservation enforcing Theorem 11 local k-capture;
-                        // at upper layers it absorbs unused M_descent slack when the cover
-                        // saturates early.
-                        Span<float> distUV = stackalloc float[N <= 256 ? N : 0];
-                        float[] heap = null;
-                        if (distUV.Length == 0)
-                        {
-                            heap = new float[N];
-                            distUV = heap;
-                        }
-                        for (int i = 0; i < N; i++)
-                            distUV[i] = picked[i] ? float.MaxValue : searchState.Distance(_src, vectors[i]);
-                        while (candidates.Count < M)
-                        {
-                            int bestI = -1;
-                            float bestDist = float.MaxValue;
-                            for (int i = 0; i < N; i++)
-                            {
-                                if (picked[i])
-                                    continue;
-                                if (distUV[i] < bestDist)
-                                {
-                                    bestDist = distUV[i];
-                                    bestI = i;
-                                }
-                            }
-                            if (bestI == -1)
-                                break;
-                            picked[bestI] = true;
-                            candidates.Add(bestI);
-                        }
-                    }
-
-                    for (int i = 0; i < candidates.Count; i++)
-                        candidates[i] = indexes[candidates[i]];
                 }
 
                 // Apollonius cover with Q_u = candidate pool C (point-sampled). Used for
@@ -735,58 +594,6 @@ public partial class Hnsw
 
                     for (int i = 0; i < candidates.Count; i++)
                         candidates[i] = indexes[candidates[i]];
-                }
-
-                private void EnsureQuerySamples(int K, int dim)
-                {
-                    if (_querySamples is not null && _querySamples.Length == K && _querySampleDim == dim)
-                        return;
-                    var rng = new Random();
-                    _querySamples = new float[K][];
-                    _querySampleDim = dim;
-                    for (int k = 0; k < K; k++)
-                    {
-                        var v = new float[dim];
-                        GenerateUnitVector(rng, v);
-                        _querySamples[k] = v;
-                    }
-                }
-
-                private static void GenerateUnitVector(Random rng, float[] v)
-                {
-                    // Box-Muller produces independent N(0,1) samples; normalizing the resulting
-                    // vector gives a draw uniform on the (dim-1)-sphere. Uniform-then-normalize
-                    // concentrates on cube corners in high dim, so we use Gaussians.
-                    int dim = v.Length;
-                    double normSq = 0;
-                    int i = 0;
-                    while (i < dim - 1)
-                    {
-                        double u1 = rng.NextDouble();
-                        if (u1 < 1e-30)
-                            u1 = 1e-30;
-                        double u2 = rng.NextDouble();
-                        double mag = Math.Sqrt(-2.0 * Math.Log(u1));
-                        double z1 = mag * Math.Cos(2 * Math.PI * u2);
-                        double z2 = mag * Math.Sin(2 * Math.PI * u2);
-                        v[i++] = (float)z1;
-                        v[i++] = (float)z2;
-                        normSq += z1 * z1 + z2 * z2;
-                    }
-                    if (i < dim)
-                    {
-                        double u1 = rng.NextDouble();
-                        if (u1 < 1e-30)
-                            u1 = 1e-30;
-                        double u2 = rng.NextDouble();
-                        double mag = Math.Sqrt(-2.0 * Math.Log(u1));
-                        double z1 = mag * Math.Cos(2 * Math.PI * u2);
-                        v[i] = (float)z1;
-                        normSq += z1 * z1;
-                    }
-                    double inv = 1.0 / Math.Sqrt(normSq);
-                    for (int j = 0; j < dim; j++)
-                        v[j] *= (float)inv;
                 }
             }
             private sealed class ProcessEdgesWorker(NodePlacementRunner runner) : WorkItem(runner)
