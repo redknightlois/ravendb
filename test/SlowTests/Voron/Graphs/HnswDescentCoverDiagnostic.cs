@@ -381,6 +381,129 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         }
     }
 
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void ApolloniusSelector_RecallAndWall_LargerScaleUniformDistribution()
+    {
+        // Stress check: 20k uniform-on-sphere points (non-clustered), recall@10 + wall.
+        // The Phase-4c configuration must hold on a non-pathological distribution too.
+        const int vectorSize = 32;
+        const int vectorSizeInBytes = vectorSize * sizeof(float);
+        const int numberOfEntries = 20_000;
+        const int numberOfQueries = 50;
+        const int k = 10;
+        const int efSearch = 64;
+
+        var rng = new Random(11);
+        var vectors = new float[numberOfEntries][];
+        for (int i = 0; i < numberOfEntries; i++)
+            vectors[i] = RandomUnitVector(rng, vectorSize);
+        var queries = new float[numberOfQueries][];
+        for (int q = 0; q < numberOfQueries; q++)
+            queries[q] = RandomUnitVector(rng, vectorSize);
+
+        Hnsw.UseLegacyHeuristic = true;
+        var groundTruth = new HashSet<long>[numberOfQueries];
+        try
+        {
+            BuildGraph("truth");
+            using var rTx = Env.ReadTransaction();
+            for (int q = 0; q < numberOfQueries; q++)
+                groundTruth[q] = TopKExact(rTx.LowLevelTransaction, "truth", queries[q], k);
+        }
+        finally
+        {
+            Hnsw.UseLegacyHeuristic = false;
+        }
+
+        var (legacyRecall, legacyMs) = RunRecallExperiment(useLegacy: true, label: "legacy");
+        var (apolloniusRecall, apolloniusMs) = RunRecallExperiment(useLegacy: false, label: "apollonius");
+
+        double ratio = (double)apolloniusMs / legacyMs;
+        Output.WriteLine($"[Uniform N=20k d=32 ef={efSearch}] wall legacy={legacyMs}ms apollonius={apolloniusMs}ms ratio={ratio:F2}x");
+        Output.WriteLine($"[Uniform N=20k d=32 ef={efSearch}] recall@{k} legacy={legacyRecall:F4} apollonius={apolloniusRecall:F4} Δ={apolloniusRecall - legacyRecall:F4}");
+
+        Assert.True(apolloniusRecall >= legacyRecall - 0.05,
+            $"Apollonius recall@{k}={apolloniusRecall:F4} regressed >5pp vs legacy {legacyRecall:F4}");
+        Assert.True(apolloniusMs <= legacyMs * 2,
+            $"Apollonius wall {apolloniusMs}ms exceeded 2x legacy wall {legacyMs}ms");
+
+        (double recall, long ms) RunRecallExperiment(bool useLegacy, string label)
+        {
+            Hnsw.UseLegacyHeuristic = useLegacy;
+            try
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                BuildGraph(label);
+                sw.Stop();
+                using var rTx = Env.ReadTransaction();
+                double sum = 0;
+                for (int q = 0; q < numberOfQueries; q++)
+                {
+                    var approx = TopKApprox(rTx.LowLevelTransaction, label, queries[q], k, efSearch);
+                    int hits = 0;
+                    foreach (var id in approx)
+                        if (groundTruth[q].Contains(id))
+                            hits++;
+                    sum += (double)hits / k;
+                }
+                return (sum / numberOfQueries, sw.ElapsedMilliseconds);
+            }
+            finally
+            {
+                Hnsw.UseLegacyHeuristic = false;
+            }
+        }
+
+        void BuildGraph(string label)
+        {
+            using var s = Slice.From(Allocator, $"{nameof(ApolloniusSelector_RecallAndWall_LargerScaleUniformDistribution)}_{label}", out var treeName);
+            using var wTx = Env.WriteTransaction();
+            Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: 12, numberOfCandidates: 16, VectorEmbeddingType.Single);
+            using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
+            {
+                for (int i = 0; i < numberOfEntries; i++)
+                    registration.Register(i + 1, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                registration.Commit(CancellationToken.None);
+            }
+            wTx.Commit();
+        }
+
+        HashSet<long> TopKExact(global::Voron.Impl.LowLevelTransaction llt, string treeName, float[] queryVec, int topK)
+        {
+            using var s = Slice.From(Allocator, $"{nameof(ApolloniusSelector_RecallAndWall_LargerScaleUniformDistribution)}_{treeName}", out var treeSlice);
+            var qBytes = MemoryMarshal.Cast<float, byte>(queryVec).ToArray();
+            using var search = Hnsw.ExactNearest(llt, treeSlice, numberOfCandidates: topK, qBytes, minimumSimilarity: 0f, hasFilterMatch: false);
+            return DrainTopK(search, topK);
+        }
+
+        HashSet<long> TopKApprox(global::Voron.Impl.LowLevelTransaction llt, string treeName, float[] queryVec, int topK, int efS)
+        {
+            using var s = Slice.From(Allocator, $"{nameof(ApolloniusSelector_RecallAndWall_LargerScaleUniformDistribution)}_{treeName}", out var treeSlice);
+            var qBytes = MemoryMarshal.Cast<float, byte>(queryVec).ToArray();
+            using var search = Hnsw.ApproximateNearest(llt, treeSlice, numberOfCandidates: efS, qBytes, minimumSimilarity: 0f, hasFilterMatch: false);
+            return DrainTopK(search, topK);
+        }
+
+        static HashSet<long> DrainTopK(global::Voron.Data.Graphs.Hnsw.VectorSearchRetriever search, int topK)
+        {
+            var matches = new long[Math.Max(topK, 16)];
+            var distances = new float[matches.Length];
+            var collected = new List<(long id, float dist)>();
+            int read;
+            do
+            {
+                read = search.Fill(matches, distances, filter: null);
+                for (int i = 0; i < read; i++)
+                    collected.Add((matches[i], distances[i]));
+            } while (read != 0);
+            collected.Sort((a, b) => a.dist.CompareTo(b.dist));
+            var result = new HashSet<long>();
+            foreach (var (id, _) in collected.Take(topK))
+                result.Add(id);
+            return result;
+        }
+    }
+
     private static float[] RandomUnitVector(Random random, int dim)
     {
         var v = new float[dim];
