@@ -516,6 +516,14 @@ public partial class Hnsw
                     // Larger K improves Theorem 7 generalization but multiplies witness-check cost
                     // linearly. K=M trades a tighter sample for a much cheaper insert wall.
                     int K = M;
+
+                    // Local k-capture (Theorem 11). At the base layer the search must extract the
+                    // true top-k from a τ-terminal basin around q, which requires near-u edges
+                    // independent of descent quality. Reserve M_capture slots for nearest-to-u
+                    // picks at level 0; upper layers stay pure descent cover.
+                    int mCapture = Level == 0 ? Math.Max(1, M / 4) : 0;
+                    int mDescent = M - mCapture;
+
                     int dim = searchState.Options.VectorSizeBytes / sizeof(float);
                     EnsureQuerySamples(K, dim);
 
@@ -558,7 +566,7 @@ public partial class Hnsw
                     if (covered.Length == 0)
                         covered = new ulong[wordsPerRow];
 
-                    while (candidates.Count < M)
+                    while (candidates.Count < mDescent)
                     {
                         int bestI = -1;
                         int bestGain = 0;
@@ -587,7 +595,10 @@ public partial class Hnsw
 
                     if (candidates.Count < M)
                     {
-                        // Top-up by nearest-to-u when the descent cover exhausts.
+                        // Top up to M with nearest-to-u picks. At the base layer this is the
+                        // explicit M_capture reservation enforcing Theorem 11 local k-capture;
+                        // at upper layers it absorbs unused M_descent slack when the cover
+                        // saturates early.
                         Span<float> distUV = stackalloc float[N <= 256 ? N : 0];
                         float[] heap = null;
                         if (distUV.Length == 0)
