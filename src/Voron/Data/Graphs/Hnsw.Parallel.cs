@@ -460,11 +460,11 @@ public partial class Hnsw
                     // empirically beats pure-nearest capture on clustered data. Apollonius
                     // descent helps upper layers (routing/steering) where long-range structure
                     // dominates.
-                    // Point-sampled Apollonius (Q_u = candidate pool C) at upper layers tracks
-                    // the actual query distribution better than synthetic isotropic samples on
-                    // structured / clustered data, even though it biases toward cluster mates
-                    // (Theorem 7 representativeness caveat).
-                    if (Hnsw.UseLegacyHeuristic || Level == 0)
+                    // Reference Apollonius implementation: at every level u→v is selected by
+                    // greedy max-coverage of Apollonius cells A_ρ(u,v) = {q : d(v,q) ≤ ρ·d(u,q)}
+                    // sampled at Q_u = C (the candidate pool). Theorem 9 gives the (1-1/e)
+                    // approximation guarantee. No level special-casing, no hybrid with legacy.
+                    if (Hnsw.UseLegacyHeuristic)
                         DoWorkLegacyRobustPrune(searchState, candidates, vectors, indexes, N);
                     else
                         DoWorkPointSampled(searchState, candidates, vectors, indexes, N);
@@ -502,11 +502,11 @@ public partial class Hnsw
                     queue.Clear();
                 }
 
-                // Apollonius cover with Q_u = candidate pool C (point-sampled). Used for
-                // similarity methods other than CosineSimilaritySingles where synthetic
-                // random samples are not trivially constructible (I8 needs magnitude;
-                // Hamming needs bit strings). Mathematically valid but sample-biased toward
-                // local cluster mates of u — see Theorem 7 representativeness caveat.
+                // Reference Apollonius cover. For each pair (v_i, q_j) in C×C compute the
+                // witness bit: 1 iff d(v_i, q_j) ≤ ρ·d(u, q_j) — i.e., the edge u→v_i offers
+                // multiplicative descent of factor ρ for query q_j. Then greedy max-coverage
+                // over the witness bitmap selects up to M edges with the (1-1/e) bound. If
+                // the cover saturates short of M, top up with nearest-to-u (Theorem 11).
                 private void DoWorkPointSampled(SearchState searchState, List<int> candidates, List<UnmanagedSpan> vectors, List<int> indexes, int N)
                 {
                     int M = searchState.Options.NumberOfEdges;
