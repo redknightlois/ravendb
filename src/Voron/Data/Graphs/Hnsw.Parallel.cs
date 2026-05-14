@@ -520,6 +520,19 @@ public partial class Hnsw
                     for (int i = 0; i < N; i++)
                         queue.Enqueue(i, searchState.Distance(_src, vectors[i]));
 
+                    // Pass 1: α-prune. v survives iff for all already-picked w, α·d(v,w) ≥ d(u,v).
+                    // Rejected v's are remembered for the top-up pass.
+                    Span<bool> picked = stackalloc bool[N <= 1024 ? N : 0];
+                    Span<bool> rejected = stackalloc bool[N <= 1024 ? N : 0];
+                    bool[] pickedHeap = null, rejectedHeap = null;
+                    if (picked.Length == 0)
+                    {
+                        pickedHeap = new bool[N];
+                        rejectedHeap = new bool[N];
+                        picked = pickedHeap;
+                        rejected = rejectedHeap;
+                    }
+
                     while (candidates.Count < M && queue.TryDequeue(out var cur, out var distance))
                     {
                         bool keep = true;
@@ -533,9 +546,50 @@ public partial class Hnsw
                             }
                         }
                         if (keep)
+                        {
                             candidates.Add(cur);
+                            picked[cur] = true;
+                        }
+                        else
+                        {
+                            rejected[cur] = true;
+                        }
                     }
                     queue.Clear();
+
+                    // Pass 2 (k-capture top-up): if α-prune did not fill M edges, add the
+                    // nearest-to-u of the rejected candidates until we reach M. This guarantees
+                    // every node has exactly M edges, matching legacy invariant, and supplies
+                    // the Theorem 11 local-capture edges the stricter prune may have dropped.
+                    if (candidates.Count < M)
+                    {
+                        Span<float> dist = stackalloc float[N <= 1024 ? N : 0];
+                        float[] distHeap = null;
+                        if (dist.Length == 0)
+                        {
+                            distHeap = new float[N];
+                            dist = distHeap;
+                        }
+                        for (int i = 0; i < N; i++)
+                            dist[i] = (picked[i] || rejected[i] == false) ? float.MaxValue : searchState.Distance(_src, vectors[i]);
+                        while (candidates.Count < M)
+                        {
+                            int bestI = -1;
+                            float bestDist = float.MaxValue;
+                            for (int i = 0; i < N; i++)
+                            {
+                                if (dist[i] < bestDist)
+                                {
+                                    bestDist = dist[i];
+                                    bestI = i;
+                                }
+                            }
+                            if (bestI == -1)
+                                break;
+                            candidates.Add(bestI);
+                            dist[bestI] = float.MaxValue;
+                        }
+                    }
 
                     for (int i = 0; i < candidates.Count; i++)
                         candidates[i] = indexes[candidates[i]];

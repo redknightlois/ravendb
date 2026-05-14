@@ -644,6 +644,126 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
     }
 
     [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void ApolloniusSelector_HighDim_RecallSweep()
+    {
+        // Diversity-pruning wins are documented in DiskANN at d ≥ 128 where the
+        // curse-of-dimensionality makes geometric Delaunay-like edges genuinely
+        // distinct from each other. Test at d=128 to see if α-prune outperforms.
+        const int vectorSize = 128;
+        const int vectorSizeInBytes = vectorSize * sizeof(float);
+        const int numberOfEntries = 10_000;
+        const int numberOfQueries = 100;
+        const int k = 10;
+        int[] efs = [16, 32, 64, 128, 256];
+
+        var rng = new Random(101);
+        var vectors = new float[numberOfEntries][];
+        for (int i = 0; i < numberOfEntries; i++)
+            vectors[i] = RandomUnitVector(rng, vectorSize);
+        var queries = new float[numberOfQueries][];
+        for (int q = 0; q < numberOfQueries; q++)
+            queries[q] = RandomUnitVector(rng, vectorSize);
+
+        Hnsw.UseLegacyHeuristic = true;
+        var groundTruth = new HashSet<long>[numberOfQueries];
+        try
+        {
+            BuildGraph("truth");
+            using var rTx = Env.ReadTransaction();
+            for (int q = 0; q < numberOfQueries; q++)
+                groundTruth[q] = TopKExact(rTx.LowLevelTransaction, "truth", queries[q], k);
+        }
+        finally
+        {
+            Hnsw.UseLegacyHeuristic = false;
+        }
+
+        Hnsw.UseLegacyHeuristic = true;
+        var swL = System.Diagnostics.Stopwatch.StartNew();
+        BuildGraph("legacy");
+        swL.Stop();
+        Hnsw.UseLegacyHeuristic = false;
+        var swA = System.Diagnostics.Stopwatch.StartNew();
+        BuildGraph("apollonius");
+        swA.Stop();
+
+        Output.WriteLine($"[d=128 N={numberOfEntries}] build wall legacy={swL.ElapsedMilliseconds}ms apollonius={swA.ElapsedMilliseconds}ms ratio={(double)swA.ElapsedMilliseconds / swL.ElapsedMilliseconds:F2}x");
+        Output.WriteLine($"{"ef",6} {"legacy",10} {"apollonius",12} {"Δ",10}");
+        foreach (var ef in efs)
+        {
+            double rL = RecallAt(ef, "legacy");
+            double rA = RecallAt(ef, "apollonius");
+            Output.WriteLine($"{ef,6} {rL,10:F4} {rA,12:F4} {rA - rL,10:F4}");
+        }
+        Assert.True(true);
+
+        double RecallAt(int efS, string label)
+        {
+            using var rTx = Env.ReadTransaction();
+            double sum = 0;
+            for (int q = 0; q < numberOfQueries; q++)
+            {
+                var approx = TopKApprox(rTx.LowLevelTransaction, label, queries[q], k, efS);
+                int hits = 0;
+                foreach (var id in approx)
+                    if (groundTruth[q].Contains(id))
+                        hits++;
+                sum += (double)hits / k;
+            }
+            return sum / numberOfQueries;
+        }
+
+        void BuildGraph(string label)
+        {
+            using var s = Slice.From(Allocator, $"{nameof(ApolloniusSelector_HighDim_RecallSweep)}_{label}", out var treeName);
+            using var wTx = Env.WriteTransaction();
+            Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: 16, numberOfCandidates: 32, VectorEmbeddingType.Single);
+            using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
+            {
+                for (int i = 0; i < numberOfEntries; i++)
+                    registration.Register(i + 1, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                registration.Commit(CancellationToken.None);
+            }
+            wTx.Commit();
+        }
+
+        HashSet<long> TopKExact(global::Voron.Impl.LowLevelTransaction llt, string treeName, float[] queryVec, int topK)
+        {
+            using var s = Slice.From(Allocator, $"{nameof(ApolloniusSelector_HighDim_RecallSweep)}_{treeName}", out var treeSlice);
+            var qBytes = MemoryMarshal.Cast<float, byte>(queryVec).ToArray();
+            using var search = Hnsw.ExactNearest(llt, treeSlice, numberOfCandidates: topK, qBytes, minimumSimilarity: 0f, hasFilterMatch: false);
+            return DrainTopK(search, topK);
+        }
+
+        HashSet<long> TopKApprox(global::Voron.Impl.LowLevelTransaction llt, string treeName, float[] queryVec, int topK, int efS)
+        {
+            using var s = Slice.From(Allocator, $"{nameof(ApolloniusSelector_HighDim_RecallSweep)}_{treeName}", out var treeSlice);
+            var qBytes = MemoryMarshal.Cast<float, byte>(queryVec).ToArray();
+            using var search = Hnsw.ApproximateNearest(llt, treeSlice, numberOfCandidates: efS, qBytes, minimumSimilarity: 0f, hasFilterMatch: false);
+            return DrainTopK(search, topK);
+        }
+
+        static HashSet<long> DrainTopK(global::Voron.Data.Graphs.Hnsw.VectorSearchRetriever search, int topK)
+        {
+            var matches = new long[Math.Max(topK, 16)];
+            var distances = new float[matches.Length];
+            var collected = new List<(long id, float dist)>();
+            int read;
+            do
+            {
+                read = search.Fill(matches, distances, filter: null);
+                for (int i = 0; i < read; i++)
+                    collected.Add((matches[i], distances[i]));
+            } while (read != 0);
+            collected.Sort((a, b) => a.dist.CompareTo(b.dist));
+            var result = new HashSet<long>();
+            foreach (var (id, _) in collected.Take(topK))
+                result.Add(id);
+            return result;
+        }
+    }
+
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
     public void ApolloniusSelector_ChurnRecall_HoldsUpVsLegacy()
     {
         // The framework's expected differentiator: under churn (insert + delete), Apollonius
