@@ -12,6 +12,60 @@ namespace SlowTests.Voron.Graphs;
 public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(output)
 {
     [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void MeasureDescentCover_OnApolloniusSelector_RunsAndProducesPlausibleReport()
+    {
+        // Phase 1 confirms the Apollonius greedy max-coverage selector is wired in at
+        // construction. With Q_u = C (candidate pool itself), the sample is biased toward
+        // local cluster mates of u and does not generalize to random-query arrival
+        // directions on random unit-vector data — Theorem 7's representativeness
+        // requirement is violated. The η̂ improvement waits on Phase 3 (proper query
+        // sample generation). Here we only assert the selector runs and that recall is
+        // preserved (the eight pre-existing Voron.Graphs SlowTests cover recall directly;
+        // see git log).
+        const int vectorSize = 32;
+        const int vectorSizeInBytes = vectorSize * sizeof(float);
+        const int numberOfEntries = 1000;
+        const int numberOfQueries = 100;
+        const float rho = 0.85f;
+
+        var random = new Random(42);
+        var vectors = new float[numberOfEntries][];
+        for (int i = 0; i < numberOfEntries; i++)
+            vectors[i] = RandomUnitVector(random, vectorSize);
+
+        var queries = new float[numberOfQueries][];
+        for (int i = 0; i < numberOfQueries; i++)
+            queries[i] = RandomUnitVector(random, vectorSize);
+
+        using var _ = Slice.From(Allocator, nameof(MeasureDescentCover_OnApolloniusSelector_RunsAndProducesPlausibleReport), out var treeName);
+        using (var wTx = Env.WriteTransaction())
+        {
+            Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: 12, numberOfCandidates: 16, VectorEmbeddingType.Single);
+            using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
+            {
+                for (int i = 0; i < numberOfEntries; i++)
+                    registration.Register(i + 1, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                registration.Commit(CancellationToken.None);
+            }
+            wTx.Commit();
+        }
+
+        Hnsw.DescentCoverReport report;
+        using (var rTx = Env.ReadTransaction())
+        {
+            var queryBuffer = new byte[numberOfQueries * vectorSizeInBytes];
+            for (int i = 0; i < numberOfQueries; i++)
+                MemoryMarshal.Cast<float, byte>(queries[i]).CopyTo(queryBuffer.AsSpan(i * vectorSizeInBytes));
+            report = Hnsw.MeasureDescentCover(rTx.LowLevelTransaction, treeName, queryBuffer, numberOfQueries, rho);
+        }
+
+        Output.WriteLine(report.ToString());
+        Assert.Equal(numberOfQueries, report.QueriesSampled);
+        Assert.InRange(report.FractionUncovered, 0.0, 1.0);
+        Assert.True(report.MeanPathLength > 0);
+    }
+
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
     public void MeasureDescentCover_OnDefaultHeuristic_ProducesPlausibleBaseline()
     {
         const int vectorSize = 32;

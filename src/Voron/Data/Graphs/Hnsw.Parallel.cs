@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Sparrow;
@@ -406,7 +407,15 @@ public partial class Hnsw
 
             private sealed class FilterEdgesHeuristicWorker(NodePlacementRunner runner) : WorkItem(runner)
             {
+                // ρ-descent factor for the Apollonius cover. An edge u→v counts as a descent
+                // witness for query q iff d(v,q) ≤ ρ·d(u,q). ρ=0.85 is a balance between
+                // descent strength (smaller ρ ⇒ shorter paths) and coverage feasibility.
+                private const float Rho = 0.85f;
+
                 private UnmanagedSpan _src;
+                private float[] _distUQ = [];
+                private ulong[] _witness = [];
+                private bool[] _picked = [];
 
                 public void Reset(UnmanagedSpan src, int currentNodeIndex, int level)
                 {
@@ -417,56 +426,120 @@ public partial class Hnsw
 
                 protected override void DoWork()
                 {
-                    // See: https://icode.best/i/45208840268843 - Chinese, but auto-translate works, and a good explanation with 
-                    // conjunction of: https://img-bc.icode.best/20210425010212938.png
-                    // See also the paper here: https://arxiv.org/pdf/1603.09320
-                    // This implements the Fig. 2 / Algorithm 4
+                    // Apollonius query-space descent cover.
+                    //
+                    // Replaces the original HNSW Algorithm-4 / DiskANN robust-prune with a
+                    // greedy maximum-coverage selection over Apollonius ρ-descent cells. For
+                    // each candidate v, the cell A_ρ(u,v) = {q : d(v,q) ≤ ρ·d(u,q)} is the
+                    // region of query space where edge u→v gives multiplicative descent.
+                    //
+                    // Construction-time query sample Q_u is taken to be the candidate pool C
+                    // itself: each v_j ∈ C is a sampled direction representative of queries
+                    // that would arrive at u. The selector picks M neighbors that maximize
+                    // |⋃_v A_ρ(u,v) ∩ Q_u| via greedy max-coverage (Theorem 9, capped
+                    // survival coverage F with Λ=1 and uniform hazard). Greedy max-coverage
+                    // gives the standard (1 − 1/e) approximation to the optimum.
 
                     var searchState = Owner._searchState;
                     var candidates = Owner._candidates;
                     var vectors = Owner._vectors;
                     var indexes = Owner._indexes;
-                    var queue = Owner._candidatesQ;
-                    
-                    Debug.Assert(queue.Count is 0);
-                    for (int i = 0; i < indexes.Count; i++)
+
+                    int N = indexes.Count;
+                    candidates.Clear();
+                    if (N == 0)
+                        return;
+
+                    int M = searchState.Options.NumberOfEdges;
+                    int wordsPerRow = (N + 63) >> 6;
+
+                    if (_distUQ.Length < N)
+                        _distUQ = new float[N];
+                    if (_witness.Length < N * wordsPerRow)
+                        _witness = new ulong[N * wordsPerRow];
+                    if (_picked.Length < N)
+                        _picked = new bool[N];
+
+                    Span<float> distUQ = _distUQ.AsSpan(0, N);
+                    Span<ulong> witness = _witness.AsSpan(0, N * wordsPerRow);
+                    Span<bool> picked = _picked.AsSpan(0, N);
+                    witness.Clear();
+                    picked.Clear();
+
+                    for (int j = 0; j < N; j++)
+                        distUQ[j] = searchState.Distance(_src, vectors[j]);
+
+                    // Witness mask: bit j of row i is set iff candidate v_i is a ρ-descent
+                    // witness for query direction v_j: d(v_i, v_j) ≤ ρ·d(u, v_j).
+                    for (int i = 0; i < N; i++)
                     {
-                        var distance = searchState.Distance(_src, vectors[i]);
-                        // note that we use local indexes here!
-                        queue.Enqueue(i, distance);
+                        var row = witness.Slice(i * wordsPerRow, wordsPerRow);
+                        for (int j = 0; j < N; j++)
+                        {
+                            if (i == j)
+                                continue;
+                            var d = searchState.Distance(vectors[i], vectors[j]);
+                            if (d <= Rho * distUQ[j])
+                                row[j >> 6] |= 1UL << (j & 63);
+                        }
                     }
 
-                    candidates.Clear();
+                    Span<ulong> covered = stackalloc ulong[wordsPerRow <= 32 ? wordsPerRow : 0];
+                    if (covered.Length == 0)
+                        covered = new ulong[wordsPerRow];
 
-                    while (candidates.Count <= searchState.Options.NumberOfEdges &&
-                           queue.TryDequeue(out var cur, out var distance))
+                    while (candidates.Count < M)
                     {
-                        bool match = true;
-                        foreach (var alternativeIndex in candidates)
+                        int bestI = -1;
+                        int bestGain = 0;
+                        for (int i = 0; i < N; i++)
                         {
-                            var curDist = searchState.Distance(vectors[cur], vectors[alternativeIndex]);
-                            // there is already an item in the result that is *closer* to the current
-                            // node than the target node, so no need to add it
-                            if (curDist < distance)
+                            if (picked[i])
+                                continue;
+                            var row = witness.Slice(i * wordsPerRow, wordsPerRow);
+                            int gain = 0;
+                            for (int w = 0; w < wordsPerRow; w++)
+                                gain += BitOperations.PopCount(row[w] & ~covered[w]);
+                            if (gain > bestGain)
                             {
-                                match = false;
-                                break;
+                                bestGain = gain;
+                                bestI = i;
                             }
                         }
+                        if (bestI == -1)
+                            break;
+                        picked[bestI] = true;
+                        candidates.Add(bestI);
+                        var bestRow = witness.Slice(bestI * wordsPerRow, wordsPerRow);
+                        for (int w = 0; w < wordsPerRow; w++)
+                            covered[w] |= bestRow[w];
+                    }
 
-                        if (match)
+                    // Top-up by nearest-to-u when max-coverage exhausts (no candidate adds
+                    // any new covered direction). Keeps the node from being under-connected
+                    // when the descent cover saturates early.
+                    while (candidates.Count < M)
+                    {
+                        int bestI = -1;
+                        float bestDist = float.MaxValue;
+                        for (int i = 0; i < N; i++)
                         {
-                            candidates.Add(cur);
+                            if (picked[i])
+                                continue;
+                            if (distUQ[i] < bestDist)
+                            {
+                                bestDist = distUQ[i];
+                                bestI = i;
+                            }
                         }
+                        if (bestI == -1)
+                            break;
+                        picked[bestI] = true;
+                        candidates.Add(bestI);
                     }
 
                     for (int i = 0; i < candidates.Count; i++)
-                    {
-                        // turn the local indexing into a global one
                         candidates[i] = indexes[candidates[i]];
-                    }
-
-                    queue.Clear();
                 }
             }
             private sealed class ProcessEdgesWorker(NodePlacementRunner runner) : WorkItem(runner)
