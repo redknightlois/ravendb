@@ -415,21 +415,7 @@ public partial class Hnsw
 
             private sealed class FilterEdgesHeuristicWorker(NodePlacementRunner runner) : WorkItem(runner)
             {
-                // ρ-descent factor. The framework's Apollonius cell A_ρ(u,v) is
-                // {q : d(v,q) ≤ ρ·d(u,q)}. The PRODUCTION path implements the DiskANN/Vamana
-                // α-prune rule with α = 1/ρ, which is RELATED to but NOT EQUIVALENT TO the
-                // Apollonius cover (α-prune compares d(v,w) to ρ·d(u,v); the cover compares
-                // d(v,q) to ρ·d(u,q) — the denominator differs). See Audit-A1.
-                //
-                // Must satisfy ρ ∈ (0, 1]. ρ > 1 silently flips to α < 1 which is looser
-                // than legacy and catastrophically regresses recall.
-                private const float Rho = 0.90f;
-
-
                 private UnmanagedSpan _src;
-                private float[] _distUQ = [];
-                private ulong[] _witness = [];
-                private bool[] _picked = [];
 
                 public void Reset(UnmanagedSpan src, int currentNodeIndex, int level)
                 {
@@ -440,14 +426,10 @@ public partial class Hnsw
 
                 protected override void DoWork()
                 {
-                    // Production edge selector: DiskANN/Vamana α-prune (α = 1/ρ) with M-fill
-                    // top-up. Motivated by — but NOT EQUIVALENT TO — the framework's
-                    // Apollonius cover (Theorem 1). The Apollonius cover would compute
-                    // witness bits d(v,q) ≤ ρ·d(u,q) over Q_u and greedy-max-cover to M
-                    // picks (Theorem 9, (1-1/e) bound). That path is in DoWorkPointSampled
-                    // below; with Q_u = C it is locally sample-biased and empirically
-                    // regresses recall, so the production path is α-prune. See Audit-A1, A2.
-
+                    // Production edge selector: true Apollonius cover (Theorems 1+7+9).
+                    // Witness bits d(v,q) ≤ ρ·d(u,q) over the frozen global Q_u, greedy
+                    // (1-1/e) max-cover, k-capture top-up at L0. Legacy is a test-only
+                    // escape hatch for the diagnostic side-by-side build.
                     var searchState = Owner._searchState;
                     var candidates = Owner._candidates;
                     var vectors = Owner._vectors;
@@ -461,12 +443,142 @@ public partial class Hnsw
                     if (Hnsw.UseLegacyHeuristic)
                         DoWorkLegacyRobustPrune(searchState, candidates, vectors, indexes, N);
                     else
-                        DoWorkApolloniusAlphaPrune(searchState, candidates, vectors, indexes, N);
+                        DoWorkApolloniusCover(searchState, candidates, vectors, indexes, N, runner.GlobalQuerySample);
                 }
 
-                // Original HNSW Algorithm-4 / DiskANN robust-prune. Test-only path reached via
-                // the UseLegacyHeuristic escape hatch — lets diagnostic tests build a baseline
-                // graph for side-by-side comparison against the Apollonius variant.
+                // True Apollonius cover (Theorem 1) with greedy submodular max-cover
+                // (Theorem 9, (1-1/e) approximation) over a frozen GLOBAL query sample Q_u
+                // (Theorem 7 uniform convergence). For each candidate v and each q ∈ Q_u,
+                // witness bit b[v,q] = 1 iff d(v,q) ≤ ρ·d(u,q) — i.e., v's Apollonius cell
+                // A_ρ(u,v) contains q. Greedy picks v maximizing newly covered bits per
+                // round, up to M rounds. L0 reserves M/2 slots for true k-nearest of u
+                // (Theorem 11 terminal-layer capture) BEFORE cover runs.
+                private void DoWorkApolloniusCover(SearchState searchState, List<int> candidates, List<UnmanagedSpan> vectors, List<int> indexes, int N, UnmanagedSpan[] Qu)
+                {
+                    const float Rho = 0.90f;
+                    int M = searchState.Options.NumberOfEdges;
+                    int K = Qu.Length;
+                    Debug.Assert(K >= 0 && K <= 64, $"Q_u size must fit one ulong (≤64). Got {K}.");
+
+                    // ρ · d(u, q_k) thresholds for each q in Q_u.
+                    Span<float> threshold = stackalloc float[64];
+                    for (int k = 0; k < K; k++)
+                        threshold[k] = Rho * searchState.Distance(_src, Qu[k]);
+
+                    // Witness bitmask per candidate. Bit k set iff candidate i covers q_k.
+                    Span<ulong> witness = stackalloc ulong[N <= 1024 ? N : 0];
+                    ulong[] witnessHeap = null;
+                    if (witness.Length == 0)
+                    {
+                        witnessHeap = new ulong[N];
+                        witness = witnessHeap;
+                    }
+                    for (int i = 0; i < N; i++)
+                    {
+                        ulong bits = 0;
+                        var v = vectors[i];
+                        for (int k = 0; k < K; k++)
+                        {
+                            if (searchState.Distance(v, Qu[k]) <= threshold[k])
+                                bits |= 1UL << k;
+                        }
+                        witness[i] = bits;
+                    }
+
+                    Span<bool> picked = stackalloc bool[N <= 1024 ? N : 0];
+                    bool[] pickedHeap = null;
+                    if (picked.Length == 0)
+                    {
+                        pickedHeap = new bool[N];
+                        picked = pickedHeap;
+                    }
+
+                    // L0 k-capture (Theorem 11): reserve M/2 slots for nearest-to-u BEFORE
+                    // cover. Upper layers route by descent so cover gets the full budget.
+                    int kCapture = Level == 0 ? Math.Max(1, M / 2) : 0;
+                    if (kCapture > 0)
+                    {
+                        var queue = Owner._candidatesQ;
+                        Debug.Assert(queue.Count == 0);
+                        for (int i = 0; i < N; i++)
+                            queue.Enqueue(i, searchState.Distance(_src, vectors[i]));
+                        while (candidates.Count < kCapture && queue.TryDequeue(out var cur, out _))
+                        {
+                            candidates.Add(cur);
+                            picked[cur] = true;
+                        }
+                        queue.Clear();
+                    }
+
+                    // Pre-seed covered mask with bits already contributed by k-capture so
+                    // cover doesn't double-pay for those q's.
+                    ulong covered = 0;
+                    for (int j = 0; j < candidates.Count; j++)
+                        covered |= witness[candidates[j]];
+
+                    // Greedy max-cover. Picks the candidate with the most uncovered bits.
+                    while (candidates.Count < M)
+                    {
+                        int bestI = -1;
+                        int bestGain = -1;
+                        for (int i = 0; i < N; i++)
+                        {
+                            if (picked[i])
+                                continue;
+                            int gain = BitOperations.PopCount(witness[i] & ~covered);
+                            if (gain > bestGain)
+                            {
+                                bestGain = gain;
+                                bestI = i;
+                            }
+                        }
+                        if (bestI == -1 || bestGain == 0)
+                            break;
+                        candidates.Add(bestI);
+                        picked[bestI] = true;
+                        covered |= witness[bestI];
+                    }
+
+                    // M-fill top-up: nearest-of-remaining. Needed when greedy stops because
+                    // every remaining witness=0 (no q ∈ Q_u falls inside their A_ρ cell);
+                    // those candidates still earn slots by closeness to u.
+                    if (candidates.Count < M)
+                    {
+                        Span<float> dist = stackalloc float[N <= 1024 ? N : 0];
+                        float[] distHeap = null;
+                        if (dist.Length == 0)
+                        {
+                            distHeap = new float[N];
+                            dist = distHeap;
+                        }
+                        for (int i = 0; i < N; i++)
+                            dist[i] = picked[i] ? float.MaxValue : searchState.Distance(_src, vectors[i]);
+                        while (candidates.Count < M)
+                        {
+                            int bestI = -1;
+                            float bestDist = float.MaxValue;
+                            for (int i = 0; i < N; i++)
+                            {
+                                if (dist[i] < bestDist)
+                                {
+                                    bestDist = dist[i];
+                                    bestI = i;
+                                }
+                            }
+                            if (bestI == -1)
+                                break;
+                            candidates.Add(bestI);
+                            dist[bestI] = float.MaxValue;
+                        }
+                    }
+
+                    for (int i = 0; i < candidates.Count; i++)
+                        candidates[i] = indexes[candidates[i]];
+                }
+
+                // Original HNSW Algorithm-4 / DiskANN robust-prune. Test-only path reached
+                // via the UseLegacyHeuristic escape hatch — lets diagnostic tests build a
+                // baseline graph for side-by-side comparison against the Apollonius cover.
                 private void DoWorkLegacyRobustPrune(SearchState searchState, List<int> candidates, List<UnmanagedSpan> vectors, List<int> indexes, int N)
                 {
                     var queue = Owner._candidatesQ;
@@ -498,205 +610,6 @@ public partial class Hnsw
                     queue.Clear();
                 }
 
-                // Apollonius via α-prune. Same loop shape as legacy robust-prune, but the
-                // reject condition uses α = 1/ρ instead of α = 1. v is rejected when an
-                // already-picked w satisfies α·d(v,w) < d(u,v) — i.e., the existing edge
-                // u→w already provides a 1/α ≤ ρ descent for the region around w, so the
-                // extra edge u→v is redundant in that region. With ρ < 1 (α > 1) the rule
-                // is stricter than α=1, producing a sparser but more geometrically diverse
-                // edge set (DiskANN's reasoning). Top up with nearest-to-u for k-capture.
-                private void DoWorkApolloniusAlphaPrune(SearchState searchState, List<int> candidates, List<UnmanagedSpan> vectors, List<int> indexes, int N)
-                {
-                    Debug.Assert(Rho > 0f && Rho <= 1f, $"ρ must be in (0,1], got {Rho}. ρ > 1 gives α < 1 (weaker than legacy α=1) and catastrophically regresses recall.");
-                    const float Alpha = 1f / Rho;
-                    int M = searchState.Options.NumberOfEdges;
-                    var queue = Owner._candidatesQ;
-                    Debug.Assert(queue.Count == 0);
-                    for (int i = 0; i < N; i++)
-                        queue.Enqueue(i, searchState.Distance(_src, vectors[i]));
-
-                    Span<bool> picked = stackalloc bool[N <= 1024 ? N : 0];
-                    Span<bool> rejected = stackalloc bool[N <= 1024 ? N : 0];
-                    bool[] pickedHeap = null, rejectedHeap = null;
-                    if (picked.Length == 0)
-                    {
-                        pickedHeap = new bool[N];
-                        rejectedHeap = new bool[N];
-                        picked = pickedHeap;
-                        rejected = rejectedHeap;
-                    }
-
-                    // Audit-A3: Theorem 11 explicit k-capture at base layer. At Level==0,
-                    // unconditionally reserve ⌈M/4⌉ slots for the true k-nearest neighbors
-                    // of u, ignoring the α-test. This guarantees the search can extract
-                    // top-k from a τ-terminal basin around q. Upper layers do not need
-                    // this — routing benefits from α-prune's diversity, not local capture.
-                    // M/4 is empirically the sweet spot: enough capture to honour Theorem 11
-                    // without crowding the diversity slots that produce the low-ef win.
-                    int kCapture = Level == 0 ? Math.Max(1, M / 4) : 0;
-                    while (candidates.Count < kCapture && queue.TryDequeue(out var cur, out _))
-                    {
-                        candidates.Add(cur);
-                        picked[cur] = true;
-                    }
-
-                    // Pass 1: α-prune. v survives iff for all already-picked w, α·d(v,w) ≥ d(u,v).
-                    // Rejected v's are remembered for the top-up pass.
-                    while (candidates.Count < M && queue.TryDequeue(out var cur, out var distance))
-                    {
-                        bool keep = true;
-                        foreach (var altLocal in candidates)
-                        {
-                            var curDist = searchState.Distance(vectors[cur], vectors[altLocal]);
-                            if (Alpha * curDist < distance)
-                            {
-                                keep = false;
-                                break;
-                            }
-                        }
-                        if (keep)
-                        {
-                            candidates.Add(cur);
-                            picked[cur] = true;
-                        }
-                        else
-                        {
-                            rejected[cur] = true;
-                        }
-                    }
-                    queue.Clear();
-
-                    // Pass 2 (k-capture top-up): if α-prune did not fill M edges, add the
-                    // nearest-to-u of the rejected candidates until we reach M. This guarantees
-                    // every node has exactly M edges, matching legacy invariant, and supplies
-                    // the Theorem 11 local-capture edges the stricter prune may have dropped.
-                    if (candidates.Count < M)
-                    {
-                        Span<float> dist = stackalloc float[N <= 1024 ? N : 0];
-                        float[] distHeap = null;
-                        if (dist.Length == 0)
-                        {
-                            distHeap = new float[N];
-                            dist = distHeap;
-                        }
-                        for (int i = 0; i < N; i++)
-                            dist[i] = (picked[i] || rejected[i] == false) ? float.MaxValue : searchState.Distance(_src, vectors[i]);
-                        while (candidates.Count < M)
-                        {
-                            int bestI = -1;
-                            float bestDist = float.MaxValue;
-                            for (int i = 0; i < N; i++)
-                            {
-                                if (dist[i] < bestDist)
-                                {
-                                    bestDist = dist[i];
-                                    bestI = i;
-                                }
-                            }
-                            if (bestI == -1)
-                                break;
-                            candidates.Add(bestI);
-                            dist[bestI] = float.MaxValue;
-                        }
-                    }
-
-                    for (int i = 0; i < candidates.Count; i++)
-                        candidates[i] = indexes[candidates[i]];
-                }
-
-                // Reference point-sampled Apollonius cover (kept for diagnostics). For each
-                // pair (v_i, q_j) in C×C compute the witness d(v_i, q_j) ≤ ρ·d(u, q_j), then
-                // greedy max-coverage to M picks. Mathematically equivalent at the limit
-                // to the α-prune variant above when q's are the already-picked vertices.
-                [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0051")]
-                private void DoWorkPointSampled(SearchState searchState, List<int> candidates, List<UnmanagedSpan> vectors, List<int> indexes, int N)
-                {
-                    int M = searchState.Options.NumberOfEdges;
-                    int wordsPerRow = (N + 63) >> 6;
-
-                    if (_distUQ.Length < N)
-                        _distUQ = new float[N];
-                    if (_witness.Length < N * wordsPerRow)
-                        _witness = new ulong[N * wordsPerRow];
-                    if (_picked.Length < N)
-                        _picked = new bool[N];
-
-                    Span<float> distUQ = _distUQ.AsSpan(0, N);
-                    Span<ulong> witness = _witness.AsSpan(0, N * wordsPerRow);
-                    Span<bool> picked = _picked.AsSpan(0, N);
-                    witness.Clear();
-                    picked.Clear();
-
-                    for (int j = 0; j < N; j++)
-                        distUQ[j] = searchState.Distance(_src, vectors[j]);
-
-                    for (int i = 0; i < N; i++)
-                    {
-                        var row = witness.Slice(i * wordsPerRow, wordsPerRow);
-                        for (int j = 0; j < N; j++)
-                        {
-                            if (i == j)
-                                continue;
-                            var d = searchState.Distance(vectors[i], vectors[j]);
-                            if (d <= Rho * distUQ[j])
-                                row[j >> 6] |= 1UL << (j & 63);
-                        }
-                    }
-
-                    Span<ulong> covered = stackalloc ulong[wordsPerRow <= 32 ? wordsPerRow : 0];
-                    if (covered.Length == 0)
-                        covered = new ulong[wordsPerRow];
-
-                    while (candidates.Count < M)
-                    {
-                        int bestI = -1;
-                        int bestGain = 0;
-                        for (int i = 0; i < N; i++)
-                        {
-                            if (picked[i])
-                                continue;
-                            var row = witness.Slice(i * wordsPerRow, wordsPerRow);
-                            int gain = 0;
-                            for (int w = 0; w < wordsPerRow; w++)
-                                gain += BitOperations.PopCount(row[w] & ~covered[w]);
-                            if (gain > bestGain)
-                            {
-                                bestGain = gain;
-                                bestI = i;
-                            }
-                        }
-                        if (bestI == -1)
-                            break;
-                        picked[bestI] = true;
-                        candidates.Add(bestI);
-                        var bestRow = witness.Slice(bestI * wordsPerRow, wordsPerRow);
-                        for (int w = 0; w < wordsPerRow; w++)
-                            covered[w] |= bestRow[w];
-                    }
-
-                    while (candidates.Count < M)
-                    {
-                        int bestI = -1;
-                        float bestDist = float.MaxValue;
-                        for (int i = 0; i < N; i++)
-                        {
-                            if (picked[i])
-                                continue;
-                            if (distUQ[i] < bestDist)
-                            {
-                                bestDist = distUQ[i];
-                                bestI = i;
-                            }
-                        }
-                        if (bestI == -1)
-                            break;
-                        picked[bestI] = true;
-                        candidates.Add(bestI);
-                    }
-
-                    for (int i = 0; i < candidates.Count; i++)
-                        candidates[i] = indexes[candidates[i]];
-                }
             }
             private sealed class ProcessEdgesWorker(NodePlacementRunner runner) : WorkItem(runner)
             {
@@ -938,6 +851,13 @@ public partial class Hnsw
                 _inFlightIndexes.Remove(node);
             }
 
+            // Frozen Apollonius cover Q_u sample. Captured ONCE at runner construction from
+            // the set of nodes already known to the search state. All workers read this
+            // array but never mutate it, so no concurrency hazard. Pre-resolved vectors are
+            // cached in the array — workers never call GetVectorUnmanagedSpan against
+            // lazy-loaded nodes whose state could race.
+            internal readonly UnmanagedSpan[] GlobalQuerySample;
+
             public NodePlacementRunner(Registration parent, int activeTasksCount, CancellationToken token)
             {
                 _mainCts = CancellationTokenSource.CreateLinkedTokenSource(token, _errorCts.Token);
@@ -952,10 +872,59 @@ public partial class Hnsw
                 // lazily loaded on top of CreatedNodes.
                 _searchState.EnsureNodesCapacity(_searchState.CreatedNodes + 16 * 1024);
 
+                GlobalQuerySample = BuildGlobalQuerySample(_searchState, desired: 32);
+
                 for (int i = 0; i < activeTasksCount; i++)
                 {
                     Enqueue(new NodePlacement(parent, this).Process().GetEnumerator());
                 }
+            }
+
+            // Q_u for the Apollonius cover: a uniform random sample of nodes already known
+            // to the search state at this point. These nodes either come from prior
+            // transactions (durable, fully resident vectors) or are new-batch nodes already
+            // Register()'d (VectorId set, vector durably in container). Either way they are
+            // safe to read here, on the main runner thread, before any worker dispatch.
+            //
+            // Lazy-loaded edge targets that appear later during placement get indices
+            // ≥ Nodes.Length-now and are excluded from this snapshot.
+            private static UnmanagedSpan[] BuildGlobalQuerySample(SearchState state, int desired)
+            {
+                var nodes = state.Nodes;
+                int total = nodes.Length;
+                if (total == 0)
+                    return [];
+                int target = Math.Min(desired, total);
+                var result = new UnmanagedSpan[target];
+                var rng = new Random(0xA901);
+                int got = 0;
+                int attempts = 0;
+                int maxAttempts = target * 8;
+                while (got < target && attempts < maxAttempts)
+                {
+                    attempts++;
+                    int idx = rng.Next(total);
+                    ref var n = ref nodes[idx];
+                    if (n.VectorId == 0)
+                        continue;
+                    UnmanagedSpan span;
+                    try
+                    {
+                        span = n.GetVectorUnmanagedSpan(state);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+                    if (span.Length == 0)
+                        continue;
+                    result[got++] = span;
+                }
+                if (got == target)
+                    return result;
+                var trimmed = new UnmanagedSpan[got];
+                Array.Copy(result, trimmed, got);
+                return trimmed;
             }
 
             
