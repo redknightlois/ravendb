@@ -512,7 +512,10 @@ public partial class Hnsw
                 private void DoWorkCosineSynthetic(SearchState searchState, List<int> candidates, List<UnmanagedSpan> vectors, List<int> indexes, int N)
                 {
                     int M = searchState.Options.NumberOfEdges;
-                    int K = searchState.Options.NumberOfCandidates;
+                    // K = M is the minimum sample size where greedy max-coverage is non-degenerate.
+                    // Larger K improves Theorem 7 generalization but multiplies witness-check cost
+                    // linearly. K=M trades a tighter sample for a much cheaper insert wall.
+                    int K = M;
                     int dim = searchState.Options.VectorSizeBytes / sizeof(float);
                     EnsureQuerySamples(K, dim);
 

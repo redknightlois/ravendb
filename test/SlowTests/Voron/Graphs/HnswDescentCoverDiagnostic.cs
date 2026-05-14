@@ -216,11 +216,11 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
 
         Output.WriteLine($"Insert wall legacy={legacyMs}ms apollonius={apolloniusMs}ms ratio={(double)apolloniusMs / legacyMs:F2}x");
 
-        // Apollonius does N×K distance comparisons + bit-popcount greedy max-cover (K=N
-        // in the default config), versus Algorithm-4's up-to N² robust prune. We accept
-        // up to 2x for now — the dominant insert cost is graph traversal, not selection.
-        Assert.True(apolloniusMs <= legacyMs * 3,
-            $"Apollonius insert wall {apolloniusMs}ms exceeded 3x legacy wall {legacyMs}ms");
+        // Apollonius does N×K distance comparisons + bit-popcount greedy max-cover (K=M
+        // in the default config), versus Algorithm-4's roughly N+M² robust prune. We
+        // accept up to 2x — measured ~1.4x on this workload.
+        Assert.True(apolloniusMs <= legacyMs * 2,
+            $"Apollonius insert wall {apolloniusMs}ms exceeded 2x legacy wall {legacyMs}ms");
 
         long BuildAndTime(string label, bool useLegacy)
         {
