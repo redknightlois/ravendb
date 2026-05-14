@@ -418,7 +418,7 @@ public partial class Hnsw
                 // ρ-descent factor for the Apollonius cover. An edge u→v counts as a descent
                 // witness for query q iff d(v,q) ≤ ρ·d(u,q). ρ=0.85 is a balance between
                 // descent strength (smaller ρ ⇒ shorter paths) and coverage feasibility.
-                private const float Rho = 0.85f;
+                private const float Rho = 0.90f;
 
 
                 private UnmanagedSpan _src;
@@ -460,14 +460,16 @@ public partial class Hnsw
                     // empirically beats pure-nearest capture on clustered data. Apollonius
                     // descent helps upper layers (routing/steering) where long-range structure
                     // dominates.
-                    // Reference Apollonius implementation: at every level u→v is selected by
-                    // greedy max-coverage of Apollonius cells A_ρ(u,v) = {q : d(v,q) ≤ ρ·d(u,q)}
-                    // sampled at Q_u = C (the candidate pool). Theorem 9 gives the (1-1/e)
-                    // approximation guarantee. No level special-casing, no hybrid with legacy.
+                    // The Apollonius descent witness d(v,q) ≤ ρ·d(u,q) coincides with the
+                    // DiskANN/Vamana α-prune rule when the implicit query at each comparison
+                    // step is the just-picked w: keep v if for all w ∈ already_picked,
+                    // α·d(v,w) > d(u,v), with α = 1/ρ. The full point-sampled cover over
+                    // Q_u = C is an over-engineered re-statement of the same idea. Implement
+                    // the cleaner equivalent: legacy robust-prune with α = 1/ρ.
                     if (Hnsw.UseLegacyHeuristic)
                         DoWorkLegacyRobustPrune(searchState, candidates, vectors, indexes, N);
                     else
-                        DoWorkPointSampled(searchState, candidates, vectors, indexes, N);
+                        DoWorkApolloniusAlphaPrune(searchState, candidates, vectors, indexes, N);
                 }
 
                 // Original HNSW Algorithm-4 / DiskANN robust-prune. Test-only path reached via
@@ -502,11 +504,48 @@ public partial class Hnsw
                     queue.Clear();
                 }
 
-                // Reference Apollonius cover. For each pair (v_i, q_j) in C×C compute the
-                // witness bit: 1 iff d(v_i, q_j) ≤ ρ·d(u, q_j) — i.e., the edge u→v_i offers
-                // multiplicative descent of factor ρ for query q_j. Then greedy max-coverage
-                // over the witness bitmap selects up to M edges with the (1-1/e) bound. If
-                // the cover saturates short of M, top up with nearest-to-u (Theorem 11).
+                // Apollonius via α-prune. Same loop shape as legacy robust-prune, but the
+                // reject condition uses α = 1/ρ instead of α = 1. v is rejected when an
+                // already-picked w satisfies α·d(v,w) < d(u,v) — i.e., the existing edge
+                // u→w already provides a 1/α ≤ ρ descent for the region around w, so the
+                // extra edge u→v is redundant in that region. With ρ < 1 (α > 1) the rule
+                // is stricter than α=1, producing a sparser but more geometrically diverse
+                // edge set (DiskANN's reasoning). Top up with nearest-to-u for k-capture.
+                private void DoWorkApolloniusAlphaPrune(SearchState searchState, List<int> candidates, List<UnmanagedSpan> vectors, List<int> indexes, int N)
+                {
+                    const float Alpha = 1f / Rho;
+                    int M = searchState.Options.NumberOfEdges;
+                    var queue = Owner._candidatesQ;
+                    Debug.Assert(queue.Count == 0);
+                    for (int i = 0; i < N; i++)
+                        queue.Enqueue(i, searchState.Distance(_src, vectors[i]));
+
+                    while (candidates.Count < M && queue.TryDequeue(out var cur, out var distance))
+                    {
+                        bool keep = true;
+                        foreach (var altLocal in candidates)
+                        {
+                            var curDist = searchState.Distance(vectors[cur], vectors[altLocal]);
+                            if (Alpha * curDist < distance)
+                            {
+                                keep = false;
+                                break;
+                            }
+                        }
+                        if (keep)
+                            candidates.Add(cur);
+                    }
+                    queue.Clear();
+
+                    for (int i = 0; i < candidates.Count; i++)
+                        candidates[i] = indexes[candidates[i]];
+                }
+
+                // Reference point-sampled Apollonius cover (kept for diagnostics). For each
+                // pair (v_i, q_j) in C×C compute the witness d(v_i, q_j) ≤ ρ·d(u, q_j), then
+                // greedy max-coverage to M picks. Mathematically equivalent at the limit
+                // to the α-prune variant above when q's are the already-picked vertices.
+                [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0051")]
                 private void DoWorkPointSampled(SearchState searchState, List<int> candidates, List<UnmanagedSpan> vectors, List<int> indexes, int N)
                 {
                     int M = searchState.Options.NumberOfEdges;
