@@ -464,7 +464,12 @@ public partial class Hnsw
                     if (N == 0)
                         return;
 
-                    if (Hnsw.UseLegacyHeuristic)
+                    // Per Theorem 11: the base layer (Level==0) is about local k-capture, not
+                    // descent quality. Robust-prune already balances close + diverse edges and
+                    // empirically beats pure-nearest capture on clustered data. Apollonius
+                    // descent helps upper layers (routing/steering) where long-range structure
+                    // dominates.
+                    if (Hnsw.UseLegacyHeuristic || Level == 0)
                         DoWorkLegacyRobustPrune(searchState, candidates, vectors, indexes, N);
                     else if (searchState.Options.SimilarityMethod == SimilarityMethod.CosineSimilaritySingles)
                         DoWorkCosineSynthetic(searchState, candidates, vectors, indexes, N);
@@ -518,10 +523,15 @@ public partial class Hnsw
                     int K = M;
 
                     // Local k-capture (Theorem 11). At the base layer the search must extract the
-                    // true top-k from a τ-terminal basin around q, which requires near-u edges
-                    // independent of descent quality. Reserve M_capture slots for nearest-to-u
-                    // picks at level 0; upper layers stay pure descent cover.
-                    int mCapture = Level == 0 ? Math.Max(1, M / 4) : 0;
+                    // true top-k from a τ-terminal basin around q, which requires NEAR-u edges
+                    // independent of descent quality. Upper layers steer routing and benefit
+                    // from descent cover (long-range edges between regions); the base layer
+                    // needs cluster-local edges so beam search can collect k-NN.
+                    //
+                    // Empirically (recall@10 on clustered data), giving the base layer mostly
+                    // capture slots (M_capture = 3M/4) prevents Apollonius cover from displacing
+                    // the local cluster-mate edges that real queries depend on.
+                    int mCapture = Level == 0 ? Math.Max(1, M * 3 / 4) : 0;
                     int mDescent = M - mCapture;
 
                     int dim = searchState.Options.VectorSizeBytes / sizeof(float);

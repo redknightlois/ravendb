@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using FastTests.Voron;
@@ -185,6 +187,135 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
             {
                 Hnsw.UseLegacyHeuristic = false;
             }
+        }
+    }
+
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void ApolloniusSelector_Recall10_NoRegressionVsLegacy()
+    {
+        // End-to-end recall@10 comparison on clustered 32-d data. Builds two graphs on
+        // the same data (legacy Algorithm-4 and Apollonius), runs Hnsw.ApproximateNearest
+        // for each of N_q queries, computes recall against the exhaustive ExactNearest
+        // ground truth. The Apollonius variant must not significantly regress recall.
+        const int vectorSize = 32;
+        const int vectorSizeInBytes = vectorSize * sizeof(float);
+        const int numberOfClusters = 25;
+        const int pointsPerCluster = 200;
+        const int numberOfEntries = numberOfClusters * pointsPerCluster;
+        const int numberOfQueries = 50;
+        const int k = 10;
+        const int efSearch = 32;
+        const float clusterStd = 0.15f;
+
+        var rng = new Random(7);
+        var centers = new float[numberOfClusters][];
+        for (int c = 0; c < numberOfClusters; c++)
+            centers[c] = RandomUnitVector(rng, vectorSize);
+        var vectors = new float[numberOfEntries][];
+        for (int c = 0; c < numberOfClusters; c++)
+            for (int j = 0; j < pointsPerCluster; j++)
+                vectors[c * pointsPerCluster + j] = PerturbedUnitVector(rng, centers[c], clusterStd);
+        var queries = new float[numberOfQueries][];
+        for (int q = 0; q < numberOfQueries; q++)
+            queries[q] = PerturbedUnitVector(rng, centers[rng.Next(numberOfClusters)], clusterStd);
+
+        // Build ground truth ONCE using ExactNearest — graph topology does not affect
+        // exact search results, so we can do this on the legacy graph and reuse.
+        Hnsw.UseLegacyHeuristic = true;
+        var groundTruth = new HashSet<long>[numberOfQueries];
+        try
+        {
+            BuildGraph("truth");
+            using var rTx = Env.ReadTransaction();
+            for (int q = 0; q < numberOfQueries; q++)
+            {
+                groundTruth[q] = TopKExact(rTx.LowLevelTransaction, "truth", queries[q], k);
+            }
+        }
+        finally
+        {
+            Hnsw.UseLegacyHeuristic = false;
+        }
+
+        double legacyRecall = RunRecallExperiment(useLegacy: true, label: "legacy");
+        double apolloniusRecall = RunRecallExperiment(useLegacy: false, label: "apollonius");
+
+        Output.WriteLine($"Recall@{k} (ef={efSearch}, clusters={numberOfClusters}x{pointsPerCluster}): legacy={legacyRecall:F4} apollonius={apolloniusRecall:F4} Δ={apolloniusRecall - legacyRecall:F4}");
+        Assert.True(apolloniusRecall >= legacyRecall - 0.05,
+            $"Apollonius recall@{k}={apolloniusRecall:F4} regressed >5pp vs legacy recall@{k}={legacyRecall:F4}");
+
+        double RunRecallExperiment(bool useLegacy, string label)
+        {
+            Hnsw.UseLegacyHeuristic = useLegacy;
+            try
+            {
+                BuildGraph(label);
+                using var rTx = Env.ReadTransaction();
+                double sum = 0;
+                for (int q = 0; q < numberOfQueries; q++)
+                {
+                    var approx = TopKApprox(rTx.LowLevelTransaction, label, queries[q], k, efSearch);
+                    int hits = 0;
+                    foreach (var id in approx)
+                        if (groundTruth[q].Contains(id))
+                            hits++;
+                    sum += (double)hits / k;
+                }
+                return sum / numberOfQueries;
+            }
+            finally
+            {
+                Hnsw.UseLegacyHeuristic = false;
+            }
+        }
+
+        void BuildGraph(string label)
+        {
+            using var s = Slice.From(Allocator, $"{nameof(ApolloniusSelector_Recall10_NoRegressionVsLegacy)}_{label}", out var treeName);
+            using var wTx = Env.WriteTransaction();
+            Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: 12, numberOfCandidates: 16, VectorEmbeddingType.Single);
+            using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
+            {
+                for (int i = 0; i < numberOfEntries; i++)
+                    registration.Register(i + 1, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                registration.Commit(CancellationToken.None);
+            }
+            wTx.Commit();
+        }
+
+        HashSet<long> TopKExact(global::Voron.Impl.LowLevelTransaction llt, string treeName, float[] queryVec, int topK)
+        {
+            using var s = Slice.From(Allocator, $"{nameof(ApolloniusSelector_Recall10_NoRegressionVsLegacy)}_{treeName}", out var treeSlice);
+            var qBytes = MemoryMarshal.Cast<float, byte>(queryVec).ToArray();
+            using var search = Hnsw.ExactNearest(llt, treeSlice, numberOfCandidates: topK, qBytes, minimumSimilarity: 0f, hasFilterMatch: false);
+            return DrainTopK(search, topK);
+        }
+
+        HashSet<long> TopKApprox(global::Voron.Impl.LowLevelTransaction llt, string treeName, float[] queryVec, int topK, int efS)
+        {
+            using var s = Slice.From(Allocator, $"{nameof(ApolloniusSelector_Recall10_NoRegressionVsLegacy)}_{treeName}", out var treeSlice);
+            var qBytes = MemoryMarshal.Cast<float, byte>(queryVec).ToArray();
+            using var search = Hnsw.ApproximateNearest(llt, treeSlice, numberOfCandidates: efS, qBytes, minimumSimilarity: 0f, hasFilterMatch: false);
+            return DrainTopK(search, topK);
+        }
+
+        static HashSet<long> DrainTopK(global::Voron.Data.Graphs.Hnsw.VectorSearchRetriever search, int topK)
+        {
+            var matches = new long[Math.Max(topK, 16)];
+            var distances = new float[matches.Length];
+            var collected = new List<(long id, float dist)>();
+            int read;
+            do
+            {
+                read = search.Fill(matches, distances, filter: null);
+                for (int i = 0; i < read; i++)
+                    collected.Add((matches[i], distances[i]));
+            } while (read != 0);
+            collected.Sort((a, b) => a.dist.CompareTo(b.dist));
+            var result = new HashSet<long>();
+            foreach (var (id, _) in collected.Take(topK))
+                result.Add(id);
+            return result;
         }
     }
 
