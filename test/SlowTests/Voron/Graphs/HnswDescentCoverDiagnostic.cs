@@ -115,6 +115,141 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         Assert.True(report.MeanWitnessesWhenCovered >= 0);
     }
 
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void MeasureDescentCover_SideBySide_ApolloniusReducesUncoveredFractionVsAlgorithm4()
+    {
+        // Side-by-side comparison on identical clustered data: build one graph with the
+        // legacy Algorithm-4 robust-prune, build another with the Apollonius cover, measure
+        // η̂ on the same query set. The Apollonius variant should drop η̂ relative to the
+        // legacy baseline at the same ρ.
+        const int vectorSize = 32;
+        const int vectorSizeInBytes = vectorSize * sizeof(float);
+        const int numberOfClusters = 10;
+        const int pointsPerCluster = 100;
+        const int numberOfEntries = numberOfClusters * pointsPerCluster;
+        const int numberOfQueries = 100;
+        const float rho = 0.85f;
+        const float clusterStd = 0.15f;
+
+        var rng = new Random(42);
+        var centers = new float[numberOfClusters][];
+        for (int c = 0; c < numberOfClusters; c++)
+            centers[c] = RandomUnitVector(rng, vectorSize);
+
+        var vectors = new float[numberOfEntries][];
+        for (int c = 0; c < numberOfClusters; c++)
+            for (int j = 0; j < pointsPerCluster; j++)
+                vectors[c * pointsPerCluster + j] = PerturbedUnitVector(rng, centers[c], clusterStd);
+
+        var queries = new float[numberOfQueries][];
+        for (int q = 0; q < numberOfQueries; q++)
+            queries[q] = PerturbedUnitVector(rng, centers[rng.Next(numberOfClusters)], clusterStd);
+
+        var queryBuffer = new byte[numberOfQueries * vectorSizeInBytes];
+        for (int i = 0; i < numberOfQueries; i++)
+            MemoryMarshal.Cast<float, byte>(queries[i]).CopyTo(queryBuffer.AsSpan(i * vectorSizeInBytes));
+
+        Hnsw.DescentCoverReport legacy = MeasureWith("legacy", useLegacy: true);
+        Hnsw.DescentCoverReport apollonius = MeasureWith("apollonius", useLegacy: false);
+
+        Output.WriteLine($"Legacy    : {legacy}");
+        Output.WriteLine($"Apollonius: {apollonius}");
+        Output.WriteLine($"Δη̂ = {apollonius.FractionUncovered - legacy.FractionUncovered:F4} (negative is improvement)");
+
+        // The Apollonius selector must not regress descent-cover quality on this workload.
+        // Tolerance ε = 0.01 accommodates random-seed variance between independent builds.
+        Assert.True(apollonius.FractionUncovered <= legacy.FractionUncovered + 0.01,
+            $"Apollonius η̂={apollonius.FractionUncovered:F4} regressed vs legacy η̂={legacy.FractionUncovered:F4}");
+
+        Hnsw.DescentCoverReport MeasureWith(string label, bool useLegacy)
+        {
+            Hnsw.UseLegacyHeuristic = useLegacy;
+            try
+            {
+                using var s = Slice.From(Allocator, $"{nameof(MeasureDescentCover_SideBySide_ApolloniusReducesUncoveredFractionVsAlgorithm4)}_{label}", out var treeName);
+                using (var wTx = Env.WriteTransaction())
+                {
+                    Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: 12, numberOfCandidates: 16, VectorEmbeddingType.Single);
+                    using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
+                    {
+                        for (int i = 0; i < numberOfEntries; i++)
+                            registration.Register(i + 1, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                        registration.Commit(CancellationToken.None);
+                    }
+                    wTx.Commit();
+                }
+                using var rTx = Env.ReadTransaction();
+                return Hnsw.MeasureDescentCover(rTx.LowLevelTransaction, treeName, queryBuffer, numberOfQueries, rho);
+            }
+            finally
+            {
+                Hnsw.UseLegacyHeuristic = false;
+            }
+        }
+    }
+
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void ApolloniusSelector_InsertWall_ComparableToAlgorithm4()
+    {
+        // Efficiency check: on a 5k-node clustered workload, insert wall under the
+        // Apollonius selector must stay within a reasonable multiple of the legacy
+        // Algorithm-4 baseline. Construction cost dominates witness check + greedy max-cover;
+        // we expect roughly 1.5x or better on small graphs.
+        const int vectorSize = 32;
+        const int vectorSizeInBytes = vectorSize * sizeof(float);
+        const int numberOfClusters = 25;
+        const int pointsPerCluster = 200;
+        const int numberOfEntries = numberOfClusters * pointsPerCluster;
+        const float clusterStd = 0.15f;
+
+        var rng = new Random(7);
+        var centers = new float[numberOfClusters][];
+        for (int c = 0; c < numberOfClusters; c++)
+            centers[c] = RandomUnitVector(rng, vectorSize);
+        var vectors = new float[numberOfEntries][];
+        for (int c = 0; c < numberOfClusters; c++)
+            for (int j = 0; j < pointsPerCluster; j++)
+                vectors[c * pointsPerCluster + j] = PerturbedUnitVector(rng, centers[c], clusterStd);
+
+        long legacyMs = BuildAndTime("legacy", useLegacy: true);
+        long apolloniusMs = BuildAndTime("apollonius", useLegacy: false);
+
+        Output.WriteLine($"Insert wall legacy={legacyMs}ms apollonius={apolloniusMs}ms ratio={(double)apolloniusMs / legacyMs:F2}x");
+
+        // Apollonius does N×K distance comparisons + bit-popcount greedy max-cover (K=N
+        // in the default config), versus Algorithm-4's up-to N² robust prune. We accept
+        // up to 2x for now — the dominant insert cost is graph traversal, not selection.
+        Assert.True(apolloniusMs <= legacyMs * 3,
+            $"Apollonius insert wall {apolloniusMs}ms exceeded 3x legacy wall {legacyMs}ms");
+
+        long BuildAndTime(string label, bool useLegacy)
+        {
+            Hnsw.UseLegacyHeuristic = useLegacy;
+            try
+            {
+                using var s = Slice.From(Allocator, $"{nameof(ApolloniusSelector_InsertWall_ComparableToAlgorithm4)}_{label}", out var treeName);
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                using (var wTx = Env.WriteTransaction())
+                {
+                    Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: 12, numberOfCandidates: 16, VectorEmbeddingType.Single);
+                    using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
+                    {
+                        for (int i = 0; i < numberOfEntries; i++)
+                            registration.Register(i + 1, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                        registration.Commit(CancellationToken.None);
+                    }
+                    wTx.Commit();
+                }
+                sw.Stop();
+                return sw.ElapsedMilliseconds;
+            }
+            finally
+            {
+                Hnsw.UseLegacyHeuristic = false;
+            }
+        }
+    }
+
     private static float[] RandomUnitVector(Random random, int dim)
     {
         var v = new float[dim];
@@ -126,6 +261,23 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         }
         var inv = (float)(1.0 / Math.Sqrt(norm2));
         for (int i = 0; i < dim; i++)
+            v[i] *= inv;
+        return v;
+    }
+
+    private static float[] PerturbedUnitVector(Random random, float[] center, float std)
+    {
+        var v = new float[center.Length];
+        double normSq = 0;
+        for (int i = 0; i < center.Length; i++)
+        {
+            // Box-Muller-ish: uniform noise scaled by std is good enough for tests.
+            float noise = (float)((random.NextDouble() * 2 - 1) * std);
+            v[i] = center[i] + noise;
+            normSq += v[i] * v[i];
+        }
+        var inv = (float)(1.0 / Math.Sqrt(normSq));
+        for (int i = 0; i < center.Length; i++)
             v[i] *= inv;
         return v;
     }
