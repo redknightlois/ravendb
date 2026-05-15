@@ -17,12 +17,21 @@ namespace Voron.Data.Graphs;
 public partial class Hnsw
 {
     /// <summary>
-    /// Test-only: when true, the parallel-construction edge-selection step uses the
-    /// original HNSW Algorithm-4 / DiskANN robust-prune instead of the Apollonius
-    /// query-space descent cover. Lets diagnostic tests build side-by-side graphs to
-    /// compare descent-cover quality. Process-wide; never set in production code paths.
+    /// When true, the parallel-construction edge-selection step uses the original HNSW
+    /// Algorithm-4 / DiskANN robust-prune instead of the Apollonius query-space descent
+    /// cover. Diagnostic tests flip it directly. For external benchmarks the toggle is
+    /// also driven by RAVEN_HNSW_LEGACY_HEURISTIC (set to "1" or "true" to enable legacy)
+    /// so the same Raven.Server binary can be benched both ways without recompile.
+    /// Process-wide.
     /// </summary>
-    internal static bool UseLegacyHeuristic;
+    internal static bool UseLegacyHeuristic = ReadLegacyHeuristicEnv();
+
+    private static bool ReadLegacyHeuristicEnv()
+    {
+        var v = Environment.GetEnvironmentVariable("RAVEN_HNSW_LEGACY_HEURISTIC");
+        return string.Equals(v, "1", StringComparison.Ordinal)
+            || string.Equals(v, "true", StringComparison.OrdinalIgnoreCase);
+    }
 
     /*
      * The problem with HNSW is that it is a graph algorithm, which requires
