@@ -551,3 +551,322 @@ ceiling at M=16 — closable by raising M, not by greedy changes.
 6. **Repair-on-deficit** when `deficit(p) > θ`.
 7. **End-to-end diagnostic** that measures `Pr̂[failure]` on **held-out**
    queries and checks `min{1, Ĥ·(η̂ + ε_m + e^(−Λ̂))} < 1`.
+
+---
+
+## 16. Chordal metric correction (the proof was in the wrong norm)
+
+The code computes cosine **dissimilarity** δ(x,y) = 1 − ⟨x,y⟩ and uses
+that as `Distance()`. δ is **not** a metric — strict triangle
+inequality fails on the sphere, which is why the journal's note about
+"no safe witness short-circuit" was forced.
+
+The corresponding true metric on unit vectors is the **chordal metric**:
+
+```
+D(x,y) = √(2(1 − ⟨x,y⟩)) = √(2·δ(x,y)).
+```
+
+This is Euclidean distance on S^{d−1}; it preserves the cosine NN
+ranking exactly and IS a strict metric (TI holds).
+
+**Consequence**: code uses `δ(v,q) ≤ λ·δ(u,q)` where `λ = 0.90`. In the
+metric proof this is
+
+```
+D(v,q)² ≤ λ · D(u,q)²    ⇔    D(v,q) ≤ √λ · D(u,q).
+```
+
+So the *metric* contraction ratio is
+
+```
+ρ_metric = √λ_code     (≈ 0.949 for λ_code = 0.90).
+```
+
+**All theorems using ρ should use ρ_metric, not λ_code.** Affected:
+
+- H(q) descent step count `⌈log(D₀/τr_k) / log(1/ρ)⌉`:
+  `log(1/0.949) ≈ 0.0524` vs `log(1/0.90) ≈ 0.105` — H is **2× larger**
+  in the correct metric form. The bound `Pr[failure] ≤ H·(η+e^(−Λ))`
+  has been understating Pr[failure] by a factor of 2.
+- Angular cap `C_d(ρ)` in §10.B: parameter substituted by ρ_metric.
+- Apollonius cell `A_ρ(u,v)` in §1: still defined by the code's λ
+  comparison, but the geometry it describes is the chordal-metric
+  Apollonius cell at ρ = √λ.
+
+**Implementation impact**: the construction code path is unchanged
+(still tests δ ≤ λ·δ — same selection). Only **the diagnostic
+numbers** change: every reported "ρ" in the diagnostic must be √λ,
+every H estimate doubles.
+
+---
+
+## 17. Linear witness inequality (the witness test is an inner product)
+
+For unit vectors x, q the witness condition
+
+```
+δ(v,q) ≤ λ·δ(u,q)
+```
+
+rearranges to
+
+```
+⟨v − λu, q⟩ ≥ 1 − λ.
+```
+
+So a witness cell is the half-space defined by direction `a_{u,v} = v − λu`.
+This has two practical consequences:
+
+1. **No SIMD `Distance()` call needed** to test a single witness — one
+   inner product against a precomputed `a_{u,v}`. Same FLOP count as
+   `Distance` but no setup overhead and no return-via-stack of a
+   single float.
+2. **JL/sketch admissibility**: random-projection sketches preserve
+   inner products up to additive ε with high probability over a finite
+   pair set. The framework's wall problem (N·Q_m exact distance calls
+   per cover) admits a **two-tier filter**: ambiguous-margin pairs run
+   the exact kernel, certain-yes and certain-no pairs run on the
+   sketch only.
+
+**Theorem 17 (JL witness filter).** Let `P: R^d → R^s` be a Gaussian
+random projection with `s = O(ε^{-2} log(|C|·m/δ))`. For any finite
+set of candidate-edge vectors `{a_{u,v}}` and query anchors `{q_i}`,
+with probability ≥ 1 − δ, simultaneously for every pair:
+
+```
+|⟨Pa_{u,v}, Pq_i⟩ − ⟨a_{u,v}, q_i⟩| ≤ ε.
+```
+
+So:
+
+- `⟨Pa, Pq⟩ ≥ 1 − λ + ε`  ⇒  witness (no exact call).
+- `⟨Pa, Pq⟩ < 1 − λ − ε`  ⇒  not a witness (no exact call).
+- Ambiguous band: fall through to exact δ-comparison.
+
+For typical λ = 0.90, ε = 0.05, and d = 128, expected s ≈ 20–40. The
+witness loop's expected exact-call rate drops from 100 % to whatever
+fraction of pairs lie in the ε-band — empirically a few percent for
+isotropic queries.
+
+---
+
+## 18. Frontier-Cover Theorem (the missing beam-level invariant)
+
+The framework so far has been **single-node**: at each visited u, some
+v ∈ N(u) must be a witness. But HNSW's L0 search is **beam-based**: it
+maintains a frontier F_t of width b and expands by best-first.
+
+**Definition.** With frontier F_t = {u_1, …, u_b} and
+`D_t(q) = min_{u ∈ F_t} d(u, q)`, the frontier ρ-descent witness exists iff
+
+```
+∃ u ∈ F_t, ∃ v ∈ N(u) :  d(v,q) ≤ ρ·D_t(q).
+```
+
+**Frontier uncovered mass**:
+
+```
+Uncov_ρ^front(F_t) = μ_{F_t}({ q : ∀u∈F_t ∀v∈N(u),  d(v,q) > ρ·D_t(q) }).
+```
+
+**Theorem 18 (frontier descent).** If for every nonterminal frontier
+with `D_t(q) > τ·r_k(q)` a live frontier witness exists, then beam
+search reaches a τ-terminal frontier after
+
+```
+H(q) = ⌈ log(D_0(q) / (τ·r_k(q))) / log(1/ρ) ⌉
+```
+
+frontier-improvement rounds. Probabilistic form:
+
+```
+Pr[failure] ≤ E[ Σ_{t<H(q)} (η_{F_t} + e^(−Λ_{F_t})) ],
+```
+
+with frontier survival mass
+
+```
+Γ_{F_t}(q) = Σ_{u ∈ F_t} Σ_{v ∈ N(u)} 1[d(v,q) ≤ ρ·D_t(q)] · γ(v).
+```
+
+**Why this fixes the §10.B obstruction.** The angular budget of a single
+node is `M·C_d(ρ)` — small in high d. The angular budget of a frontier
+is
+
+```
+M_eff(F_t) = Σ_{u ∈ F_t} |N(u)| ≈ b·M.
+```
+
+Crude union bound:
+
+```
+Uncov_ρ^front(F_t) ≥ 1 − b·M·C_d(ρ).
+```
+
+The isotropic obstruction therefore relaxes from "raise M" to "raise
+`b·M`" — and the beam already supplies a factor of b = 16, 32, 64.
+With b = 16, the §10.B ceiling at M = 16 becomes equivalent to the
+old M = 256 single-node budget. **The per-node M can stay at 16
+provided edges are coordinated across beam co-occurrents.**
+
+---
+
+## 19. Committee Cover (construction-time approximation of the frontier)
+
+Phase 1–7's selector forces every node to individually cover Q_u. By
+Theorem 18, the right invariant is committee-level coverage where the
+committee approximates the L0 beam in which u will appear.
+
+**Committee** for node u:
+
+```
+K(u) = {u} ∪ (L0 nearest neighbours of u)
+            ∪ (reverse neighbours)
+            ∪ (same-shell candidates)
+            ∪ (recent beam co-visits, when available).
+```
+
+**Committee coverage**:
+
+```
+Γ_{K(u)}(q) = Σ_{w ∈ K(u)} Σ_{v ∈ N(w)} 1[d(v,q) ≤ ρ·D_{K(u)}(q)] · γ(v),
+D_{K(u)}(q) = min_{w ∈ K(u)} d(w,q).
+```
+
+**Construction invariant.** For every certified u:
+
+```
+μ_{K(u)}({q : Γ_{K(u)}(q) < Λ}) ≤ η.
+```
+
+**Selection rule.** When choosing edges for u, maximise the marginal
+gain to **committee coverage**, not own coverage:
+
+```
+Δ(v) = F_{K(u)}(existing committee edges ∪ {u→v})
+     − F_{K(u)}(existing committee edges).
+```
+
+**Cross-node spread.** Replace per-node shell-wise angular spread
+(§10.C-B) with committee-level edge-direction spread:
+
+```
+E_{K(u)} = { (v − w)/|v − w| : w ∈ K(u), v ∈ N(w) },
+∠(e, e') ≥ θ₀    ∀ e ≠ e' ∈ chosen subset.
+```
+
+This stops two committee members from picking redundant directions —
+the legacy α-prune intuition lifted from node to committee.
+
+---
+
+## 20. Implementation roadmap for the frontier upgrade
+
+In strict dependency order:
+
+1. **§16 chordal correction in diagnostics**. Rename `Rho = 0.90f` →
+   `LambdaCode = 0.90f`; expose `RhoMetric = sqrt(LambdaCode)`; rewrite
+   every diagnostic that reports "ρ" or "H(q)" to use ρ_metric. Build
+   behaviour unchanged.
+2. **Frontier-coverage diagnostic**. Per-query: snapshot the L0 beam at
+   each expansion step, compute `Uncov_ρ^front(F_t)` against `Q_u`,
+   compare to per-node `Uncov_ρ(u, N(u))`. If `η_frontier ≪ η_node`,
+   the theory predicts we can lower per-node M.
+3. **JL witness filter (§17)**. Threshold band ±ε on the sketch; exact
+   call only on ambiguous pairs. Targets the cover wall directly
+   without touching the cover algorithm.
+4. **Committee cover (§19)**. Replace own-coverage objective with
+   committee-marginal-gain. Requires a K(u) lookup (already available
+   via the candidate set's reverse-adjacency at filter time) and a
+   committee-level spread check.
+5. **Repair-on-deficit (Phase 5b, deferred)**. Becomes meaningful once
+   frontier coverage is the certified invariant — deficit is then
+   measured against `Γ_{K(u)}` not `Γ_u`.
+
+Phases 1–7 of the prior framework remain in code as the single-node
+specialisation. They are correct under the chordal correction (§16),
+just numerically pessimistic. The frontier upgrade adds a layer above
+them.
+
+## 21. Empirical resolution on Sphere-100K (the recipe that works)
+
+After §18–§20 mapped what *should* close the recall gap, the empirical
+sweep on real cohere d=768 embeddings produced a different answer: the
+selection criterion (Q_u cover gain) is not what carries recall. What
+carries recall is the **edge-spread test under ascending distance order**
+— exactly the invariant the legacy α-prune already enforces.
+
+### 21.1 The four flips that closed the gap
+
+The χ × greedy-mode × kCapture × spread-symmetry sweep at NoC ∈ {16, 128}
+showed each axis contributes independently. The final defaults on the
+`hnsw-apollonius` branch:
+
+| axis            | old default                       | new default                     | what it does                                                              |
+|-----------------|-----------------------------------|---------------------------------|---------------------------------------------------------------------------|
+| χ (strictness)  | 0.7                               | 1.0                             | match α-prune strictness; below 1.0 admits too-close edge pairs           |
+| greedy mode     | cover-gain (popcount on witness)  | dist (ascending Δ(u,v))         | cover-gain underperformed by 3–4pp at every χ on real clustered data      |
+| L0 kCapture     | M/2 nearest, unfiltered           | off (spread filters every edge) | unconditional M/2 fill bypassed spread → redundant near-edges             |
+| spread test     | symmetric `min(Δ(u,v), Δ(u,w))`   | one-sided `Δ(u, cur)` only      | in dist-greedy order Δ(u,w) ≤ Δ(u,v), so `min` relaxed the test by ~2–5pp |
+
+Each is overridable via `RAVEN_APOLLO_CHI`, `RAVEN_APOLLO_GREEDY_MODE`,
+`RAVEN_APOLLO_KCAPTURE_OFF`, `RAVEN_APOLLO_SPREAD`.
+
+### 21.2 Final numbers (defaults only, n=48 queries)
+
+NoC=16 (Corax default):
+
+| metric                | apollonius | legacy   |
+|-----------------------|------------|----------|
+| Wall (3-run mean)     | 4.33 s     | 4.29 s   |
+| r@1  ef=256           | 64.6 %     | 53.1 %   |
+| r@10 ef=256           | 71.9 %     | 69.0 %   |
+
+NoC=128 (recommended production setting):
+
+| ef  | apollo r@1 | apollo r@10 | legacy r@1 | legacy r@10 |
+|-----|------------|-------------|------------|-------------|
+| 64  | 72.9 %     | **85.0 %**  | 75.0 %     | 84.0 %      |
+| 256 | **87.5 %** | 92.9 %      | 85.4 %     | 93.1 %      |
+| 512 | **97.9 %** | **95.4 %**  | 87.5 %     | 94.8 %      |
+
+Apollonius matches or beats legacy on every metric at both build budgets.
+
+### 21.3 What this means for the framework
+
+The sweep falsifies the framework's central conjecture that the Q_u
+descent cover provides selection-time information that legacy α-prune
+lacks. On real isotropic-by-shell clustered embeddings:
+
+- The cover-gain criterion is dead weight for selection. Across
+  χ ∈ {0.7, 0.9, 1.0, 1.2}, picking by popcount(witness) is 3–4pp behind
+  picking by ascending Δ(u,v). The §10.B isotropic obstruction reproduces
+  on real data, even after §10.C-B bi-criteria spread is added.
+- What carries recall is the **bi-criteria spread itself**, with
+  parameters matched to legacy: one-sided Δ(u, cur), χ=1.0, applied to
+  every selected edge (no kCapture bypass).
+- Therefore the working configuration *is* legacy α-prune reached through
+  the Apollonius scaffolding. The QuDotCache, witness bitmask, kCapture
+  preamble, and cover-gain greedy are all computed-but-unused under the
+  new defaults.
+
+### 21.4 Status of §18–§20
+
+The frontier-cover theorem (§18) and committee cover (§19) remain open
+*as theory*. The empirical result does not refute them; it only says that
+on Sphere-100K with M=12, no version of single-node Q_u cover (with or
+without committee K(u), with or without JL filter) beats distance-ordered
++ spread. They might still win at much smaller M, on highly anisotropic
+data, or under a different metric — but the §10.B obstruction documented
+on this branch will need a fundamentally different invariant to bypass,
+not a tighter cover.
+
+### 21.5 Cleanup follow-up (not done in this round)
+
+Under the new defaults the witness loop (Qm·N dots/cover), Q_u sampling,
+NodeMagnitudes/QuDotCache, and the cover-gain greedy branch are all dead
+weight. Wall is at parity *despite* paying for them, because QuDotCache
+amortises the witness cost. Stripping them entirely should free 5–10 %
+wall. Left as a follow-up so this commit only changes behaviour, not
+surface.

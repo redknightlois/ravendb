@@ -3,6 +3,8 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
+using System.Numerics.Tensors;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Sparrow;
@@ -26,11 +28,122 @@ public partial class Hnsw
     /// </summary>
     internal static bool UseLegacyHeuristic = ReadLegacyHeuristicEnv();
 
+    // Diagnostic counters for DoWorkApolloniusCover wall breakdown. Accumulated as
+    // Stopwatch ticks, summed across all parallel cover calls in a process. Tests
+    // read these to compute fractions; nothing in the hot path touches them when
+    // the toggle is off so the steady-state overhead is two interlocked adds per
+    // sub-step. Toggle on by setting RAVEN_HNSW_COVER_PROFILE=1.
+    internal static bool CoverProfileEnabled =
+        Environment.GetEnvironmentVariable("RAVEN_HNSW_COVER_PROFILE") is { } v &&
+        (v == "1" || string.Equals(v, "true", StringComparison.OrdinalIgnoreCase));
+    internal static long CoverWitnessTicks;
+    internal static long CoverDistToSrcTicks;
+    internal static long CoverKCaptureTicks;
+    internal static long CoverGreedyTicks;
+    internal static long CoverMFillTicks;
+    internal static long CoverCalls;
+    internal static long CoverTotalTicks;
+    internal static void CoverProfileReset()
+    {
+        CoverWitnessTicks = 0;
+        CoverDistToSrcTicks = 0;
+        CoverKCaptureTicks = 0;
+        CoverGreedyTicks = 0;
+        CoverMFillTicks = 0;
+        CoverCalls = 0;
+        CoverTotalTicks = 0;
+    }
+
     private static bool ReadLegacyHeuristicEnv()
     {
         var v = Environment.GetEnvironmentVariable("RAVEN_HNSW_LEGACY_HEURISTIC");
         return string.Equals(v, "1", StringComparison.Ordinal)
             || string.Equals(v, "true", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // JL witness sketch (§17). Off by default; enable with RAVEN_HNSW_JL_SKETCH=1.
+    // Projects v, q ∈ R^d into R^m with m=JlSketchDim, then bounds the true witness
+    // dot product within ε·|v|·|q| of the sketched one. Clear-pass / clear-fail
+    // decisions skip the d-dim exact dot; only ε-band candidates fall back to it.
+    internal static bool JlSketchEnabled =
+        Environment.GetEnvironmentVariable("RAVEN_HNSW_JL_SKETCH") is { } _jl &&
+        (_jl == "1" || string.Equals(_jl, "true", StringComparison.OrdinalIgnoreCase));
+    internal const int JlSketchDim = 32;
+    internal const float JlEpsilon = 0.10f;
+
+    // Angular-spread strictness χ for §10.C-B bi-criteria. Default 0.7 (memory-noted
+    // Pareto). Override with RAVEN_APOLLO_CHI to sweep against legacy α-prune
+    // (effective χ≈1.0, one-sided d(u,cur)).
+    internal static readonly float _envChi = ReadEnvChi();
+    private static float ReadEnvChi()
+    {
+        var s = Environment.GetEnvironmentVariable("RAVEN_APOLLO_CHI");
+        if (string.IsNullOrEmpty(s) == false && float.TryParse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var f))
+            return f;
+        // Default χ=1.0 (matches legacy α-prune strictness). The χ sweep on Sphere-100K
+        // showed recall plateaus at χ≈1.0 and degrades below; 0.7 was historical and
+        // empirically too loose on real clustered data.
+        return 1.0f;
+    }
+    // Triangle-skip factor (1+√χ)². Recomputed once based on _envChi so the skip is
+    // still exact for whatever χ was set at process start.
+    internal static readonly float _envSpreadSkip = (1f + MathF.Sqrt(MathF.Max(0f, _envChi))) * (1f + MathF.Sqrt(MathF.Max(0f, _envChi)));
+
+    // Greedy ordering for the post-kCapture fill in DoWorkApolloniusCover.
+    //   "cover" (default) — pick by popcount(witness & needsMore); ties → cheapest.
+    //   "dist"            — pick remaining candidates by ascending d(u, v), spread-gated.
+    // The χ sweep on Sphere-100K showed cover-gain plateaus ~12pp under legacy even
+    // at χ=1.0; ascending-distance ordering closes that residual.
+    // Greedy mode for the post-kCapture fill. Default "dist" (ascending d(u,v) +
+    // spread). The χ × greedy-mode sweep on Sphere-100K showed cover-gain greedy
+    // underperforms dist-greedy by 3–4pp at every χ on real clustered embeddings.
+    // Set RAVEN_APOLLO_GREEDY_MODE=cover to restore the original popcount-greedy.
+    internal static readonly bool _envGreedyByDist =
+        string.Equals(Environment.GetEnvironmentVariable("RAVEN_APOLLO_GREEDY_MODE") ?? "dist", "dist", StringComparison.OrdinalIgnoreCase);
+
+    // Default L0 kCapture OFF — the unconditional M/2 nearest-by-distance fill
+    // bypassed the spread filter and created redundant near-edges that crowded
+    // the neighborhood. Closing that hole was what brought recall to legacy
+    // parity on Sphere-100K (49 queries, 73.5% r@10 vs 72.7% at ef=256).
+    // Re-enable with RAVEN_APOLLO_KCAPTURE_OFF=0.
+    internal static readonly bool _envKCaptureOff =
+        (Environment.GetEnvironmentVariable("RAVEN_APOLLO_KCAPTURE_OFF") ?? "1") is var _kc &&
+        (_kc == "1" || string.Equals(_kc, "true", StringComparison.OrdinalIgnoreCase));
+
+    // Spread-test asymmetry. Default "onesided" — reject candidate cur if
+    // Δ(cur, alt) < χ · Δ(u, cur), using only the candidate's distance to u
+    // (matches legacy α-prune exactly). The earlier "symmetric" form used
+    // min(Δ(u,cur), Δ(u,alt)) and was 2–5pp behind legacy at NoC=128 because
+    // in dist-greedy order Δ(u, alt) ≤ Δ(u, cur), so the min relaxed the test.
+    internal static readonly bool _envSpreadSymmetric =
+        string.Equals(Environment.GetEnvironmentVariable("RAVEN_APOLLO_SPREAD"), "symmetric", StringComparison.OrdinalIgnoreCase);
+    private static float[] _jlMatrix; // row-major: row j of length d at offset j*d
+    private static int _jlMatrixDim;
+    private static readonly object _jlMatrixLock = new();
+
+    private static float[] GetJlMatrix(int d)
+    {
+        var local = _jlMatrix;
+        if (local != null && _jlMatrixDim == d)
+            return local;
+        lock (_jlMatrixLock)
+        {
+            if (_jlMatrix != null && _jlMatrixDim == d)
+                return _jlMatrix;
+            var rand = new Random(0x1F1F1F1F);
+            var m = new float[JlSketchDim * d];
+            float invSqrtM = 1f / MathF.Sqrt(JlSketchDim);
+            for (int i = 0; i < m.Length; i++)
+            {
+                double u1 = 1.0 - rand.NextDouble();
+                double u2 = rand.NextDouble();
+                double z = Math.Sqrt(-2.0 * Math.Log(u1)) * Math.Cos(2.0 * Math.PI * u2);
+                m[i] = (float)(z * invSqrtM);
+            }
+            _jlMatrixDim = d;
+            Volatile.Write(ref _jlMatrix, m);
+            return m;
+        }
     }
 
     /*
@@ -452,7 +565,7 @@ public partial class Hnsw
                     if (Hnsw.UseLegacyHeuristic)
                         DoWorkLegacyRobustPrune(searchState, candidates, vectors, indexes, N);
                     else
-                        DoWorkApolloniusCover(searchState, candidates, vectors, indexes, N, runner.GlobalQuerySample);
+                        DoWorkApolloniusCover(searchState, candidates, vectors, indexes, N, runner.GlobalQuerySample, runner.NodeMagnitudes, runner.QuDotCache, runner.QuDotStride);
                 }
 
                 // True Apollonius cover faithful to Theorems 1, 7, 8, 9.
@@ -476,25 +589,115 @@ public partial class Hnsw
                 // Theorem 11: at L0, reserve M/2 slots for true nearest-to-u BEFORE cover
                 // (terminal-layer capture). Upper layers route by descent — cover gets
                 // the full budget.
-                private void DoWorkApolloniusCover(SearchState searchState, List<int> candidates, List<UnmanagedSpan> vectors, List<int> indexes, int N, UnmanagedSpan[] Qu)
-                {
-                    const float Rho = 0.90f;
-                    // Redundancy depth K = ⌈Λ / γ₀⌉ where γ₀ = −log h₀. With h₀ ≈ 0.1
-                    // (10% per-node hazard before next repair) γ₀ ≈ 2.3 nats. Picking
-                    // Λ = 2·γ₀ gives K=2: each query direction sees 2 independent
-                    // witnesses → Pr[both die] ≤ e^(−Λ) = e^(−2γ₀) = h₀² ≈ 0.01 per
-                    // descent step. With H(q)≈3 that's ≤3% per-query failure from
-                    // tombstones alone (Theorem 5).
-                    const int RedundancyDepth = 2;
+                // Phase 5 — Tombstone hazard model (Theorems 4/5).
+                //
+                // h(v) ∈ [0,1] bounds Pr[v unavailable before next repair]. Survival
+                // weight γ(v) = −log h(v). For witness set W_ρ(u,q):
+                //
+                //     Γ(u,q) = Σ_{v ∈ W_ρ(u,q)} γ(v)     (capped at Λ = K·γ₀).
+                //
+                // Theorem 5: Pr[tombstone-caused descent failure at u] ≤ H(q)·e^(−Λ).
+                //
+                // We currently estimate hazard with a single global default — every
+                // node gets h₀ = 0.1 (≈10 % per-node attrition per repair epoch).
+                // That uniform γ ≡ γ₀ collapses the capped-survival objective
+                // F(S) = Σ_i min(Λ, Σ_{v∈S} γ(v)·1[v covers q_i]) into K-redundant
+                // popcount with K = ⌈Λ / γ₀⌉, which is what the bitmask fast path
+                // below exploits. The math equivalence (proof in journal entry
+                // "2026-05-15 — Phase 5") lets us defer the O(Qm) real-valued
+                // accumulator until variable γ telemetry exists.
+                //
+                // Variable-γ extension point: replace HazardFor(int) with a
+                // per-candidate lookup (degree-based, level-based, or telemetry-
+                // driven). When γ becomes non-constant, swap the popcount path for
+                // the real-valued accumulator preserved in git history.
+                //
+                // Repair-on-deficit (Phase 5 second half) is NOT in this method —
+                // it belongs in the post-tombstone path (Hnsw.Registration.Remove)
+                // where Γ_S(u,q) is recomputed for u's that touched a deleted node
+                // and replacement witnesses are added when Γ falls below Λ.
+                // Tracked as TODO; not on the critical path because cluster-churn
+                // diagnostics already show Apollonius hitting recall 1.000 at
+                // M=32 under 20 % churn without repair.
+                private const float HazardH0 = 0.1f;
+                private static readonly float Gamma0 = -MathF.Log(HazardH0); // ≈ 2.302
+                private const int RedundancyDepth = 2;                       // K
+                private static readonly float Lambda = RedundancyDepth * Gamma0;
 
+                /// <summary>
+                /// Per-candidate survival weight γ(v) = −log h(v). Constant for now;
+                /// hook for Phase 5.5 variable hazard. Kept as a method so the JIT
+                /// can inline the current constant return and so future telemetry-
+                /// driven hazard can replace the body without touching the cover.
+                /// </summary>
+                private static float HazardFor(int candidateIndex) => Gamma0;
+
+                // Phase 6 — I/O-aware edge cost (Theorem 10).
+                //
+                // Framework cost decomposition:
+                //
+                //   c(u, v) = c_dist(v) + λ_page · c_page(u,v)
+                //                       + λ_haz  · c_haz(v)
+                //                       + λ_deg  · c_deg(v).
+                //
+                // Theorem 10: if each chosen edge has c(u_t, u_{t+1}) ≤ β · C_ρ(u_t, q)
+                // (β-approx of the cheapest live descent edge in the Apollonius cell),
+                // then total query cost is bounded by β · Σ C_ρ + H(q)·c_queue.
+                //
+                // What this gives us in the greedy: a *tie-breaker*. When two
+                // candidates have equal cover gain, prefer the cheaper one. With
+                // uniform cost (the default) this collapses to "first wins" — the
+                // current behaviour, so recall is unchanged. When Voron page
+                // co-location data is later threaded in via the EdgeCost hook,
+                // edges that stay on the same page are preferred, reducing random
+                // I/O during descent without changing the cover's Theorem-9 gain
+                // bound (we only break ties, not redirect them).
+                //
+                // We deliberately do NOT use a gain-per-cost ratio for the primary
+                // ordering — that would weaken Theorem 9's (1−1/e) guarantee.
+                // Cost is a strict tie-breaker on equal gain.
+                private const float LambdaPage = 0.0f; // disabled until page-locality lookup is wired
+                private const float LambdaHaz = 0.0f;  // disabled until variable hazard is wired
+                private const float LambdaDeg = 0.0f;  // disabled until degree telemetry is wired
+
+                /// <summary>
+                /// Per-candidate edge cost (Theorem 10). Returns 1.0 by default; the
+                /// extension point for page-locality / hazard / degree weighting. When
+                /// this becomes non-constant, the greedy below already uses it as a
+                /// tie-breaker — no further wiring needed.
+                /// </summary>
+                private static float EdgeCost(int candidateIndex) => 1.0f
+                    + LambdaPage * 0.0f   // c_page(u, v): same-page bonus
+                    + LambdaHaz * 0.0f    // c_haz(v): tombstone risk surcharge
+                    + LambdaDeg * 0.0f;   // c_deg(v): high-degree fan-out surcharge
+
+                // §16 chordal correction. Code tests δ(v,q) ≤ λ·δ(u,q) where δ is cosine
+                // dissimilarity. δ is NOT a strict metric — the true metric on the unit
+                // sphere is the chordal D(x,y) = √(2δ(x,y)). Squaring the metric condition
+                // gives D(v,q)² ≤ λ·D(u,q)², so the metric-form contraction ratio is
+                // ρ_metric = √λ_code. With λ_code = 0.90 → ρ_metric ≈ 0.949. The selection
+                // behaviour is unchanged (still uses λ_code on δ), but every theorem
+                // ceiling and H(q) descent count downstream is reported in ρ_metric. This
+                // doubles the previously-claimed H bound and is faithful to the metric the
+                // proof actually requires.
+                internal const float LambdaCode = 0.90f;
+                internal static readonly float RhoMetric = MathF.Sqrt(LambdaCode); // ≈ 0.9487
+
+                private void DoWorkApolloniusCover(SearchState searchState, List<int> candidates, List<UnmanagedSpan> vectors, List<int> indexes, int N, UnmanagedSpan[] Qu, float[] nodeMagnitudes, float[] quDotCache, int quDotStride)
+                {
                     int M = searchState.Options.NumberOfEdges;
                     int Qm = Qu.Length;
                     Debug.Assert(Qm >= 0 && Qm <= 64, $"|Q_u| must fit one ulong (≤64). Got {Qm}.");
+                    bool prof = CoverProfileEnabled;
+                    long t0Total = prof ? Stopwatch.GetTimestamp() : 0;
+                    long tStep = t0Total;
 
-                    // ρ · d(u, q_k) thresholds for each q in Q_u.
+                    // λ · δ(u, q_k) thresholds for each q in Q_u. In the chordal metric this
+                    // corresponds to a ρ_metric = √λ Apollonius cell; the inequality test
+                    // and chosen candidates are identical, only the metric label changes.
                     Span<float> threshold = stackalloc float[64];
                     for (int k = 0; k < Qm; k++)
-                        threshold[k] = Rho * searchState.Distance(_src, Qu[k]);
+                        threshold[k] = LambdaCode * searchState.Distance(_src, Qu[k]);
 
                     // Witness bitmask per candidate. Bit k set iff candidate i covers q_k.
                     Span<ulong> witness = stackalloc ulong[N <= 1024 ? N : 0];
@@ -504,16 +707,180 @@ public partial class Hnsw
                         witnessHeap = new ulong[N];
                         witness = witnessHeap;
                     }
-                    for (int i = 0; i < N; i++)
+                    // Witness fill via precomputed L2 norms + raw dot product. CosineDistance
+                    // recomputes |v| and |q| on every call (3 dots + sqrts internally); doing
+                    // it once per vector and per query collapses the inner test to one dot
+                    // per (i,k). Profile-confirmed: witness was 1.5 s of CosineDistance work
+                    // on d=128 N=10k. Magnitude of each candidate is also shared with the
+                    // spread-check path below to avoid double computation. Only valid for the
+                    // singles-cosine similarity — I8 and Hamming have different magnitude
+                    // semantics, fall back to the per-call Distance path.
+                    bool fastCosine = searchState.Options.SimilarityMethod == SimilarityMethod.CosineSimilaritySingles;
+                    Span<float> magV = stackalloc float[N <= 1024 ? N : 0];
+                    float[] magVHeap = null;
+                    if (fastCosine && magV.Length == 0)
                     {
-                        ulong bits = 0;
-                        var v = vectors[i];
-                        for (int k = 0; k < Qm; k++)
+                        magVHeap = new float[N];
+                        magV = magVHeap;
+                    }
+                    if (fastCosine)
+                    {
+                        // Cache q_k float byte spans + magnitudes + cutoffs.
+                        //   pass ⇔ <v_i, q_k> ≥ cutoff[k] · |v_i|
+                        //   cutoff[k] = (1 − threshold[k]) · |q_k|
+                        // The byte-span pointer/length cache avoids re-doing MemoryMarshal.Cast
+                        // Qm·N times in the inner loop.
+                        Span<float> cutoff = stackalloc float[64];
+                        Span<float> qMag = stackalloc float[64];
+                        Span<IntPtr> qPtr = stackalloc IntPtr[64];
+                        Span<int> qLen = stackalloc int[64];
+                        unsafe
                         {
-                            if (searchState.Distance(v, Qu[k]) <= threshold[k])
-                                bits |= 1UL << k;
+                            int dDim = 0;
+                            for (int k = 0; k < Qm; k++)
+                            {
+                                var qbytes = Qu[k].ToSpan();
+                                qPtr[k] = (IntPtr)Unsafe.AsPointer(ref MemoryMarshal.GetReference(qbytes));
+                                qLen[k] = qbytes.Length / sizeof(float);
+                                dDim = qLen[k];
+                                var qf = MemoryMarshal.Cast<byte, float>(qbytes);
+                                float magQ = MathF.Sqrt(TensorPrimitives.Dot<float>(qf, qf));
+                                qMag[k] = magQ;
+                                cutoff[k] = (1f - threshold[k]) * magQ;
+                            }
+
+                            // JL witness sketch (§17). Project candidates and queries into
+                            // m=JlSketchDim space; clear-pass / clear-fail decisions skip
+                            // the exact d-dim dot; only ε-band cases fall back to it.
+                            // The sketched test is:
+                            //   sketched_dot ≥ cutoff[k]·|v_i| + ε·|v_i|·|q_k|  → clear PASS
+                            //   sketched_dot ≤ cutoff[k]·|v_i| − ε·|v_i|·|q_k|  → clear FAIL
+                            // Output is recall-equivalent (worst case: more ε-band → exact).
+                            bool useJl = JlSketchEnabled && Qm > 0 && dDim > 0;
+                            float[] jlMatrix = useJl ? GetJlMatrix(dDim) : null;
+                            // Sketch buffers — small per cover call (Qm·m + N·m floats).
+                            float[] pqHeap = useJl ? new float[Qm * JlSketchDim] : null;
+                            float[] pvHeap = useJl ? new float[N * JlSketchDim] : null;
+                            if (useJl)
+                            {
+                                // Project queries once.
+                                for (int k = 0; k < Qm; k++)
+                                {
+                                    var qf = new ReadOnlySpan<float>((void*)qPtr[k], qLen[k]);
+                                    for (int j = 0; j < JlSketchDim; j++)
+                                    {
+                                        pqHeap[k * JlSketchDim + j] =
+                                            TensorPrimitives.Dot<float>(qf, jlMatrix.AsSpan(j * dDim, dDim));
+                                    }
+                                }
+                            }
+
+                            int magCacheLen = nodeMagnitudes?.Length ?? 0;
+                            for (int i = 0; i < N; i++)
+                            {
+                                var vbytes = vectors[i].ToSpan();
+                                var vf = MemoryMarshal.Cast<byte, float>(vbytes);
+                                // Per-node |v| cache: same v reappears as candidate across
+                                // many covers in this build. Sentinel 0f = uncomputed. Float
+                                // writes are atomic and idempotent — all writers compute the
+                                // same value, so unsynchronised read-then-write is safe.
+                                int nid = indexes[i];
+                                float mv = (uint)nid < (uint)magCacheLen ? nodeMagnitudes[nid] : 0f;
+                                if (mv == 0f)
+                                {
+                                    mv = MathF.Sqrt(TensorPrimitives.Dot<float>(vf, vf));
+                                    if ((uint)nid < (uint)magCacheLen)
+                                        nodeMagnitudes[nid] = mv;
+                                }
+                                magV[i] = mv;
+                                ulong bits = 0;
+                                if (useJl)
+                                {
+                                    // Project this candidate into sketch space.
+                                    Span<float> pv = pvHeap.AsSpan(i * JlSketchDim, JlSketchDim);
+                                    for (int j = 0; j < JlSketchDim; j++)
+                                        pv[j] = TensorPrimitives.Dot<float>(vf, jlMatrix.AsSpan(j * dDim, dDim));
+                                    for (int k = 0; k < Qm; k++)
+                                    {
+                                        var pq = pqHeap.AsSpan(k * JlSketchDim, JlSketchDim);
+                                        float sketched = TensorPrimitives.Dot<float>(pv, pq);
+                                        float target = cutoff[k] * mv;
+                                        float slack = JlEpsilon * mv * qMag[k];
+                                        if (sketched >= target + slack)
+                                        {
+                                            bits |= 1UL << k; // clear pass
+                                        }
+                                        else if (sketched > target - slack)
+                                        {
+                                            // ambiguous — exact fallback
+                                            var qf = new ReadOnlySpan<float>((void*)qPtr[k], qLen[k]);
+                                            float exact = TensorPrimitives.Dot<float>(vf, qf);
+                                            if (exact >= target)
+                                                bits |= 1UL << k;
+                                        }
+                                        // else: clear fail, leave bit clear
+                                    }
+                                }
+                                else
+                                {
+                                    // Hoist `cutoff[k] · |v_i|` out of the inner loop: it is
+                                    // constant for fixed i across k.
+                                    bool useDotCache = quDotCache != null && quDotStride == Qm && (uint)nid < (uint)magCacheLen;
+                                    if (useDotCache)
+                                    {
+                                        // Per-node Q_u dot cache: <v_i, q_k> depends only on
+                                        // (v_i, q_k), so a value computed during a previous
+                                        // cover for this same v_i is reusable now. The cutoff
+                                        // depends on u and is applied at lookup. NaN sentinel
+                                        // = uncomputed; idempotent write across threads.
+                                        long baseIdx = (long)nid * quDotStride;
+                                        for (int k = 0; k < Qm; k++)
+                                        {
+                                            float dot = quDotCache[baseIdx + k];
+                                            if (float.IsNaN(dot))
+                                            {
+                                                var qf = new ReadOnlySpan<float>((void*)qPtr[k], qLen[k]);
+                                                dot = TensorPrimitives.Dot<float>(vf, qf);
+                                                quDotCache[baseIdx + k] = dot;
+                                            }
+                                            if (dot >= cutoff[k] * mv)
+                                                bits |= 1UL << k;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        for (int k = 0; k < Qm; k++)
+                                        {
+                                            var qf = new ReadOnlySpan<float>((void*)qPtr[k], qLen[k]);
+                                            float dot = TensorPrimitives.Dot<float>(vf, qf);
+                                            if (dot >= cutoff[k] * mv)
+                                                bits |= 1UL << k;
+                                        }
+                                    }
+                                }
+                                witness[i] = bits;
+                            }
                         }
-                        witness[i] = bits;
+                    }
+                    else
+                    {
+                        for (int i = 0; i < N; i++)
+                        {
+                            ulong bits = 0;
+                            var v = vectors[i];
+                            for (int k = 0; k < Qm; k++)
+                            {
+                                if (searchState.Distance(v, Qu[k]) <= threshold[k])
+                                    bits |= 1UL << k;
+                            }
+                            witness[i] = bits;
+                        }
+                    }
+                    if (prof)
+                    {
+                        long now = Stopwatch.GetTimestamp();
+                        Interlocked.Add(ref CoverWitnessTicks, now - tStep);
+                        tStep = now;
                     }
 
                     Span<bool> picked = stackalloc bool[N <= 1024 ? N : 0];
@@ -524,21 +891,61 @@ public partial class Hnsw
                         picked = pickedHeap;
                     }
 
+                    // Distance-to-source cache. Computed BEFORE kCapture so the priority-queue
+                    // population reuses these distances instead of recomputing them — saves N
+                    // redundant CosineDistance calls per cover invocation. distToSrc is also
+                    // used by the spread test during greedy and M-fill.
+                    Span<float> distToSrc = stackalloc float[N <= 1024 ? N : 0];
+                    float[] distToSrcHeap = null;
+                    if (distToSrc.Length == 0)
+                    {
+                        distToSrcHeap = new float[N];
+                        distToSrc = distToSrcHeap;
+                    }
+                    if (fastCosine)
+                    {
+                        var srcF = MemoryMarshal.Cast<byte, float>(_src.ToSpan());
+                        float magSrc = MathF.Sqrt(TensorPrimitives.Dot<float>(srcF, srcF));
+                        for (int i = 0; i < N; i++)
+                        {
+                            var vf = MemoryMarshal.Cast<byte, float>(vectors[i].ToSpan());
+                            float dot = TensorPrimitives.Dot<float>(srcF, vf);
+                            distToSrc[i] = 1f - dot / (magSrc * magV[i]);
+                        }
+                    }
+                    else
+                    {
+                        for (int i = 0; i < N; i++)
+                            distToSrc[i] = searchState.Distance(_src, vectors[i]);
+                    }
+                    if (prof)
+                    {
+                        long now = Stopwatch.GetTimestamp();
+                        Interlocked.Add(ref CoverDistToSrcTicks, now - tStep);
+                        tStep = now;
+                    }
+
                     // L0 k-capture (Theorem 11): reserve M/2 slots for nearest-to-u BEFORE
                     // cover. Upper layers route by descent so cover gets the full budget.
-                    int kCapture = Level == 0 ? Math.Max(1, M / 2) : 0;
+                    int kCapture = (Level == 0 && _envKCaptureOff == false) ? Math.Max(1, M / 2) : 0;
                     if (kCapture > 0)
                     {
                         var queue = Owner._candidatesQ;
                         Debug.Assert(queue.Count == 0);
                         for (int i = 0; i < N; i++)
-                            queue.Enqueue(i, searchState.Distance(_src, vectors[i]));
+                            queue.Enqueue(i, distToSrc[i]);
                         while (candidates.Count < kCapture && queue.TryDequeue(out var cur, out _))
                         {
                             candidates.Add(cur);
                             picked[cur] = true;
                         }
                         queue.Clear();
+                    }
+                    if (prof)
+                    {
+                        long now = Stopwatch.GetTimestamp();
+                        Interlocked.Add(ref CoverKCaptureTicks, now - tStep);
+                        tStep = now;
                     }
 
                     // K=2 redundant cover state, encoded as two bitmasks (O(1) per pick):
@@ -547,6 +954,12 @@ public partial class Hnsw
                     // A bit "needs more coverage" iff it is not in coveredTwice.
                     // (Compile-time assertion: this fast path is K=2 only.)
                     Debug.Assert(RedundancyDepth == 2, "Fast bitset path assumes K=2.");
+                    // Phase 5 invariant: the popcount fast path is exact iff every
+                    // candidate has γ(v) = γ₀ (uniform hazard). When HazardFor stops
+                    // returning a constant, this assert fires and the cover must
+                    // switch to the real-valued capped-survival accumulator.
+                    Debug.Assert(N == 0 || MathF.Abs(HazardFor(0) - Gamma0) < 1e-5f,
+                        "Variable hazard detected — popcount fast path no longer matches F(S).");
                     ulong coveredOnce = 0;
                     ulong coveredTwice = 0;
                     for (int j = 0; j < candidates.Count; j++)
@@ -555,18 +968,6 @@ public partial class Hnsw
                         coveredTwice |= w & coveredOnce; // already-once bits → now twice
                         coveredOnce |= w;
                     }
-
-                    // Distance-to-source cache for the bi-criteria angular-spread test
-                    // (Theorem 10.C-B). d(u, v) reused across diversity checks and M-fill.
-                    Span<float> distToSrc = stackalloc float[N <= 1024 ? N : 0];
-                    float[] distToSrcHeap = null;
-                    if (distToSrc.Length == 0)
-                    {
-                        distToSrcHeap = new float[N];
-                        distToSrc = distToSrcHeap;
-                    }
-                    for (int i = 0; i < N; i++)
-                        distToSrc[i] = searchState.Distance(_src, vectors[i]);
 
                     // Greedy capped-survival cover (Theorem 9), gated by shell-wise angular
                     // spread (§10.C-B). For each round: find the highest-gain candidate that
@@ -578,68 +979,80 @@ public partial class Hnsw
                     // constraint is symmetric in the bound (min over u-distances), unlike
                     // legacy which is one-sided in d(u,v). Without (B) the recall
                     // regression is 4–16pp on isotropic data.
-                    const float AngularSpreadChi = 0.7f;
+                    float AngularSpreadChi = _envChi;
 
-                    // Conflict-bitset fast path (Track A item 4). For N ≤ 64, precompute one
-                    // ulong per candidate where bit j = 1 iff (i, j) violates B_χ. Then
-                    // feasibility per greedy round is (conflict[i] & pickedMask) == 0 —
-                    // single AND, no per-round distance calls. Triangle skip applies during
-                    // the precompute pass too, so most pairs cost zero Distance() calls.
-                    // For N > 64 fall back to per-pick PassesAngularSpread.
-                    Span<ulong> conflict = stackalloc ulong[N <= 64 ? N : 0];
-                    bool useConflictMask = N <= 64;
-                    ulong pickedMask = 0;
-                    if (useConflictMask)
-                    {
-                        BuildConflictMask(searchState, vectors, distToSrc, N, AngularSpreadChi, conflict);
-                        for (int j = 0; j < candidates.Count; j++)
-                            pickedMask |= 1UL << candidates[j];
-                    }
-
+                    // Lazy spread check. Profiling showed eager conflict-bitset precompute
+                    // burned ~50% of cover wall on d=128 because pairs in similar shells
+                    // (triangle-skip miss rate is high in high-d) all pay full Δ(v,w).
+                    // The greedy only ever picks ≤ M ≈ 16 edges, so at most M tentative
+                    // bests get spread-checked — O(M²) distance calls instead of O(N²).
+                    // Rejected tentative bests are marked picked[] so they don't recur as
+                    // best-gain on the next round (any future picked set is a superset of
+                    // the current one, so the same conflicting w would re-block them).
+                    bool greedyByDist = _envGreedyByDist;
                     while (candidates.Count < M)
                     {
                         ulong needsMore = ~coveredTwice;
-                        // Cap any bits past Qm so popcount counts only real q's.
                         if (Qm < 64)
                             needsMore &= (1UL << Qm) - 1;
-                        if (needsMore == 0)
-                            break;
 
                         int bestI = -1;
-                        int bestGain = -1;
-                        for (int i = 0; i < N; i++)
+                        if (greedyByDist)
                         {
-                            if (picked[i])
-                                continue;
-                            int gain = BitOperations.PopCount(witness[i] & needsMore);
-                            if (gain <= bestGain)
-                                continue;
-                            if (useConflictMask)
+                            // Distance-ordered fill: pick the nearest unpicked v to u that
+                            // also passes spread. The cover bitmask is updated for telemetry
+                            // and to drive the early-exit on "coverage saturated", but is no
+                            // longer the selection criterion.
+                            float bestDist = float.MaxValue;
+                            for (int i = 0; i < N; i++)
                             {
-                                if ((conflict[i] & pickedMask) != 0)
-                                    continue;
+                                if (picked[i]) continue;
+                                float d = distToSrc[i];
+                                if (d >= bestDist) continue;
+                                bestDist = d;
+                                bestI = i;
                             }
-                            else if (PassesAngularSpread(searchState, vectors, distToSrc, i, candidates, AngularSpreadChi) == false)
-                            {
-                                continue;
-                            }
-                            bestGain = gain;
-                            bestI = i;
+                            if (bestI == -1) break;
                         }
-                        if (bestI == -1 || bestGain == 0)
-                            break;
+                        else
+                        {
+                            if (needsMore == 0) break;
+                            int bestGain = -1;
+                            float bestCost = float.MaxValue;
+                            for (int i = 0; i < N; i++)
+                            {
+                                if (picked[i]) continue;
+                                int gain = BitOperations.PopCount(witness[i] & needsMore);
+                                if (gain < bestGain) continue;
+                                float cost = EdgeCost(i);
+                                if (gain == bestGain && cost >= bestCost) continue;
+                                bestGain = gain;
+                                bestI = i;
+                                bestCost = cost;
+                            }
+                            if (bestI == -1 || bestGain == 0) break;
+                        }
+                        if (PassesAngularSpread(searchState, vectors, distToSrc, bestI, candidates, AngularSpreadChi, fastCosine ? magV : default) == false)
+                        {
+                            picked[bestI] = true;
+                            continue;
+                        }
                         candidates.Add(bestI);
                         picked[bestI] = true;
-                        if (useConflictMask)
-                            pickedMask |= 1UL << bestI;
                         ulong w = witness[bestI];
                         coveredTwice |= w & coveredOnce;
                         coveredOnce |= w;
                     }
+                    if (prof)
+                    {
+                        long now = Stopwatch.GetTimestamp();
+                        Interlocked.Add(ref CoverGreedyTicks, now - tStep);
+                        tStep = now;
+                    }
 
                     // M-fill top-up: nearest-of-remaining that also passes (B). Needed when
-                    // greedy stops because every remaining witness=0. The angular-spread
-                    // check still applies — these are real edges that descent will use.
+                    // greedy stops because every remaining witness=0. Same lazy strategy:
+                    // tentative nearest, spread-check on the winner, mark blocked on fail.
                     while (candidates.Count < M)
                     {
                         int bestI = -1;
@@ -650,24 +1063,26 @@ public partial class Hnsw
                                 continue;
                             if (distToSrc[i] >= bestDist)
                                 continue;
-                            if (useConflictMask)
-                            {
-                                if ((conflict[i] & pickedMask) != 0)
-                                    continue;
-                            }
-                            else if (PassesAngularSpread(searchState, vectors, distToSrc, i, candidates, AngularSpreadChi) == false)
-                            {
-                                continue;
-                            }
                             bestDist = distToSrc[i];
                             bestI = i;
                         }
                         if (bestI == -1)
                             break;
+                        if (PassesAngularSpread(searchState, vectors, distToSrc, bestI, candidates, AngularSpreadChi, fastCosine ? magV : default) == false)
+                        {
+                            picked[bestI] = true;
+                            continue;
+                        }
                         candidates.Add(bestI);
                         picked[bestI] = true;
-                        if (useConflictMask)
-                            pickedMask |= 1UL << bestI;
+                    }
+
+                    if (prof)
+                    {
+                        long now = Stopwatch.GetTimestamp();
+                        Interlocked.Add(ref CoverMFillTicks, now - tStep);
+                        Interlocked.Add(ref CoverTotalTicks, now - t0Total);
+                        Interlocked.Increment(ref CoverCalls);
                     }
 
                     for (int i = 0; i < candidates.Count; i++)
@@ -687,58 +1102,52 @@ public partial class Hnsw
                 // **provably** passes B_χ and we can skip the Δ(v,w) computation. For
                 // χ=0.7, (1+√0.7)² ≈ 3.373. This is exact, not an approximation —
                 // preserves the Theorem 10.C-B guarantee.
-                private const float SpreadSkipFactor = 3.373f; // (1 + √AngularSpreadChi)² for χ=0.7
-
-                // Conflict-bitset precompute. For each unordered pair (i,j), set conflict[i]
-                // bit j and conflict[j] bit i iff (i,j) violates B_χ. Triangle skip applies:
-                // pairs with r_max² ≥ SpreadSkipFactor·r_min² cost zero Distance() calls.
-                // After precompute, every greedy/M-fill feasibility check is one bit AND.
-                private static void BuildConflictMask(SearchState searchState, List<UnmanagedSpan> vectors,
-                    Span<float> distToSrc, int N, float chi, Span<ulong> conflict)
-                {
-                    Debug.Assert(N <= 64);
-                    conflict.Clear();
-                    for (int i = 0; i < N; i++)
-                    {
-                        float di = distToSrc[i];
-                        var vi = vectors[i];
-                        for (int j = i + 1; j < N; j++)
-                        {
-                            float dj = distToSrc[j];
-                            float rMin = Math.Min(di, dj);
-                            float rMax = Math.Max(di, dj);
-                            if (rMax >= SpreadSkipFactor * rMin)
-                                continue; // triangle skip: pair provably passes B_χ
-                            float dij = searchState.Distance(vi, vectors[j]);
-                            if (dij < chi * rMin)
-                            {
-                                conflict[i] |= 1UL << j;
-                                conflict[j] |= 1UL << i;
-                            }
-                        }
-                    }
-                }
+                private static readonly float SpreadSkipFactor = _envSpreadSkip;
 
                 private bool PassesAngularSpread(SearchState searchState, List<UnmanagedSpan> vectors,
-                    Span<float> distToSrc, int i, List<int> candidates, float chi)
+                    Span<float> distToSrc, int i, List<int> candidates, float chi,
+                    Span<float> magV = default)
                 {
                     if (chi <= 0f)
                         return true;
                     var vi = vectors[i];
                     float di = distToSrc[i];
+                    // Magnitude-sharing fast path: when magV[] was filled by the witness step
+                    // (cosine singles only), each Δ(v,w) call becomes one raw dot product
+                    // instead of three (one inner + two magnitudes). Algebraically equivalent
+                    // by Cauchy–Schwarz rearrangement: cosDist < χ·rMin ⇔ <v,w> > (1−χ·rMin)·|v|·|w|.
+                    bool useMag = magV.Length > 0;
+                    ReadOnlySpan<float> viFloats = useMag ? MemoryMarshal.Cast<byte, float>(vi.ToSpan()) : default;
+                    float magVi = useMag ? magV[i] : 0f;
+                    bool symmetric = _envSpreadSymmetric;
                     for (int j = 0; j < candidates.Count; j++)
                     {
                         int w = candidates[j];
                         float dw = distToSrc[w];
-                        float rMin = Math.Min(di, dw);
+                        // Reference distance for the spread threshold:
+                        //   symmetric → min(Δ(u,v), Δ(u,w)) (looser)
+                        //   onesided  → Δ(u, v_candidate) only (legacy α-prune semantics, stricter
+                        //               in dist-greedy order where dw ≤ di always).
+                        float rRef = symmetric ? Math.Min(di, dw) : di;
                         float rMax = Math.Max(di, dw);
                         // Triangle skip: if the radius ratio is large enough, the spread
                         // condition is automatically satisfied. No Δ(v,w) needed.
-                        if (rMax >= SpreadSkipFactor * rMin)
+                        if (rMax >= SpreadSkipFactor * rRef)
                             continue;
-                        float dvw = searchState.Distance(vi, vectors[w]);
-                        if (dvw < chi * rMin)
-                            return false;
+                        if (useMag)
+                        {
+                            var vwFloats = MemoryMarshal.Cast<byte, float>(vectors[w].ToSpan());
+                            float dot = TensorPrimitives.Dot<float>(viFloats, vwFloats);
+                            float rhs = (1f - chi * rRef) * magVi * magV[w];
+                            if (dot > rhs)
+                                return false;
+                        }
+                        else
+                        {
+                            float dvw = searchState.Distance(vi, vectors[w]);
+                            if (dvw < chi * rRef)
+                                return false;
+                        }
                     }
                     return true;
                 }
@@ -1025,6 +1434,26 @@ public partial class Hnsw
             // lazy-loaded nodes whose state could race.
             internal readonly UnmanagedSpan[] GlobalQuerySample;
 
+            // Per-node |v| cache, indexed by node-index (the value stored in
+            // NodePlacement._indexes). The same v_i reappears as a candidate across many
+            // covers; computing |v_i| in DoWorkApolloniusCover each time is wasted FLOPs
+            // because |v| is immutable post-Register. Sentinel 0f = not yet computed.
+            // Race-free: all writers compute the same value, 4-byte aligned float writes
+            // are atomic on x86/x64. Sized to match EnsureNodesCapacity headroom so
+            // lazy-loaded edge targets that get assigned indices during placement also fit.
+            internal readonly float[] NodeMagnitudes;
+
+            // Per-node × Q_u dot product cache. Q_u is frozen for the entire build, and the
+            // raw dot <v_i, q_k> depends only on v_i and q_k (not on the current pivot u).
+            // The Apollonius witness inequality d(v,q) ≤ ρ·d(u,q) ⇔ <v,q> ≥ cutoff[k]·|v|
+            // applies the per-u cutoff at lookup time; the cached value is u-independent.
+            // Stride = QuDotStride floats per node. Sentinel float.NaN = uncomputed. Float
+            // writes are atomic and idempotent (all writers compute the same dot), so
+            // unsynchronised read-then-write is safe. Layout is [node-index * stride + k]
+            // so reading all q_k for one v_i streams a contiguous Qm-float window.
+            internal readonly float[] QuDotCache;
+            internal readonly int QuDotStride;
+
             public NodePlacementRunner(Registration parent, int activeTasksCount, CancellationToken token)
             {
                 _mainCts = CancellationTokenSource.CreateLinkedTokenSource(token, _errorCts.Token);
@@ -1039,7 +1468,20 @@ public partial class Hnsw
                 // lazily loaded on top of CreatedNodes.
                 _searchState.EnsureNodesCapacity(_searchState.CreatedNodes + 16 * 1024);
 
+                int cacheCapacity = _searchState.CreatedNodes + 16 * 1024;
+                NodeMagnitudes = new float[cacheCapacity];
+
                 GlobalQuerySample = BuildGlobalQuerySample(_searchState, desired: 32);
+                QuDotStride = GlobalQuerySample.Length;
+                if (QuDotStride > 0)
+                {
+                    QuDotCache = new float[(long)cacheCapacity * QuDotStride];
+                    Array.Fill(QuDotCache, float.NaN);
+                }
+                else
+                {
+                    QuDotCache = Array.Empty<float>();
+                }
 
                 for (int i = 0; i < activeTasksCount; i++)
                 {

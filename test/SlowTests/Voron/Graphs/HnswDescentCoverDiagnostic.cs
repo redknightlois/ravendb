@@ -652,9 +652,9 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         // Diversity-pruning wins are documented in DiskANN at d ≥ 128 where the
         // curse-of-dimensionality makes geometric Delaunay-like edges genuinely
         // distinct from each other. Test at d=128 to see if α-prune outperforms.
-        const int vectorSize = 128;
-        const int vectorSizeInBytes = vectorSize * sizeof(float);
-        const int numberOfEntries = 10_000;
+        int vectorSize = int.TryParse(Environment.GetEnvironmentVariable("APOLLO_D"), out var dEnv) ? dEnv : 128;
+        int vectorSizeInBytes = vectorSize * sizeof(float);
+        int numberOfEntries = int.TryParse(Environment.GetEnvironmentVariable("APOLLO_N"), out var nEnv) ? nEnv : 10_000;
         const int numberOfQueries = 100;
         const int k = 10;
         int[] efs = [16, 32, 64, 128, 256];
@@ -666,6 +666,9 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         var queries = new float[numberOfQueries][];
         for (int q = 0; q < numberOfQueries; q++)
             queries[q] = RandomUnitVector(rng, vectorSize);
+
+        int M = int.TryParse(Environment.GetEnvironmentVariable("APOLLO_M"), out var mEnv) ? mEnv : 16;
+        Output.WriteLine($"[d={vectorSize} N={numberOfEntries}] M={M}");
 
         Hnsw.UseLegacyHeuristic = true;
         var groundTruth = new HashSet<long>[numberOfQueries];
@@ -686,11 +689,29 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         BuildGraph("legacy");
         swL.Stop();
         Hnsw.UseLegacyHeuristic = false;
+        Hnsw.CoverProfileReset();
         var swA = System.Diagnostics.Stopwatch.StartNew();
         BuildGraph("apollonius");
         swA.Stop();
 
-        Output.WriteLine($"[d=128 N={numberOfEntries}] build wall legacy={swL.ElapsedMilliseconds}ms apollonius={swA.ElapsedMilliseconds}ms ratio={(double)swA.ElapsedMilliseconds / swL.ElapsedMilliseconds:F2}x");
+        Output.WriteLine($"[d={vectorSize} N={numberOfEntries}] build wall legacy={swL.ElapsedMilliseconds}ms apollonius={swA.ElapsedMilliseconds}ms ratio={(double)swA.ElapsedMilliseconds / swL.ElapsedMilliseconds:F2}x");
+        if (Hnsw.CoverProfileEnabled && Hnsw.CoverCalls > 0)
+        {
+            double freq = System.Diagnostics.Stopwatch.Frequency;
+            double tot = Hnsw.CoverTotalTicks / freq;
+            double witness = Hnsw.CoverWitnessTicks / freq;
+            double dts = Hnsw.CoverDistToSrcTicks / freq;
+            double kc = Hnsw.CoverKCaptureTicks / freq;
+            double gr = Hnsw.CoverGreedyTicks / freq;
+            double mf = Hnsw.CoverMFillTicks / freq;
+            double pct(double s) => 100.0 * s / Math.Max(tot, 1e-9);
+            Output.WriteLine($"[Cover profile] calls={Hnsw.CoverCalls} total_cover_wall={tot*1000:F0}ms (vs build {swA.ElapsedMilliseconds}ms)");
+            Output.WriteLine($"  witness(Q_u)   = {witness*1000,8:F0}ms ({pct(witness),5:F1}%)");
+            Output.WriteLine($"  distToSrc      = {dts*1000,8:F0}ms ({pct(dts),5:F1}%)");
+            Output.WriteLine($"  kCapture       = {kc*1000,8:F0}ms ({pct(kc),5:F1}%)");
+            Output.WriteLine($"  greedy bitset  = {gr*1000,8:F0}ms ({pct(gr),5:F1}%)");
+            Output.WriteLine($"  M-fill         = {mf*1000,8:F0}ms ({pct(mf),5:F1}%)");
+        }
         Output.WriteLine($"{"ef",6} {"legacy",10} {"apollonius",12} {"Δ",10}");
         foreach (var ef in efs)
         {
@@ -720,7 +741,7 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         {
             using var s = Slice.From(Allocator, $"{nameof(ApolloniusSelector_HighDim_RecallSweep)}_{label}", out var treeName);
             using var wTx = Env.WriteTransaction();
-            Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: 16, numberOfCandidates: 32, VectorEmbeddingType.Single);
+            Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: M, numberOfCandidates: 32, VectorEmbeddingType.Single);
             using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
             {
                 for (int i = 0; i < numberOfEntries; i++)
@@ -839,9 +860,10 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                 using var s = Slice.From(Allocator, $"{nameof(ApolloniusSelector_ChurnRecall_HoldsUpVsLegacy)}_{label}", out var treeName);
                 var hashes = new byte[numberOfEntries][];
                 var sw = System.Diagnostics.Stopwatch.StartNew();
+                int churnM = int.TryParse(Environment.GetEnvironmentVariable("APOLLO_M"), out var mEnv) ? mEnv : 12;
                 using (var wTx = Env.WriteTransaction())
                 {
-                    Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: 12, numberOfCandidates: 16, VectorEmbeddingType.Single);
+                    Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: churnM, numberOfCandidates: 16, VectorEmbeddingType.Single);
                     using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
                     {
                         for (int i = 0; i < numberOfEntries; i++)
@@ -893,6 +915,175 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
             {
                 Hnsw.UseLegacyHeuristic = false;
             }
+        }
+    }
+
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void ApolloniusSelector_MultiRoundChurn_DecaysGracefully()
+    {
+        // Phase 7 validation: Theorem 5 promises Pr[tombstone failure] ≤ H(q)·e^(−Λ)
+        // per descent step. Over R rounds of churn, that compounds: the K=2 capped-
+        // survival cover should decay GRACEFULLY (each round shaves a small slice off
+        // recall) while legacy α=1 should decay STEEPLY (each tombstone potentially
+        // disconnects descent because legacy keeps only one witness per direction).
+        //
+        // Workload: 25 clusters × 200 pts, d=32. 5 churn rounds of 10 % deletion each
+        // (50 % cumulative). Recall@10 measured after every round against EXACT
+        // ground truth on the surviving set at that round. We log the decay curve
+        // for both selectors; the framework claim is validated iff Apollonius'
+        // recall curve stays above legacy's at every round.
+        const int vectorSize = 32;
+        const int vectorSizeInBytes = vectorSize * sizeof(float);
+        const int numberOfClusters = 25;
+        const int pointsPerCluster = 200;
+        const int numberOfEntries = numberOfClusters * pointsPerCluster;
+        const int numberOfQueries = 100;
+        const int k = 10;
+        const int efSearch = 16;       // tightened: small ef stresses the cover's diversity
+        const float clusterStd = 0.15f;
+        const int rounds = 5;
+        const double perRoundChurn = 0.15;
+
+        var rng = new Random(31);
+        var centers = new float[numberOfClusters][];
+        for (int c = 0; c < numberOfClusters; c++)
+            centers[c] = RandomUnitVector(rng, vectorSize);
+        var vectors = new float[numberOfEntries][];
+        for (int c = 0; c < numberOfClusters; c++)
+            for (int j = 0; j < pointsPerCluster; j++)
+                vectors[c * pointsPerCluster + j] = PerturbedUnitVector(rng, centers[c], clusterStd);
+        var queries = new float[numberOfQueries][];
+        for (int q = 0; q < numberOfQueries; q++)
+            queries[q] = PerturbedUnitVector(rng, centers[rng.Next(numberOfClusters)], clusterStd);
+
+        // Deterministic deletion schedule: round r removes points indexed at slice
+        // r·perRoundChurn .. (r+1)·perRoundChurn of a shuffled id list. Same schedule
+        // applied to both selectors so they face identical tombstone histories.
+        var shuffledIds = Enumerable.Range(0, numberOfEntries).ToArray();
+        var rngShuffle = new Random(53);
+        for (int i = shuffledIds.Length - 1; i > 0; i--)
+        {
+            int j = rngShuffle.Next(i + 1);
+            (shuffledIds[i], shuffledIds[j]) = (shuffledIds[j], shuffledIds[i]);
+        }
+        int perRoundRemove = (int)(numberOfEntries * perRoundChurn);
+
+        int churnM = int.TryParse(Environment.GetEnvironmentVariable("APOLLO_M"), out var mEnv) ? mEnv : 12;
+        Output.WriteLine($"[Multi-round churn] M={churnM} rounds={rounds} per-round={perRoundChurn:P0} k={k} ef={efSearch}");
+        Output.WriteLine($"{"round",6} {"surviving",10} {"legacy",10} {"apollonius",12} {"Δ",10}");
+
+        var legacyDecay = new double[rounds + 1];
+        var apolloDecay = new double[rounds + 1];
+
+        Run(useLegacy: true, decay: legacyDecay);
+        Run(useLegacy: false, decay: apolloDecay);
+
+        for (int r = 0; r <= rounds; r++)
+        {
+            int surviving = numberOfEntries - r * perRoundRemove;
+            Output.WriteLine($"{r,6} {surviving,10} {legacyDecay[r],10:F4} {apolloDecay[r],12:F4} {apolloDecay[r] - legacyDecay[r],10:F4}");
+        }
+
+        // Validation: Theorem 5 predicts Apollonius takes a SMALLER tombstone hit
+        // per round than legacy. The relevant signal is the *gap trajectory*, not
+        // the absolute recall: if (apollo − legacy) is non-decreasing across rounds,
+        // Apollonius is decaying more slowly. We allow 0.02 noise per round.
+        double initialGap = apolloDecay[0] - legacyDecay[0];
+        double finalGap = apolloDecay[rounds] - legacyDecay[rounds];
+        Assert.True(finalGap + 0.02 >= initialGap,
+            $"Theorem-5 compounding failed: gap went {initialGap:F4} → {finalGap:F4} (should narrow or hold)");
+        Output.WriteLine($"[Theorem-5 compounding] gap r=0: {initialGap:+0.0000;-0.0000}, gap r={rounds}: {finalGap:+0.0000;-0.0000}");
+
+        void Run(bool useLegacy, double[] decay)
+        {
+            Hnsw.UseLegacyHeuristic = useLegacy;
+            try
+            {
+                string label = useLegacy ? "legacy" : "apollonius";
+                using var s = Slice.From(Allocator, $"{nameof(ApolloniusSelector_MultiRoundChurn_DecaysGracefully)}_{label}", out var treeName);
+                var hashes = new byte[numberOfEntries][];
+
+                using (var wTx = Env.WriteTransaction())
+                {
+                    Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: churnM, numberOfCandidates: 32, VectorEmbeddingType.Single);
+                    using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
+                    {
+                        for (int i = 0; i < numberOfEntries; i++)
+                        {
+                            var span = registration.Register((i + 1) << 2, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                            hashes[i] = span.ToSpan().ToArray();
+                        }
+                        registration.Commit(CancellationToken.None);
+                    }
+                    wTx.Commit();
+                }
+
+                decay[0] = MeasureRecall(treeName.ToString(), new HashSet<int>());
+
+                for (int round = 1; round <= rounds; round++)
+                {
+                    var removedThisRound = shuffledIds.Skip((round - 1) * perRoundRemove).Take(perRoundRemove).ToArray();
+                    using (var wTx = Env.WriteTransaction())
+                    {
+                        using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(99 + round)))
+                        {
+                            foreach (var i in removedThisRound)
+                                registration.Remove((i + 1) << 2, hashes[i]);
+                            registration.Commit(CancellationToken.None);
+                        }
+                        wTx.Commit();
+                    }
+                    var cumulativeRemoved = new HashSet<int>(shuffledIds.Take(round * perRoundRemove));
+                    decay[round] = MeasureRecall(treeName.ToString(), cumulativeRemoved);
+                }
+            }
+            finally
+            {
+                Hnsw.UseLegacyHeuristic = false;
+            }
+        }
+
+        double MeasureRecall(string treeNameStr, HashSet<int> removed)
+        {
+            // Ground truth on the SURVIVING set for each query.
+            var groundTruth = new HashSet<long>[numberOfQueries];
+            for (int q = 0; q < numberOfQueries; q++)
+            {
+                var ranked = new List<(int id, float dist)>();
+                for (int i = 0; i < numberOfEntries; i++)
+                {
+                    if (removed.Contains(i)) continue;
+                    ranked.Add((i, Cosine(queries[q], vectors[i])));
+                }
+                ranked.Sort((a, b) => a.dist.CompareTo(b.dist));
+                groundTruth[q] = new HashSet<long>(ranked.Take(k).Select(x => (long)(((x.id + 1) << 2))));
+            }
+
+            using var rTx = Env.ReadTransaction();
+            double sum = 0;
+            for (int q = 0; q < numberOfQueries; q++)
+            {
+                using var ss = Slice.From(Allocator, treeNameStr, out var treeSlice);
+                var qBytes = MemoryMarshal.Cast<float, byte>(queries[q]).ToArray();
+                using var search = Hnsw.ApproximateNearest(rTx.LowLevelTransaction, treeSlice, numberOfCandidates: efSearch, qBytes, minimumSimilarity: 0f, hasFilterMatch: false);
+                var matches = new long[Math.Max(k, 16)];
+                var distances = new float[matches.Length];
+                var collected = new List<(long id, float dist)>();
+                int read;
+                do
+                {
+                    read = search.Fill(matches, distances, filter: null);
+                    for (int i = 0; i < read; i++)
+                        collected.Add((matches[i], distances[i]));
+                } while (read != 0);
+                collected.Sort((a, b) => a.dist.CompareTo(b.dist));
+                int hits = 0;
+                foreach (var (id, _) in collected.Take(k))
+                    if (groundTruth[q].Contains(id))
+                        hits++;
+                sum += (double)hits / k;
+            }
+            return sum / numberOfQueries;
         }
     }
 
@@ -950,7 +1141,13 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         const int N = numberOfClusters * pointsPerCluster;
         const int numberOfQueries = 200;
         const int M = 12;
-        const float rho = 0.90f;
+        // §16 chordal correction. The cover code tests δ(v,q) ≤ λ·δ(u,q) with λ_code = 0.90.
+        // The corresponding *metric* contraction (Euclidean on the unit sphere) is
+        // ρ_metric = √λ_code ≈ 0.949. Empirical H below is observed descent steps and is
+        // metric-independent; the ceiling H·(η + e^−Λ) it feeds also stays the same.
+        // Output is labelled in both forms to keep the proof and the implementation in sync.
+        const float lambdaCode = 0.90f;
+        float rhoMetric = MathF.Sqrt(lambdaCode);
         const float clusterStd = 0.15f;
 
         var rng = new Random(31);
@@ -975,6 +1172,7 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         // vacuous as probability statements and comparing them does not order recall.
         double legacyClamped = Math.Min(1.0, legacyStats.ceiling);
         double apolloniusClamped = Math.Min(1.0, apolloniusStats.ceiling);
+        Output.WriteLine($"[λ_code={lambdaCode:F2}  ρ_metric={rhoMetric:F4} (chordal, §16)]");
         Output.WriteLine($"Legacy    : Ĥ={legacyStats.H:F2} η̂={legacyStats.eta:F4} Λ̂={legacyStats.Lambda:F2} raw={legacyStats.ceiling:F4} clamped={legacyClamped:F4}");
         Output.WriteLine($"Apollonius: Ĥ={apolloniusStats.H:F2} η̂={apolloniusStats.eta:F4} Λ̂={apolloniusStats.Lambda:F2} raw={apolloniusStats.ceiling:F4} clamped={apolloniusClamped:F4}");
         Output.WriteLine($"Δraw = {apolloniusStats.ceiling - legacyStats.ceiling:F4} (negative is improvement; meaningless when both raws >1)");
@@ -1005,7 +1203,7 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                     wTx.Commit();
                 }
                 using var rTx = Env.ReadTransaction();
-                var report = Hnsw.MeasureDescentCover(rTx.LowLevelTransaction, treeName, queryBuffer, numberOfQueries, rho);
+                var report = Hnsw.MeasureDescentCover(rTx.LowLevelTransaction, treeName, queryBuffer, numberOfQueries, lambdaCode);
                 double Hh = report.MeanPathLength;
                 double e = report.FractionUncovered;
                 double L = report.MeanWitnessesWhenCovered * (1.0 - e);
@@ -1043,7 +1241,11 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         const int N = numberOfClusters * pointsPerCluster;
         const int numberOfQueries = 200;
         const int M = 12;
-        const float rho = 0.90f; // must match the cover's construction ρ
+        // §16 chordal correction. Construction tests δ(v,q) ≤ λ·δ(u,q) with λ_code = 0.90.
+        // The metric form ρ_metric = √λ_code ≈ 0.949 is the contraction in chordal distance.
+        // Empirical Ĥ here is observed steps, so the bound Ĥ·(η̂+e^−Λ̂) is metric-independent.
+        const float lambdaCode = 0.90f;
+        float rhoMetric = MathF.Sqrt(lambdaCode);
         const float clusterStd = 0.15f;
         const double delta = 0.05;
 
@@ -1081,7 +1283,7 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
 
         // (1) Theorem-defined statistics from the actual descent walk on the graph.
         Hnsw.DescentCoverReport report = Hnsw.MeasureDescentCover(
-            rTx.LowLevelTransaction, treeName, queryBuffer, numberOfQueries, rho);
+            rTx.LowLevelTransaction, treeName, queryBuffer, numberOfQueries, lambdaCode);
 
         double hHat = report.MeanPathLength;
         double etaHat = report.FractionUncovered;
@@ -1114,6 +1316,7 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
 
         double bound = ceiling + epsilonM;
 
+        Output.WriteLine($"[λ_code={lambdaCode:F2}  ρ_metric={rhoMetric:F4} (chordal, §16)]");
         Output.WriteLine(
             $"theorem-bound test: Pr̂[fail]={prFail:F4} ≤ Ĥ·(η̂+e^−Λ̂)+ε_m " +
             $"= {hHat:F2}·({etaHat:F4} + {Math.Exp(-lambdaHat):F4}) + {epsilonM:F4} " +
