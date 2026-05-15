@@ -631,3 +631,28 @@ incomplete-or-violating sections. After investigation:
   selector remains opt-in via `RAVEN_APOLLO_GREEDY_MODE=cover`. Will
   revisit when there is a workload where distance-greedy hits a
   recall ceiling that cover-gain can lift.
+
+- **§22 (I/O-aware certification) — not applicable under current
+  storage, not "deferred".** The framework assumes a cost function
+  `c_page(u, v)` derived from the page distance between vectors. The
+  data IS available trivially (Voron `ContainerEntryId` encodes the
+  page number as `id / Constants.Storage.PageSize`), but Voron's
+  container allocates items in **insertion order**, not by graph
+  topology. Two metric-near vectors get different pages if inserted
+  at different times; two HNSW-distant vectors (level-0 vs level-8)
+  may share a page just because they were inserted in the same batch.
+  Page-distance is essentially **uncorrelated** with graph-distance.
+
+  A non-zero `LambdaPage` under this layout would tie-break on noise
+  and could suppress topologically-correct edges in favour of
+  allocation-coincident ones. The `LambdaPage = 0.0f` default is
+  therefore **correct**, not a placeholder. The audit item is closed
+  here; reopening it requires one of:
+  - a co-locating storage rearrangement pass (post-build defrag that
+    groups HNSW neighbours on adjacent pages, with VectorId
+    rewriting), or
+  - an insertion ordering convention that aligns temporal order with
+    graph proximity (workload-dependent, not architectural).
+
+  Until one of those exists, `c_page` has no real signal and the §22
+  infrastructure stays inert by design.
