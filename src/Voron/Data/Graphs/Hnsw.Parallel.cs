@@ -556,9 +556,30 @@ public partial class Hnsw
                         coveredOnce |= w;
                     }
 
-                    // Greedy capped-survival cover (Theorem 9). Gain of candidate v is
-                    // |witness[v] & ~coveredTwice| — exactly the marginal of F(S) under
-                    // the K=2 cap.
+                    // Distance-to-source cache for the bi-criteria angular-spread test
+                    // (Theorem 10.C-B). d(u, v) reused across diversity checks and M-fill.
+                    Span<float> distToSrc = stackalloc float[N <= 1024 ? N : 0];
+                    float[] distToSrcHeap = null;
+                    if (distToSrc.Length == 0)
+                    {
+                        distToSrcHeap = new float[N];
+                        distToSrc = distToSrcHeap;
+                    }
+                    for (int i = 0; i < N; i++)
+                        distToSrc[i] = searchState.Distance(_src, vectors[i]);
+
+                    // Greedy capped-survival cover (Theorem 9), gated by shell-wise angular
+                    // spread (§10.C-B). For each round: find the highest-gain candidate that
+                    // also satisfies d(v, w) ≥ χ · min(d(u,v), d(u,w)) against every
+                    // already-picked w. §10.B proves pure cover cannot give small η on
+                    // isotropic high-d data; the spread constraint is what closes that gap.
+                    //
+                    // χ = 1.0 matches the legacy α-prune (α=1) and DiskANN baseline. The
+                    // constraint is symmetric in the bound (min over u-distances), unlike
+                    // legacy which is one-sided in d(u,v). Without (B) the empirical
+                    // recall regression is 4–16pp on isotropic data; the constraint is the
+                    // single mathematically grounded fix per §10.B.
+                    const float AngularSpreadChi = 1.0f;
                     while (candidates.Count < M)
                     {
                         ulong needsMore = ~coveredTwice;
@@ -575,11 +596,12 @@ public partial class Hnsw
                             if (picked[i])
                                 continue;
                             int gain = BitOperations.PopCount(witness[i] & needsMore);
-                            if (gain > bestGain)
-                            {
-                                bestGain = gain;
-                                bestI = i;
-                            }
+                            if (gain <= bestGain)
+                                continue;
+                            if (PassesAngularSpread(searchState, vectors, distToSrc, i, candidates, AngularSpreadChi) == false)
+                                continue;
+                            bestGain = gain;
+                            bestI = i;
                         }
                         if (bestI == -1 || bestGain == 0)
                             break;
@@ -590,41 +612,57 @@ public partial class Hnsw
                         coveredOnce |= w;
                     }
 
-                    // M-fill top-up: nearest-of-remaining. Needed when greedy stops because
-                    // every remaining witness=0 (no q ∈ Q_u falls inside their A_ρ cell);
-                    // those candidates still earn slots by closeness to u.
-                    if (candidates.Count < M)
+                    // M-fill top-up: nearest-of-remaining that also passes (B). Needed when
+                    // greedy stops because every remaining witness=0. The angular-spread
+                    // check still applies — these are real edges that descent will use.
+                    while (candidates.Count < M)
                     {
-                        Span<float> dist = stackalloc float[N <= 1024 ? N : 0];
-                        float[] distHeap = null;
-                        if (dist.Length == 0)
-                        {
-                            distHeap = new float[N];
-                            dist = distHeap;
-                        }
+                        int bestI = -1;
+                        float bestDist = float.MaxValue;
                         for (int i = 0; i < N; i++)
-                            dist[i] = picked[i] ? float.MaxValue : searchState.Distance(_src, vectors[i]);
-                        while (candidates.Count < M)
                         {
-                            int bestI = -1;
-                            float bestDist = float.MaxValue;
-                            for (int i = 0; i < N; i++)
-                            {
-                                if (dist[i] < bestDist)
-                                {
-                                    bestDist = dist[i];
-                                    bestI = i;
-                                }
-                            }
-                            if (bestI == -1)
-                                break;
-                            candidates.Add(bestI);
-                            dist[bestI] = float.MaxValue;
+                            if (picked[i])
+                                continue;
+                            if (distToSrc[i] >= bestDist)
+                                continue;
+                            if (PassesAngularSpread(searchState, vectors, distToSrc, i, candidates, AngularSpreadChi) == false)
+                                continue;
+                            bestDist = distToSrc[i];
+                            bestI = i;
                         }
+                        if (bestI == -1)
+                            break;
+                        candidates.Add(bestI);
+                        picked[bestI] = true;
                     }
 
                     for (int i = 0; i < candidates.Count; i++)
                         candidates[i] = indexes[candidates[i]];
+                }
+
+                // Shell-wise angular spread (Theorem 10.C-B). Reject candidate i if for any
+                // already-picked w: d(v_i, v_w) < χ · min(d(u, v_i), d(u, v_w)). The min form
+                // is symmetric in (i, w); equivalent to legacy α-prune at χ=1 except legacy
+                // uses one-sided d(u, v_i). The constraint prevents the cover greedy from
+                // selecting near-collinear edges that all cover the same query directions —
+                // the failure mode §10.B proves is intrinsic to pure descent cover on
+                // isotropic data.
+                private bool PassesAngularSpread(SearchState searchState, List<UnmanagedSpan> vectors,
+                    Span<float> distToSrc, int i, List<int> candidates, float chi)
+                {
+                    if (chi <= 0f)
+                        return true;
+                    var vi = vectors[i];
+                    float di = distToSrc[i];
+                    for (int j = 0; j < candidates.Count; j++)
+                    {
+                        int w = candidates[j];
+                        float dij = searchState.Distance(vi, vectors[w]);
+                        float threshold = chi * Math.Min(di, distToSrc[w]);
+                        if (dij < threshold)
+                            return false;
+                    }
+                    return true;
                 }
 
                 // Original HNSW Algorithm-4 / DiskANN robust-prune. Test-only path reached
