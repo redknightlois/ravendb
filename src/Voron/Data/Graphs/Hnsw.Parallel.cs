@@ -1636,11 +1636,14 @@ public partial class Hnsw
                 // build never reallocate the underlying ByteString. Workers in
                 // PopulateWorkListsOnWorker hold ref Node values into that storage across
                 // LLT-side dispatch; a Grow → Release between dispatch and worker access
-                // would invalidate those refs. Headroom of 16 K covers edge nodes that get
-                // lazily loaded on top of CreatedNodes.
-                _searchState.EnsureNodesCapacity(_searchState.CreatedNodes + 16 * 1024);
+                // would invalidate those refs. Headroom covers edge nodes that get lazily
+                // loaded on top of CreatedNodes — for incremental builds atop a large
+                // existing graph, edge-target lazy loads can substantially exceed the
+                // bare 16 K we used originally, so we scale with the existing graph size.
+                int lazyHeadroom = Math.Max(16 * 1024, _searchState.CreatedNodes / 16);
+                _searchState.EnsureNodesCapacity(_searchState.CreatedNodes + lazyHeadroom);
 
-                int cacheCapacity = _searchState.CreatedNodes + 16 * 1024;
+                int cacheCapacity = _searchState.CreatedNodes + lazyHeadroom;
                 NodeMagnitudes = new float[cacheCapacity];
 
                 GlobalQuerySample = BuildGlobalQuerySample(_searchState, desired: 32);
