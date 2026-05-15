@@ -669,14 +669,22 @@ readahead stays hot. On the hot-cache Sphere-100K benchmark the wall
 effect is null (within ±1 % of unsorted, swallowed by ±5 % run-to-run
 variance on legacy).
 
-The empirically measured effect is **mild recall improvement** at
-ef=128 (2 runs each, sort on vs sort off, apollonius graph):
+The empirically measured effect is **mild recall improvement at
+recall@10 across all efSearch levels** (5 runs each, sort on vs sort
+off, apollonius graph, 50 queries):
 
-| metric | sort=1 | sort=0 | Δ      |
-|--------|-------:|-------:|-------:|
-| r@1    | 74.0 % | 72.0 % | +2.0 pp |
-| r@10   | 79.2 % | 75.9 % | +3.3 pp |
-| r@50   | 74.7 % | 73.3 % | +1.4 pp |
+| ef  | r@10 sort=1 | r@10 sort=0 |     Δ      |
+|----:|------------:|------------:|-----------:|
+| 32  |     64.60 % |     62.56 % | **+2.04 pp** |
+| 64  |     72.28 % |     70.00 % | **+2.28 pp** |
+| 128 |     78.44 % |     76.60 % | **+1.84 pp** |
+
+r@1 unchanged (74.0 vs 74.4 %, noise). r@50 +1 pp. Build wall +1.8 %
+on apollonius (sort cost + topology shift, within run-to-run variance).
+
+Per-point t-stat at ef=128 r@10 is 1.47 (n=5+5), not strictly
+p<0.05 at 50 queries — the load-bearing evidence is the **consistent
++2 pp at every efSearch level**, not any single point.
 
 Mechanism is *not* I/O locality — it's that changing batch insertion
 order changes graph topology. HNSW builds incrementally; which nodes
