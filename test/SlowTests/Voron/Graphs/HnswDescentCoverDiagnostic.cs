@@ -1802,6 +1802,10 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         Hnsw.UseLegacyHeuristic = false;
         long apoMs = Build("apollonius");
         Output.WriteLine($"[build wall] legacy={legacyMs}ms  apollonius={apoMs}ms  ratio={(double)apoMs / Math.Max(1, legacyMs):F2}x");
+        // FRAMEWORK §15 + §23.A: log λ_code AND ρ_metric=√λ_code. ρ_metric is the
+        // chordal-metric form theorems are stated in; without it, downstream H(q)
+        // and η ceilings are off by a factor that doubles for the default 0.90.
+        Output.WriteLine($"[metric] λ_code={Hnsw.ApolloniusLambdaCode:F4}  ρ_metric=√λ_code={Hnsw.ApolloniusRhoMetric:F4}");
 
         var queryBuffer = new byte[numberOfQueries * vectorSizeInBytes];
         for (int q = 0; q < numberOfQueries; q++)

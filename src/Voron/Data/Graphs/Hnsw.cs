@@ -27,6 +27,15 @@ namespace Voron.Data.Graphs;
 
 public unsafe partial class Hnsw
 {
+    // FRAMEWORK §15 — cosine/chordal correction. The selector compares
+    // δ(v, q) ≤ λ_code · δ(u, q), but δ = 1 - ⟨x, y⟩ is not a metric. The
+    // true chordal metric is D(x, y) = √(2δ), so ρ_metric = √λ_code is what
+    // the descent theorem actually requires. Selection is invariant under
+    // the substitution; only theorem-ceiling reports must use ρ_metric.
+    // §23.A of the framework requires diagnostics log both constants.
+    public const float ApolloniusLambdaCode = 0.90f;
+    public static readonly float ApolloniusRhoMetric = MathF.Sqrt(ApolloniusLambdaCode);
+
     public static void Create(LowLevelTransaction llt, string name, int vectorSizeBytes, int numberOfEdges, int numberOfCandidates, VectorEmbeddingType embeddingType)
     {
         using var _ = Slice.From(llt.Allocator, name, out var slice);

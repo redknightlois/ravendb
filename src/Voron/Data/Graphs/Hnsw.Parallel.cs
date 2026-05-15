@@ -680,8 +680,12 @@ public partial class Hnsw
                 // ceiling and H(q) descent count downstream is reported in ρ_metric. This
                 // doubles the previously-claimed H bound and is faithful to the metric the
                 // proof actually requires.
-                internal const float LambdaCode = 0.90f;
-                internal static readonly float RhoMetric = MathF.Sqrt(LambdaCode); // ≈ 0.9487
+                // Aliases for the public Hnsw.ApolloniusLambdaCode / ApolloniusRhoMetric
+                // constants (single source of truth — see Hnsw.cs). The selector compares
+                // δ(v,q) ≤ λ_code · δ(u,q); ρ_metric = √λ_code is the chordal-metric form
+                // that any theorem-ceiling report must use (FRAMEWORK §15, §23.A).
+                internal const float LambdaCode = ApolloniusLambdaCode;
+                internal static readonly float RhoMetric = ApolloniusRhoMetric;
 
                 private void DoWorkApolloniusCover(SearchState searchState, List<int> candidates, List<UnmanagedSpan> vectors, List<int> indexes, int N, UnmanagedSpan[] Qu, float[] nodeMagnitudes, float[] quDotCache, int quDotStride)
                 {
