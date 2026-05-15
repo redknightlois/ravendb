@@ -574,12 +574,28 @@ public partial class Hnsw
                     // already-picked w. §10.B proves pure cover cannot give small η on
                     // isotropic high-d data; the spread constraint is what closes that gap.
                     //
-                    // χ = 1.0 matches the legacy α-prune (α=1) and DiskANN baseline. The
+                    // χ = 0.7 is the empirically-tuned Pareto point (see commit log). The
                     // constraint is symmetric in the bound (min over u-distances), unlike
-                    // legacy which is one-sided in d(u,v). Without (B) the empirical
-                    // recall regression is 4–16pp on isotropic data; the constraint is the
-                    // single mathematically grounded fix per §10.B.
+                    // legacy which is one-sided in d(u,v). Without (B) the recall
+                    // regression is 4–16pp on isotropic data.
                     const float AngularSpreadChi = 0.7f;
+
+                    // Conflict-bitset fast path (Track A item 4). For N ≤ 64, precompute one
+                    // ulong per candidate where bit j = 1 iff (i, j) violates B_χ. Then
+                    // feasibility per greedy round is (conflict[i] & pickedMask) == 0 —
+                    // single AND, no per-round distance calls. Triangle skip applies during
+                    // the precompute pass too, so most pairs cost zero Distance() calls.
+                    // For N > 64 fall back to per-pick PassesAngularSpread.
+                    Span<ulong> conflict = stackalloc ulong[N <= 64 ? N : 0];
+                    bool useConflictMask = N <= 64;
+                    ulong pickedMask = 0;
+                    if (useConflictMask)
+                    {
+                        BuildConflictMask(searchState, vectors, distToSrc, N, AngularSpreadChi, conflict);
+                        for (int j = 0; j < candidates.Count; j++)
+                            pickedMask |= 1UL << candidates[j];
+                    }
+
                     while (candidates.Count < M)
                     {
                         ulong needsMore = ~coveredTwice;
@@ -598,8 +614,15 @@ public partial class Hnsw
                             int gain = BitOperations.PopCount(witness[i] & needsMore);
                             if (gain <= bestGain)
                                 continue;
-                            if (PassesAngularSpread(searchState, vectors, distToSrc, i, candidates, AngularSpreadChi) == false)
+                            if (useConflictMask)
+                            {
+                                if ((conflict[i] & pickedMask) != 0)
+                                    continue;
+                            }
+                            else if (PassesAngularSpread(searchState, vectors, distToSrc, i, candidates, AngularSpreadChi) == false)
+                            {
                                 continue;
+                            }
                             bestGain = gain;
                             bestI = i;
                         }
@@ -607,6 +630,8 @@ public partial class Hnsw
                             break;
                         candidates.Add(bestI);
                         picked[bestI] = true;
+                        if (useConflictMask)
+                            pickedMask |= 1UL << bestI;
                         ulong w = witness[bestI];
                         coveredTwice |= w & coveredOnce;
                         coveredOnce |= w;
@@ -625,8 +650,15 @@ public partial class Hnsw
                                 continue;
                             if (distToSrc[i] >= bestDist)
                                 continue;
-                            if (PassesAngularSpread(searchState, vectors, distToSrc, i, candidates, AngularSpreadChi) == false)
+                            if (useConflictMask)
+                            {
+                                if ((conflict[i] & pickedMask) != 0)
+                                    continue;
+                            }
+                            else if (PassesAngularSpread(searchState, vectors, distToSrc, i, candidates, AngularSpreadChi) == false)
+                            {
                                 continue;
+                            }
                             bestDist = distToSrc[i];
                             bestI = i;
                         }
@@ -634,6 +666,8 @@ public partial class Hnsw
                             break;
                         candidates.Add(bestI);
                         picked[bestI] = true;
+                        if (useConflictMask)
+                            pickedMask |= 1UL << bestI;
                     }
 
                     for (int i = 0; i < candidates.Count; i++)
@@ -654,6 +688,37 @@ public partial class Hnsw
                 // χ=0.7, (1+√0.7)² ≈ 3.373. This is exact, not an approximation —
                 // preserves the Theorem 10.C-B guarantee.
                 private const float SpreadSkipFactor = 3.373f; // (1 + √AngularSpreadChi)² for χ=0.7
+
+                // Conflict-bitset precompute. For each unordered pair (i,j), set conflict[i]
+                // bit j and conflict[j] bit i iff (i,j) violates B_χ. Triangle skip applies:
+                // pairs with r_max² ≥ SpreadSkipFactor·r_min² cost zero Distance() calls.
+                // After precompute, every greedy/M-fill feasibility check is one bit AND.
+                private static void BuildConflictMask(SearchState searchState, List<UnmanagedSpan> vectors,
+                    Span<float> distToSrc, int N, float chi, Span<ulong> conflict)
+                {
+                    Debug.Assert(N <= 64);
+                    conflict.Clear();
+                    for (int i = 0; i < N; i++)
+                    {
+                        float di = distToSrc[i];
+                        var vi = vectors[i];
+                        for (int j = i + 1; j < N; j++)
+                        {
+                            float dj = distToSrc[j];
+                            float rMin = Math.Min(di, dj);
+                            float rMax = Math.Max(di, dj);
+                            if (rMax >= SpreadSkipFactor * rMin)
+                                continue; // triangle skip: pair provably passes B_χ
+                            float dij = searchState.Distance(vi, vectors[j]);
+                            if (dij < chi * rMin)
+                            {
+                                conflict[i] |= 1UL << j;
+                                conflict[j] |= 1UL << i;
+                            }
+                        }
+                    }
+                }
+
                 private bool PassesAngularSpread(SearchState searchState, List<UnmanagedSpan> vectors,
                     Span<float> distToSrc, int i, List<int> candidates, float chi)
                 {
