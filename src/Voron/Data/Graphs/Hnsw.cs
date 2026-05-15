@@ -124,6 +124,41 @@ public unsafe partial class Hnsw
 
         public int GetCreatedNodeIndex(int index) => _newNodes[index];
 
+        // Reorder the unprocessed tail of _newNodes (from `fromIndex` to end) so
+        // that nodes whose vectors live on nearby Voron pages are processed
+        // adjacently. VectorId encodes the page number directly via
+        // `VectorId / Constants.Storage.PageSize` (see Container.cs:847), so
+        // sorting by VectorId == sorting by physical page order. This is a
+        // build-time I/O scheduling optimisation: each worker streams through
+        // pages sequentially, keeping OS readahead hot. No effect on edge
+        // selection (the graph search is metric-driven, not page-driven), but
+        // shifts HNSW insertion order — the random level draw absorbs the
+        // change in expectation; specific topology may differ ±1pp recall.
+        public void SortPendingNodesByVectorId(int fromIndex)
+        {
+            int count = _newNodes.Count - fromIndex;
+            if (count <= 1)
+                return;
+            // _newNodes holds indices into _nodes[]; sort by the target Node's VectorId.
+            Span<int> slice = _newNodes.Items.Slice(fromIndex, count);
+            Span<Node> nodes = _nodes.ToSpan();
+            // MemoryExtensions.Sort with a comparer captures the nodes span via closure;
+            // do an indirect sort by materialising a parallel key array, sort keys+values
+            // together, then write back. Count is ~CreatedNodes which is the full batch,
+            // so allocating a temporary key array is acceptable build-time overhead.
+            long[] keys = System.Buffers.ArrayPool<long>.Shared.Rent(count);
+            try
+            {
+                for (int i = 0; i < count; i++)
+                    keys[i] = nodes[slice[i]].VectorId;
+                MemoryExtensions.Sort(keys.AsSpan(0, count), slice);
+            }
+            finally
+            {
+                System.Buffers.ArrayPool<long>.Shared.Return(keys);
+            }
+        }
+
         public Options Options;
 
         public SearchState(LowLevelTransaction llt, string name) : this(llt, SliceFromString(llt, name))

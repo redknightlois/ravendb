@@ -103,6 +103,14 @@ public partial class Hnsw
             return f;
         return 0.90f;
     }
+
+    // Build-time I/O scheduling: order the pending-vector batch by VectorId
+    // (= page order in the Voron container) so workers stream pages
+    // sequentially and OS readahead stays hot. Default ON — pure scheduling
+    // discipline, no effect on edge selection. Set RAVEN_APOLLO_SORT_BY_PAGE=0
+    // to disable for A/B comparison.
+    internal static readonly bool _envSortByPage =
+        string.Equals(Environment.GetEnvironmentVariable("RAVEN_APOLLO_SORT_BY_PAGE") ?? "1", "1", StringComparison.OrdinalIgnoreCase);
     // Triangle-skip factor (1+√χ)². Recomputed once based on _envChi so the skip is
     // still exact for whatever χ was set at process start.
     internal static readonly float _envSpreadSkip = (1f + MathF.Sqrt(MathF.Max(0f, _envChi))) * (1f + MathF.Sqrt(MathF.Max(0f, _envChi)));
@@ -282,6 +290,15 @@ public partial class Hnsw
                 span.CopyTo(allocated);
                 _searchState.RegisterNodeLocation(EntryPointId, entryPointNode);
             }
+
+            // Reorder the pending tail of the batch by VectorId so workers stream
+            // through pages in physical order. Voron's container allocates entries
+            // by insertion time, not graph topology; sorting by VectorId here gives
+            // sequential OS readahead on the new-vector reads without changing
+            // which edges get selected. Safe to do after _nextNodeIndex has skipped
+            // the entry point.
+            if (_envSortByPage)
+                _searchState.SortPendingNodesByVectorId(_nextNodeIndex);
 
             // Run 1..MaxConcurrentBatches batches here, depending on how much work we have to run
             int numberOfBatches = Math.Max(1, _searchState.CreatedNodes / MaxConcurrentBatches);
