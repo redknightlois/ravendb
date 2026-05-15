@@ -1802,14 +1802,6 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         Hnsw.UseLegacyHeuristic = false;
         long apoMs = Build("apollonius");
         Output.WriteLine($"[build wall] legacy={legacyMs}ms  apollonius={apoMs}ms  ratio={(double)apoMs / Math.Max(1, legacyMs):F2}x");
-        // FRAMEWORK §15 + §23.A — chordal-metric correction. The selector uses
-        // λ_code on δ = 1 - ⟨x, y⟩; the descent theorem is stated in chordal
-        // metric, so theorem-ceiling reports must use ρ_metric = √λ_code (not λ).
-        // Both values are public compile-time constants:
-        //   Hnsw.ApolloniusLambdaCode  (= 0.9000, the selector threshold)
-        //   Hnsw.ApolloniusRhoMetric   (= √λ_code ≈ 0.9487, the theorem ρ)
-        // The ρ values printed in the η̂ / η_front tables below are the
-        // diagnostic sweep, not λ_code; downstream H(q) bounds use ρ_metric.
 
         var queryBuffer = new byte[numberOfQueries * vectorSizeInBytes];
         for (int q = 0; q < numberOfQueries; q++)

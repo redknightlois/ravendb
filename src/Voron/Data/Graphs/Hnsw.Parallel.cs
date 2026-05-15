@@ -85,6 +85,24 @@ public partial class Hnsw
         // empirically too loose on real clustered data.
         return 1.0f;
     }
+
+    // FRAMEWORK §3, §15. λ_code is the descent-decay hyperparameter applied on the
+    // cosine-dissimilarity test δ(v,q) ≤ λ · δ(u,q). The corresponding chordal-metric
+    // contraction ratio is ρ_metric = √λ_code (0.90 → ≈ 0.9487).
+    //   - Higher λ (→1): looser witness criterion, more candidates qualify.
+    //   - Lower λ (→0): stricter criterion, faster geometric descent per hop.
+    // Only consulted by the cover-gain selector (`RAVEN_APOLLO_GREEDY_MODE=cover`).
+    // Under the default dist-greedy mode the witness bits are discarded and λ has
+    // no effect on the built graph; the value is wired through env so cover-gain
+    // experiments do not require a recompile.
+    internal static readonly float _envApolloLambda = ReadEnvApolloLambda();
+    private static float ReadEnvApolloLambda()
+    {
+        var s = Environment.GetEnvironmentVariable("RAVEN_APOLLO_LAMBDA");
+        if (string.IsNullOrEmpty(s) == false && float.TryParse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var f) && f > 0f && f < 1f)
+            return f;
+        return 0.90f;
+    }
     // Triangle-skip factor (1+√χ)². Recomputed once based on _envChi so the skip is
     // still exact for whatever χ was set at process start.
     internal static readonly float _envSpreadSkip = (1f + MathF.Sqrt(MathF.Max(0f, _envChi))) * (1f + MathF.Sqrt(MathF.Max(0f, _envChi)));
@@ -671,21 +689,8 @@ public partial class Hnsw
                     + LambdaHaz * 0.0f    // c_haz(v): tombstone risk surcharge
                     + LambdaDeg * 0.0f;   // c_deg(v): high-degree fan-out surcharge
 
-                // §16 chordal correction. Code tests δ(v,q) ≤ λ·δ(u,q) where δ is cosine
-                // dissimilarity. δ is NOT a strict metric — the true metric on the unit
-                // sphere is the chordal D(x,y) = √(2δ(x,y)). Squaring the metric condition
-                // gives D(v,q)² ≤ λ·D(u,q)², so the metric-form contraction ratio is
-                // ρ_metric = √λ_code. With λ_code = 0.90 → ρ_metric ≈ 0.949. The selection
-                // behaviour is unchanged (still uses λ_code on δ), but every theorem
-                // ceiling and H(q) descent count downstream is reported in ρ_metric. This
-                // doubles the previously-claimed H bound and is faithful to the metric the
-                // proof actually requires.
-                // Aliases for the public Hnsw.ApolloniusLambdaCode / ApolloniusRhoMetric
-                // constants (single source of truth — see Hnsw.cs). The selector compares
-                // δ(v,q) ≤ λ_code · δ(u,q); ρ_metric = √λ_code is the chordal-metric form
-                // that any theorem-ceiling report must use (FRAMEWORK §15, §23.A).
-                internal const float LambdaCode = ApolloniusLambdaCode;
-                internal static readonly float RhoMetric = ApolloniusRhoMetric;
+                // λ_code hyperparameter — see Registration._envApolloLambda. Selector uses
+                // δ(v,q) ≤ λ_code · δ(u,q); chordal ρ_metric = √λ_code (FRAMEWORK §15).
 
                 private void DoWorkApolloniusCover(SearchState searchState, List<int> candidates, List<UnmanagedSpan> vectors, List<int> indexes, int N, UnmanagedSpan[] Qu, float[] nodeMagnitudes, float[] quDotCache, int quDotStride)
                 {
@@ -701,7 +706,7 @@ public partial class Hnsw
                     // and chosen candidates are identical, only the metric label changes.
                     Span<float> threshold = stackalloc float[64];
                     for (int k = 0; k < Qm; k++)
-                        threshold[k] = LambdaCode * searchState.Distance(_src, Qu[k]);
+                        threshold[k] = _envApolloLambda * searchState.Distance(_src, Qu[k]);
 
                     // Witness bitmask per candidate. Bit k set iff candidate i covers q_k.
                     Span<ulong> witness = stackalloc ulong[N <= 1024 ? N : 0];
