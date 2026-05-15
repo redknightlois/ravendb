@@ -239,6 +239,50 @@ the existing Theorem 11 `kCapture = M/2` reserve — but the reserve is for
 *pick-into-N(u)*, not for *measurement-in-Q_u*. Both are needed: pick the
 nearest as edges (capture) AND treat them as witness anchors (cover).
 
+**Empirical caveat (2026-05-14).** The naive form of this augmentation —
+appending the candidate's own M/2-nearest from C as additional Q_u
+anchors — degraded uniform-recall by ~14pp because the appended anchors
+are themselves the about-to-be-picked candidates, so every near v
+trivially satisfies the witness threshold and the cover greedy collapses
+toward pick-nearest-only. Implementation reverted. A faithful (★)
+approximation must use witness anchors that are external to C (e.g.,
+sampled from already-live points outside the candidate pool); this is an
+open implementation question.
+
+---
+
+## 10.B. Open finding: recall vs theorem ceiling on isotropic data
+
+The bound proofs (Theorems 6, 8, 9) give an **upper bound** on failure
+probability via `Pr[fail] ≤ H(q)·(η + e^(−Λ))`. Empirical measurement on
+the current implementation confirms the ceiling improves vs the legacy
+α-prune selector (6.30 vs 6.64, Δ≈−0.35). However, **actual measured
+recall@k is uniformly lower** on isotropic high-dim data:
+
+| Dataset                        | Legacy R@10 | Apollonius R@10 | Δ      |
+|--------------------------------|-------------|-----------------|--------|
+| Gaussian d=128 N=10k ef=64     | 0.410       | 0.310           | −0.100 |
+| Gaussian d=128 N=10k ef=256    | 0.813       | 0.655           | −0.158 |
+| Uniform d=32 N=20k ef=64       | 0.586       | 0.446           | −0.140 |
+| Clusters d=32 ef=64            | 0.988       | 0.946           | −0.042 |
+| Clusters d=32 ef=256           | 1.000       | 0.997           | −0.003 |
+
+The gap **grows with ef on isotropic data** (the bound says it should
+shrink). This means the construction-time ceiling is honest but the
+cover criterion lacks the **angular-diversity** guarantee that
+α-pruning's `d(v',v) > d(u,v)/α` directly provides. On clustered data
+the data manifold supplies that diversity for free and the gap closes;
+on isotropic data nothing supplies it and Apollonius cover collapses
+toward picking near edges that, while individually high-witness, fail
+to span enough directions.
+
+**This is a real obstruction, not a parameter-tuning issue.** Verified:
+ρ ∈ {0.70, 0.90}, K ∈ {1, 2}, neither rescues uniform/high-dim recall.
+The next theoretical step is to either (i) prove an angular-spread
+lemma derives from the cover invariant under sufficient |Q_u|, or (ii)
+recognize cover and angular-diversity as **distinct** invariants and
+let the construction enforce both.
+
 ---
 
 ## 11. The RavenDB invariant
