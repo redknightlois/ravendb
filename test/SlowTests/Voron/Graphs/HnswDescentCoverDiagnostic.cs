@@ -1364,6 +1364,275 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
     }
 
     [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void RepairOnDeficit_Synthetic_DemoOfFrameworkSection14()
+    {
+        // FRAMEWORK §14 demonstration. Builds an engineered-deficit graph at small
+        // M (so edge pruning leaves nodes structurally under-served), then computes
+        // the temporal connectivity debt Φ and asks two questions per (u, q):
+        //   (a) is ψ_t(u, q) > 0? — does u lack an α-descent neighbour for q?
+        //   (b) does a repair candidate y ∈ V \ N(u) exist with d(y, q) < m_t(u, q)/α?
+        //     — i.e. is the deficit "fixable" or structural?
+        // If most deficient pairs have a fixable candidate, the §14 repair-on-
+        // deficit primitive is non-vacuous on this data. We then simulate the
+        // greedy one-edge-per-node repair (best gain across all u·q pairs, swap
+        // u's weakest edge for the candidate, iterate) and report the η̂ drop.
+        //
+        // Data: clustered low-dim (d=8, N=600, 12 clusters, std=0.15). M=4 to
+        // starve the edge budget and guarantee deficit; α = √λ_metric where
+        // λ_code = 0.85 (rho_metric ≈ 0.92, alpha used as the framework wants).
+        const int vectorSize = 8;
+        const int vectorSizeInBytes = vectorSize * sizeof(float);
+        const int numberOfClusters = 12;
+        const int pointsPerCluster = 50;
+        const int numberOfEntries = numberOfClusters * pointsPerCluster;
+        const int numberOfQueries = 100;
+        const int M = 4;
+        const float clusterStd = 0.15f;
+        const float alpha = 0.85f;
+        const int repairBudget = 1500; // max simulated edge swaps
+
+        var rng = new Random(31);
+        var centers = new float[numberOfClusters][];
+        for (int c = 0; c < numberOfClusters; c++)
+            centers[c] = RandomUnitVector(rng, vectorSize);
+        var vectors = new float[numberOfEntries][];
+        for (int c = 0; c < numberOfClusters; c++)
+            for (int j = 0; j < pointsPerCluster; j++)
+                vectors[c * pointsPerCluster + j] = PerturbedUnitVector(rng, centers[c], clusterStd);
+        var queries = new float[numberOfQueries][];
+        for (int q = 0; q < numberOfQueries; q++)
+            queries[q] = PerturbedUnitVector(rng, centers[rng.Next(numberOfClusters)], clusterStd);
+
+        Output.WriteLine($"[Repair demo d={vectorSize} N={numberOfEntries} M={M} m={numberOfQueries} α={alpha}]");
+
+        using var s = Slice.From(Allocator, $"{nameof(RepairOnDeficit_Synthetic_DemoOfFrameworkSection14)}", out var treeName);
+        using (var wTx = Env.WriteTransaction())
+        {
+            Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: M, numberOfCandidates: 16, VectorEmbeddingType.Single);
+            using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
+            {
+                for (int i = 0; i < numberOfEntries; i++)
+                    registration.Register(i + 1, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                registration.Commit(CancellationToken.None);
+            }
+            wTx.Commit();
+        }
+
+        // Snapshot the graph: for each u, its L0 neighbour set as a list of indices
+        // into our local `vectors` array. We never mutate the on-disk graph; the
+        // repair simulation operates on this in-memory copy.
+        var edgesL0 = new List<int>[numberOfEntries];
+        var nodeIdToLocal = new Dictionary<long, int>();
+        using (var rTx = Env.ReadTransaction())
+        {
+            // Open SearchState via the public API — IterateNodes returns NodeForDebug.
+            int i = 0;
+            foreach (var nd in Hnsw.IterateNodes(rTx.LowLevelTransaction, treeName.ToString()))
+            {
+                nodeIdToLocal[nd.NodeId] = i;
+                i++;
+            }
+            i = 0;
+            foreach (var nd in Hnsw.IterateNodes(rTx.LowLevelTransaction, treeName.ToString()))
+            {
+                edgesL0[i] = new List<int>();
+                if (nd.EdgesByLevel.Length > 0)
+                {
+                    foreach (var (eid, _) in nd.EdgesByLevel[0])
+                        if (nodeIdToLocal.TryGetValue(eid, out var li))
+                            edgesL0[i].Add(li);
+                }
+                i++;
+            }
+        }
+        // Map local-index → entry-id used during registration: nd order matches the
+        // registration order, so entries are (i+1) for i = 0..N-1.
+
+        // ψ_t(u, q) = [log(α · d(u, q) / m_t(u, q))]_+
+        //   m_t(u, q) = min over current N(u) of d(neighbour, q); ∞ if N(u) empty.
+        // d(·, ·) = cosine dissimilarity 1 - <a, b>/(|a||b|) for these unit vectors.
+        // We just use squared cosine via the dot for ordering equivalence; for the
+        // log ratio we use the actual cosine distance.
+        float Distance(float[] a, float[] b)
+        {
+            float dot = 0f, na = 0f, nb = 0f;
+            for (int j = 0; j < a.Length; j++) { dot += a[j] * b[j]; na += a[j] * a[j]; nb += b[j] * b[j]; }
+            float den = MathF.Sqrt(na) * MathF.Sqrt(nb);
+            if (den == 0f) return 1f;
+            return 1f - dot / den;
+        }
+        // Precompute d(u, q) and per-(u, q) initial m_t.
+        var dUQ = new float[numberOfEntries, numberOfQueries];
+        for (int u = 0; u < numberOfEntries; u++)
+            for (int q = 0; q < numberOfQueries; q++)
+                dUQ[u, q] = Distance(vectors[u], queries[q]);
+        var dVQ = new float[numberOfEntries, numberOfQueries];
+        for (int v = 0; v < numberOfEntries; v++)
+            for (int q = 0; q < numberOfQueries; q++)
+                dVQ[v, q] = Distance(vectors[v], queries[q]);
+
+        double TotalDebt(List<int>[] edges)
+        {
+            double phi = 0;
+            for (int u = 0; u < numberOfEntries; u++)
+            {
+                var nu = edges[u];
+                for (int q = 0; q < numberOfQueries; q++)
+                {
+                    float dq = dUQ[u, q];
+                    float mt = float.PositiveInfinity;
+                    foreach (var nb in nu)
+                    {
+                        float dn = dVQ[nb, q];
+                        if (dn < mt) mt = dn;
+                    }
+                    if (mt == float.PositiveInfinity) continue;
+                    float ratio = alpha * dq / Math.Max(mt, 1e-9f);
+                    if (ratio > 1f) phi += Math.Log(ratio);
+                }
+            }
+            return phi;
+        }
+
+        int FixableCount(List<int>[] edges)
+        {
+            int fixable = 0;
+            for (int u = 0; u < numberOfEntries; u++)
+            {
+                var nu = edges[u];
+                var nuSet = new HashSet<int>(nu);
+                nuSet.Add(u);
+                for (int q = 0; q < numberOfQueries; q++)
+                {
+                    float dq = dUQ[u, q];
+                    float mt = float.PositiveInfinity;
+                    foreach (var nb in nu)
+                    {
+                        float dn = dVQ[nb, q];
+                        if (dn < mt) mt = dn;
+                    }
+                    if (mt == float.PositiveInfinity) continue;
+                    if (alpha * dq <= mt)
+                    {
+                        // No deficit on this (u, q).
+                        continue;
+                    }
+                    // Deficit exists. Search for any y ∈ V \ (N(u) ∪ {u}) with d(y, q) < mt.
+                    bool found = false;
+                    for (int y = 0; y < numberOfEntries; y++)
+                    {
+                        if (nuSet.Contains(y)) continue;
+                        if (dVQ[y, q] < mt) { found = true; break; }
+                    }
+                    if (found) fixable++;
+                }
+            }
+            return fixable;
+        }
+
+        double phiBase = TotalDebt(edgesL0);
+        int fixable = FixableCount(edgesL0);
+        Output.WriteLine($"[base] Φ = {phiBase:F2}, fixable (u,q) pairs = {fixable} / {numberOfEntries * numberOfQueries}");
+
+        // Repair: one pass per node u. For each u, identify worst-deficit query q*,
+        // find candidate y minimising d(y, q*) over V \ (N(u) ∪ {u}), swap in y for
+        // the neighbour that contributes least to u's coverage (i.e. the one whose
+        // removal raises Φ_u least). Repeat for `repairBudget` total swaps, taking
+        // u's in deficit-priority order.
+        // Cost: O(N · M · Qm) per pass + O(N²) for the candidate scan; total per
+        // pass ≈ O(N²) ≈ 360K ops for N=600. Cheap.
+        var edges = new List<int>[numberOfEntries];
+        for (int u = 0; u < numberOfEntries; u++)
+            edges[u] = new List<int>(edgesL0[u]);
+
+        // Compute per-u deficit (sum ψ over q) once, sort, repair top.
+        double DeficitU(int u, List<int> nu, out int worstQ)
+        {
+            double sum = 0;
+            float worstRatio = 1f;
+            worstQ = -1;
+            for (int q = 0; q < numberOfQueries; q++)
+            {
+                float mt = float.PositiveInfinity;
+                foreach (var nb in nu)
+                {
+                    float dn = dVQ[nb, q];
+                    if (dn < mt) mt = dn;
+                }
+                if (mt == float.PositiveInfinity) continue;
+                float ratio = alpha * dUQ[u, q] / Math.Max(mt, 1e-9f);
+                if (ratio > 1f)
+                {
+                    sum += Math.Log(ratio);
+                    if (ratio > worstRatio) { worstRatio = ratio; worstQ = q; }
+                }
+            }
+            return sum;
+        }
+
+        // Multi-pass repair: each pass walks every u, picks worst-deficit query q*,
+        // candidate y = nearest to q* outside N(u), tries each existing neighbour as
+        // swap-out and keeps the swap that minimises Φ_u (only if it strictly drops).
+        int applied = 0;
+        bool progressed = true;
+        while (progressed && applied < repairBudget)
+        {
+            progressed = false;
+            var uOrder = Enumerable.Range(0, numberOfEntries).ToArray();
+            Array.Sort(uOrder, (a, b) => -DeficitU(a, edges[a], out _).CompareTo(DeficitU(b, edges[b], out _)));
+
+            foreach (var u in uOrder)
+            {
+                if (applied >= repairBudget) break;
+                var nu = edges[u];
+                if (nu.Count == 0) continue;
+                double phiBefore = DeficitU(u, nu, out _);
+                if (phiBefore == 0) continue;
+                var nuSet = new HashSet<int>(nu) { u };
+
+                // Global search: try every y ∉ N(u) paired with every nb ∈ N(u),
+                // pick the (y, nb) pair that minimises Φ_u strictly below phiBefore.
+                int bestY = -1, bestSwapOut = -1;
+                double bestPhi = phiBefore;
+                var nuList = nu.ToList();
+                for (int y = 0; y < numberOfEntries; y++)
+                {
+                    if (nuSet.Contains(y)) continue;
+                    foreach (var nb in nuList)
+                    {
+                        nu.Remove(nb);
+                        nu.Add(y);
+                        double phiTry = DeficitU(u, nu, out _);
+                        if (phiTry < bestPhi) { bestPhi = phiTry; bestY = y; bestSwapOut = nb; }
+                        nu.Remove(y);
+                        nu.Add(nb);
+                    }
+                }
+                if (bestY == -1) continue;
+                nu.Remove(bestSwapOut);
+                nu.Add(bestY);
+                applied++;
+                progressed = true;
+            }
+        }
+
+        double phiAfter = TotalDebt(edges);
+        Output.WriteLine($"[after {applied} repairs] Φ = {phiAfter:F2}  (drop {phiBase - phiAfter:F2}, {(phiBase > 0 ? 100 * (phiBase - phiAfter) / phiBase : 0):F1}%)");
+
+        // §14 amortized theorem claim: each batch of repairs decays debt by a
+        // factor (1 − pβ). With one swap per node-deficit, we expect a sizeable
+        // drop. Make the test self-validating: require ≥10% Φ drop.
+        Assert.True(phiBase > 0, "Synthetic data should have non-trivial deficit");
+        Assert.True(phiAfter < phiBase, "Repair should reduce Φ");
+        if (phiBase > 0)
+        {
+            double dropPct = (phiBase - phiAfter) / phiBase;
+            Assert.True(dropPct >= 0.10,
+                $"Repair drop {dropPct:P1} below 10% threshold — §14 primitive isn't doing meaningful work on this data");
+        }
+    }
+
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
     public void Clustered_DescentCover_Apollonius_vs_Legacy_DiagnosticReport()
     {
         // Layer C scoping: run the §23.B + §23.G diagnostics on the SAME clustered
