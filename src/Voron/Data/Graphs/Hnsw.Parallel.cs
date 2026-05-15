@@ -579,7 +579,7 @@ public partial class Hnsw
                     // legacy which is one-sided in d(u,v). Without (B) the empirical
                     // recall regression is 4–16pp on isotropic data; the constraint is the
                     // single mathematically grounded fix per §10.B.
-                    const float AngularSpreadChi = 1.0f;
+                    const float AngularSpreadChi = 0.7f;
                     while (candidates.Count < M)
                     {
                         ulong needsMore = ~coveredTwice;
