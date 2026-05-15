@@ -1778,11 +1778,12 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
             return;
         }
 
-        void Build(string label)
+        long Build(string label)
         {
             using var s = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_{label}", out var treeName);
             using var wTx = Env.WriteTransaction();
             Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: M, numberOfCandidates: 32, VectorEmbeddingType.Single);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
             {
                 for (int i = 0; i < numberOfEntries; i++)
@@ -1790,12 +1791,17 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                 registration.Commit(CancellationToken.None);
             }
             wTx.Commit();
+            sw.Stop();
+            return sw.ElapsedMilliseconds;
         }
 
         Hnsw.UseLegacyHeuristic = true;
-        Build("legacy");
+        long legacyMs = Build("legacy");
+        long legacyCoverTicks = Hnsw.CoverTotalTicks;
+        Hnsw.CoverProfileReset();
         Hnsw.UseLegacyHeuristic = false;
-        Build("apollonius");
+        long apoMs = Build("apollonius");
+        Output.WriteLine($"[build wall] legacy={legacyMs}ms  apollonius={apoMs}ms  ratio={(double)apoMs / Math.Max(1, legacyMs):F2}x");
 
         var queryBuffer = new byte[numberOfQueries * vectorSizeInBytes];
         for (int q = 0; q < numberOfQueries; q++)
