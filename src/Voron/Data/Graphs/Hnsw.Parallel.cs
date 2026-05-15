@@ -723,6 +723,11 @@ public partial class Hnsw
                         magVHeap = new float[N];
                         magV = magVHeap;
                     }
+                    // Witness only matters when the cover-gain greedy will consult it.
+                    // Under dist-greedy defaults the cover bits drive nothing, so we skip
+                    // the Qm·N inner dots and leave witness[i] = 0. magV is still required
+                    // by PassesAngularSpread, so its one-dot-per-i fill stays.
+                    bool needWitness = _envGreedyByDist == false;
                     if (fastCosine)
                     {
                         // Cache q_k float byte spans + magnitudes + cutoffs.
@@ -756,7 +761,7 @@ public partial class Hnsw
                             //   sketched_dot ≥ cutoff[k]·|v_i| + ε·|v_i|·|q_k|  → clear PASS
                             //   sketched_dot ≤ cutoff[k]·|v_i| − ε·|v_i|·|q_k|  → clear FAIL
                             // Output is recall-equivalent (worst case: more ε-band → exact).
-                            bool useJl = JlSketchEnabled && Qm > 0 && dDim > 0;
+                            bool useJl = needWitness && JlSketchEnabled && Qm > 0 && dDim > 0;
                             float[] jlMatrix = useJl ? GetJlMatrix(dDim) : null;
                             // Sketch buffers — small per cover call (Qm·m + N·m floats).
                             float[] pqHeap = useJl ? new float[Qm * JlSketchDim] : null;
@@ -794,6 +799,14 @@ public partial class Hnsw
                                 }
                                 magV[i] = mv;
                                 ulong bits = 0;
+                                if (needWitness == false)
+                                {
+                                    // dist-greedy mode: cover bits unused; skip the Qm-dot
+                                    // inner loop entirely. magV[i] was filled above and is
+                                    // what PassesAngularSpread needs.
+                                    witness[i] = 0;
+                                    continue;
+                                }
                                 if (useJl)
                                 {
                                     // Project this candidate into sketch space.
@@ -862,7 +875,7 @@ public partial class Hnsw
                             }
                         }
                     }
-                    else
+                    else if (needWitness)
                     {
                         for (int i = 0; i < N; i++)
                         {
