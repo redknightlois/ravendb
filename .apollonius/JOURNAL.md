@@ -656,3 +656,32 @@ incomplete-or-violating sections. After investigation:
 
   Until one of those exists, `c_page` has no real signal and the §22
   infrastructure stays inert by design.
+
+**Batch-by-page reordering (RAVEN_APOLLO_SORT_BY_PAGE, default 1).**
+A separate idea from §22 cost: at the start of each parallel placement
+batch, sort the unprocessed tail of the new-nodes list by VectorId
+before dispatching workers. Voron encodes the page number directly in
+ContainerEntryId (`vectorId / Constants.Storage.PageSize`), so sorting
+by VectorId == sorting by physical page order.
+
+Motivation was I/O scheduling — workers stream pages sequentially, OS
+readahead stays hot. On the hot-cache Sphere-100K benchmark the wall
+effect is null (within ±1 % of unsorted, swallowed by ±5 % run-to-run
+variance on legacy).
+
+The empirically measured effect is **mild recall improvement** at
+ef=128 (2 runs each, sort on vs sort off, apollonius graph):
+
+| metric | sort=1 | sort=0 | Δ      |
+|--------|-------:|-------:|-------:|
+| r@1    | 74.0 % | 72.0 % | +2.0 pp |
+| r@10   | 79.2 % | 75.9 % | +3.3 pp |
+| r@50   | 74.7 % | 73.3 % | +1.4 pp |
+
+Mechanism is *not* I/O locality — it's that changing batch insertion
+order changes graph topology. HNSW builds incrementally; which nodes
+are already in the graph when v gets inserted shapes its edges, and
+the entry-point candidacy shifts. Sort-by-VectorId happens to produce
+a slightly better graph on Sphere. Empirically defensible to default
+ON, but not theoretically guaranteed across all datasets — flip to 0
+if a regression appears on a different workload.
