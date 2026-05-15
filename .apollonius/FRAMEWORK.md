@@ -1,0 +1,278 @@
+# Query-Space Descent Covers — Framework & Proofs
+
+This is the canonical mathematical reference for the Apollonius work on this
+branch. Do not invent ideas outside this definition. The proofs below are
+sufficient conditions: if the construction maintains the invariant, the
+guarantees follow. Implementation work reduces to approximating and
+maintaining that invariant.
+
+---
+
+## 0. Formal model
+
+`(X, d)` metric space. `X ⊂ X` indexed vectors. `L ⊆ X` live; `T = X \ L`
+tombstoned. Directed graph `G = (X, E)`. Query `q ∈ X`.
+
+- `r_k(q)` = distance from q to its k-th nearest **live** point in L
+- `τ ≥ 1` — approximation factor. Node u is **τ-terminal** for q if `d(u,q) ≤ τ·r_k(q)`.
+- `0 < ρ < 1` — descent factor. Edge `u→v` is a **ρ-descent witness** for q if `d(v,q) ≤ ρ·d(u,q)`.
+
+---
+
+## 1. Apollonius descent cell
+
+For an edge `u→v`, the **ρ-descent cell** in query space is
+```
+A_ρ(u,v) = { q ∈ X : d(v,q) ≤ ρ·d(u,q) }.
+```
+
+**Lemma 1 (Euclidean).** In `(R^n, ‖·‖_2)` with `0 < ρ < 1`, `A_ρ(u,v)` is a
+ball with
+```
+center  c(u,v,ρ) = (v − ρ²·u) / (1 − ρ²)
+radius  R(u,v,ρ) = ρ·‖u − v‖ / (1 − ρ²).
+```
+*(Proof: standard Apollonius algebra; expand `‖q−v‖² ≤ ρ²·‖q−u‖²`,
+complete the square. Done in the user's writeup.)*
+
+**Every directed edge corresponds to a region of query space where it
+certifiably helps search.**
+
+---
+
+## 2. Descent theorem (deterministic)
+
+**Theorem 2.** If every nonterminal node u visited by greedy search has at
+least one ρ-descent witness in `N⁺_live(u)`, then search reaches a τ-terminal
+node in at most
+```
+H(q) = ⌈ log( d(u₀,q) / (τ·r_k(q)) ) / log(1/ρ) ⌉⁺
+```
+steps.
+
+*(Proof: induction on `D_t ≤ ρ^t · D_0` from the witness condition.)*
+
+---
+
+## 3. Query-space descent-cover invariant
+
+For node u with local query distribution `μ_u` and neighbor set `S = N⁺(u)`:
+```
+Uncov_ρ(u, S) = μ_u( { q : ∀v ∈ S ∩ L,  d(v,q) > ρ·d(u,q) } )
+              = μ_u( Q_u \ ⋃_{v ∈ S ∩ L} A_ρ(u,v) ).
+```
+
+**Invariant:**
+```
+Uncov_ρ(u, N⁺(u)) ≤ η_u.
+```
+
+---
+
+## 4. Descent-cover recall bound
+
+**Theorem 3.** Under Theorem 2's witness rule with per-step uncovered mass `≤ η`:
+```
+Pr[failure before τ-terminal] ≤ H(q) · η.
+```
+
+---
+
+## 5. Tombstone stability
+
+Hazard `h(v) ∈ [0,1]` bounds `Pr[v unavailable before next repair]`.
+**Survival weight:** `γ(v) = −log h(v)`. For witness set `W_ρ(u,q)` at (u,q):
+```
+Γ(u,q) = Σ_{v ∈ W_ρ(u,q)}  γ(v) = Σ −log h(v).
+```
+
+**Theorem 4.** If `Γ(u,q) ≥ Λ` and witness unavailability obeys the product
+bound (or conditional dominance), then
+```
+Pr[no descent witness survives at u] ≤ e^(−Λ).
+```
+
+**Theorem 5 (tombstone-stable approximate recall).** If every nonterminal u
+on the search route satisfies `Γ(u,q) ≥ Λ`:
+```
+Pr[tombstone-caused failure] ≤ H(q) · e^(−Λ).
+```
+
+---
+
+## 6. Combined failure bound
+
+**Corollary 6.**
+```
+Pr[failure before τ-terminal] ≤ H(q) · (η + e^(−Λ)).
+```
+*This is the cleanest theorem for RavenDB.*
+
+---
+
+## 7. Sampled construction (uniform convergence)
+
+For candidate pool `C(u)` of size n, budget M, m sampled queries `q_1,…,q_m ~ μ_u`:
+```
+L(S)  = μ_u( { q : Γ_S(u,q) < Λ } )    -- true loss
+L̂(S) = (1/m) Σ_i 1[Γ_S(u,q_i) < Λ]   -- empirical loss
+```
+
+**Theorem 7.** With probability ≥ 1−δ, for **all** S ⊆ C(u) with |S| ≤ M:
+```
+|L(S) − L̂(S)| ≤ √( (M·log(en/M) + log(2/δ)) / (2m) ).
+```
+*(Proof: Hoeffding + union bound over `Σ_{j≤M} C(n,j) ≤ (en/M)^M` sets.)*
+
+Sample complexity: `m = O( (M·log(n/M) + log(1/δ)) / ε² )`.
+
+---
+
+## 8. Construction objective (greedy, submodular)
+
+For each sample `q_i`, survival contribution from v:
+```
+a_{v,i} = { −log h(v)  if d(v,q_i) ≤ ρ·d(u,q_i)
+          { 0          otherwise.
+```
+**Capped survival coverage** (the maximization objective):
+```
+F(S) = Σ_i min( Λ, Σ_{v ∈ S} a_{v,i} ).
+```
+
+**Lemma 8.** F is **monotone submodular** (sum of `min(Λ, modular)` and `min`
+of a constant with a nondecreasing concave function of a nonnegative modular
+function is submodular).
+
+**Theorem 9.** Greedy max-cover under cardinality M:
+```
+F(S_greedy) ≥ (1 − 1/e) · F(S*).
+```
+
+---
+
+## 9. I/O-aware
+
+Edge cost:
+```
+c(u,v) = c_dist(v) + λ_page·c_page(u,v) + λ_haz·c_haz(v) + λ_deg·c_deg(v).
+```
+Cheapest live descent edge: `C_ρ(u,q) = min{ c(u,v) : v ∈ N⁺ ∩ L, d(v,q) ≤ ρ·d(u,q) }`.
+
+**Theorem 10.** If each chosen `c(u_t, u_{t+1}) ≤ β·C_ρ(u_t,q)`:
+```
+Cost(q) ≤ β · Σ_{t<H(q)} C_ρ(u_t,q)  +  H(q)·c_queue.
+```
+
+---
+
+## 10. Recall@k via local k-capture
+
+**Definition.** Graph satisfies **local k-capture** with beam width B if,
+upon visiting any live u with `d(u,q) ≤ τ·r_k(q)`, layer-0 beam search of
+width B visits every point in `B_k(q) = { x ∈ L : d(x,q) ≤ r_k(q) }`.
+
+**Theorem 11.** Descent-cover + tombstone bound + local k-capture ⇒
+```
+Pr[recall@k failure] ≤ H(q) · (η + e^(−Λ)).
+```
+
+**Open subproof.** Tighten local k-capture from an assumption into a
+consequence of a stronger base-layer cover invariant. (Currently L0 needs
+both descent coverage **and** local k-capture; the next theorem should
+derive capture from a beefier cover.)
+
+---
+
+## 11. The RavenDB invariant
+
+```
+∀u : μ_u( { q : Γ_{N(u)}(u,q) < Λ } ) ≤ η,
+
+where  Γ_{N(u)}(u,q) = Σ_{v ∈ N(u)} 1[d(v,q) ≤ ρ·d(u,q)] · (−log h(v)).
+```
+
+Theorem chain:
+```
+sampled construction ⟶ empirical cover ⟶ true cover ⟶ descent path
+                    ⟶ approximate recall ⟶ local capture ⟶ recall@k.
+```
+
+---
+
+## 12. Knobs (with mathematical meaning)
+
+| Symbol | Meaning | Effect |
+|---|---|---|
+| ρ | descent factor | smaller = shorter paths, harder cover |
+| η | uncovered query mass | lower = better recall |
+| Λ | tombstone survival budget | higher = stronger delete tolerance |
+| M | degree budget | larger = cover easier |
+| m | local query samples | larger = better statistical confidence |
+| H(q) | path-length bound | lower = fewer distance calls / page reads |
+| τ | terminal approximation radius | lower = stricter ε-recall |
+| B | beam width (capture) | larger = better recall@k after basin |
+
+---
+
+## 13. What the proofs DO and DO NOT establish
+
+**Proved (under stated assumptions):**
+- Descent path length bound H(q) (Theorem 2)
+- Recall-failure bound from η alone (Theorem 3)
+- Tombstone-failure bound from Λ alone (Theorems 4–5)
+- Combined failure bound (Corollary 6)
+- Sample-to-true cover generalization (Theorem 7)
+- Greedy (1−1/e) construction guarantee (Theorem 9)
+- I/O-bounded routing (Theorem 10)
+- Recall@k under local k-capture (Theorem 11)
+
+**Not proved:**
+- That arbitrary HNSW satisfies the invariant.
+- That local k-capture follows from descent coverage alone — currently an
+  assumption at L0.
+- Empirical instantiation: must measure η̂, Λ̂, Ĥ on a real workload and
+  verify the bound `Pr̂[failure] ≤ Ĥ(q)·(η̂ + e^(−Λ̂)) + ε_m`.
+
+---
+
+## 14. RavenDB validation procedure (testable)
+
+For each sampled node u:
+```
+η̂(u) = #{ q_i : Γ_{N(u)}(u, q_i) < Λ } / m.
+```
+For each query: `Ĥ(q)` = observed nonterminal descent steps. Hazard
+estimated from churn/tombstone rate. Sample error from Theorem 7:
+```
+ε_m = √( (M·log(en/M) + log(2/δ)) / (2m) ).
+```
+The bound to verify:
+```
+Pr̂[failure] ≤ H(q)·(η̂ + ε_m + e^(−Λ̂)).
+```
+
+---
+
+## 15. Implementation status (current branch `hnsw-apollonius`)
+
+| Theorem | Object | Code path |
+|---|---|---|
+| 1 (Apollonius cell) | witness bit `d(v,q) ≤ ρ·d(u,q)` | `DoWorkApolloniusCover` witness loop |
+| 7 (sampled Q_u) | `GlobalQuerySample`, |Q_u|=32, fixed seed | `BuildGlobalQuerySample` |
+| 9 (greedy submodular) | uncapped greedy by uncovered-bits | `DoWorkApolloniusCover` greedy loop |
+| 11 (k-capture L0) | M/2 reserved nearest at Level==0 | `kCapture` branch |
+| 2/3/6 (recall bound) | Ĥ, η̂ instrumentation | `HnswDescentCoverDiagnostic` (partial) |
+| 4/5 (survival weights) | γ(v) ≡ 1 currently | **NOT IMPLEMENTED** |
+| 8 (capped cover with Λ) | uncapped popcount used | **NOT IMPLEMENTED** |
+| 10 (I/O cost) | uniform cost assumed | **NOT IMPLEMENTED** |
+
+Missing pieces (in order of math priority):
+1. Capped-survival objective `F(S) = Σ_i min(Λ, Σ a_{v,i})` — Theorem 8 needs
+   the `min(Λ, ·)` clamp; currently we maximize raw uncovered-bit popcount
+   (no Λ saturation, no γ weight).
+2. Hazard estimator h(v) — even a constant h₀ makes γ(v) finite, lets us
+   measure Γ̂ and Λ̂.
+3. Repair-on-deficit — invoke `BuildDescentCover(p)` when
+   `deficit(p) = μ̂_p({q : Γ̂_{N(p)}(p,q) < Λ}) > θ`.
+4. End-to-end diagnostic that measures `Pr̂[failure]` and checks the bound.

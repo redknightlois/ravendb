@@ -446,23 +446,45 @@ public partial class Hnsw
                         DoWorkApolloniusCover(searchState, candidates, vectors, indexes, N, runner.GlobalQuerySample);
                 }
 
-                // True Apollonius cover (Theorem 1) with greedy submodular max-cover
-                // (Theorem 9, (1-1/e) approximation) over a frozen GLOBAL query sample Q_u
-                // (Theorem 7 uniform convergence). For each candidate v and each q ∈ Q_u,
-                // witness bit b[v,q] = 1 iff d(v,q) ≤ ρ·d(u,q) — i.e., v's Apollonius cell
-                // A_ρ(u,v) contains q. Greedy picks v maximizing newly covered bits per
-                // round, up to M rounds. L0 reserves M/2 slots for true k-nearest of u
-                // (Theorem 11 terminal-layer capture) BEFORE cover runs.
+                // True Apollonius cover faithful to Theorems 1, 7, 8, 9.
+                //
+                // Theorem 1: For each candidate v and each q ∈ Q_u, witness bit
+                //   b[v,q] = 1 iff d(v,q) ≤ ρ·d(u,q)  (v's A_ρ(u,v) contains q).
+                //
+                // Theorem 7: Q_u is a frozen GLOBAL random sample. Uniform-convergence
+                //   bound applies: |L(S) − L̂(S)| ≤ O(√(M·log(en/M) / m)).
+                //
+                // Theorems 8/9: maximize the CAPPED SURVIVAL COVERAGE objective
+                //   F(S) = Σ_i min(Λ, Σ_{v∈S} γ(v)·1[v covers q_i])
+                //   which is monotone submodular. Greedy under |S|≤M gives (1−1/e)·OPT.
+                //
+                // At construction time we have no hazard telemetry, so γ(v) ≡ −log h₀
+                // is a constant. The cap min(Λ, ·) then becomes "K-redundant cover":
+                // pick edges so each q ∈ Q_u has up to K = ⌈Λ / −log h₀⌉ witnesses.
+                // K=1 reduces to standard max-cover; K≥2 is genuinely Theorem-5 robust
+                // (one witness can die without breaking descent for that direction).
+                //
+                // Theorem 11: at L0, reserve M/2 slots for true nearest-to-u BEFORE cover
+                // (terminal-layer capture). Upper layers route by descent — cover gets
+                // the full budget.
                 private void DoWorkApolloniusCover(SearchState searchState, List<int> candidates, List<UnmanagedSpan> vectors, List<int> indexes, int N, UnmanagedSpan[] Qu)
                 {
                     const float Rho = 0.90f;
+                    // Redundancy depth K = ⌈Λ / γ₀⌉ where γ₀ = −log h₀. With h₀ ≈ 0.1
+                    // (10% per-node hazard before next repair) γ₀ ≈ 2.3 nats. Picking
+                    // Λ = 2·γ₀ gives K=2: each query direction sees 2 independent
+                    // witnesses → Pr[both die] ≤ e^(−Λ) = e^(−2γ₀) = h₀² ≈ 0.01 per
+                    // descent step. With H(q)≈3 that's ≤3% per-query failure from
+                    // tombstones alone (Theorem 5).
+                    const int RedundancyDepth = 2;
+
                     int M = searchState.Options.NumberOfEdges;
-                    int K = Qu.Length;
-                    Debug.Assert(K >= 0 && K <= 64, $"Q_u size must fit one ulong (≤64). Got {K}.");
+                    int Qm = Qu.Length;
+                    Debug.Assert(Qm >= 0 && Qm <= 64, $"|Q_u| must fit one ulong (≤64). Got {Qm}.");
 
                     // ρ · d(u, q_k) thresholds for each q in Q_u.
                     Span<float> threshold = stackalloc float[64];
-                    for (int k = 0; k < K; k++)
+                    for (int k = 0; k < Qm; k++)
                         threshold[k] = Rho * searchState.Distance(_src, Qu[k]);
 
                     // Witness bitmask per candidate. Bit k set iff candidate i covers q_k.
@@ -477,7 +499,7 @@ public partial class Hnsw
                     {
                         ulong bits = 0;
                         var v = vectors[i];
-                        for (int k = 0; k < K; k++)
+                        for (int k = 0; k < Qm; k++)
                         {
                             if (searchState.Distance(v, Qu[k]) <= threshold[k])
                                 bits |= 1UL << k;
@@ -510,22 +532,40 @@ public partial class Hnsw
                         queue.Clear();
                     }
 
-                    // Pre-seed covered mask with bits already contributed by k-capture so
-                    // cover doesn't double-pay for those q's.
-                    ulong covered = 0;
+                    // K=2 redundant cover state, encoded as two bitmasks (O(1) per pick):
+                    //   coveredOnce  = bits with ≥1 witness in S
+                    //   coveredTwice = bits with ≥2 witnesses in S (the cap)
+                    // A bit "needs more coverage" iff it is not in coveredTwice.
+                    // (Compile-time assertion: this fast path is K=2 only.)
+                    Debug.Assert(RedundancyDepth == 2, "Fast bitset path assumes K=2.");
+                    ulong coveredOnce = 0;
+                    ulong coveredTwice = 0;
                     for (int j = 0; j < candidates.Count; j++)
-                        covered |= witness[candidates[j]];
+                    {
+                        ulong w = witness[candidates[j]];
+                        coveredTwice |= w & coveredOnce; // already-once bits → now twice
+                        coveredOnce |= w;
+                    }
 
-                    // Greedy max-cover. Picks the candidate with the most uncovered bits.
+                    // Greedy capped-survival cover (Theorem 9). Gain of candidate v is
+                    // |witness[v] & ~coveredTwice| — exactly the marginal of F(S) under
+                    // the K=2 cap.
                     while (candidates.Count < M)
                     {
+                        ulong needsMore = ~coveredTwice;
+                        // Cap any bits past Qm so popcount counts only real q's.
+                        if (Qm < 64)
+                            needsMore &= (1UL << Qm) - 1;
+                        if (needsMore == 0)
+                            break;
+
                         int bestI = -1;
                         int bestGain = -1;
                         for (int i = 0; i < N; i++)
                         {
                             if (picked[i])
                                 continue;
-                            int gain = BitOperations.PopCount(witness[i] & ~covered);
+                            int gain = BitOperations.PopCount(witness[i] & needsMore);
                             if (gain > bestGain)
                             {
                                 bestGain = gain;
@@ -536,7 +576,9 @@ public partial class Hnsw
                             break;
                         candidates.Add(bestI);
                         picked[bestI] = true;
-                        covered |= witness[bestI];
+                        ulong w = witness[bestI];
+                        coveredTwice |= w & coveredOnce;
+                        coveredOnce |= w;
                     }
 
                     // M-fill top-up: nearest-of-remaining. Needed when greedy stops because
