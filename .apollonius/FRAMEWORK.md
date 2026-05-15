@@ -182,6 +182,63 @@ consequence of a stronger base-layer cover invariant. (Currently L0 needs
 both descent coverage **and** local k-capture; the next theorem should
 derive capture from a beefier cover.)
 
+### 10.A. Theorem 11′ — local k-capture from a strengthened base-layer cover
+
+**Strengthened base-layer invariant.** For every live node `u` at L0, every
+live point `x ∈ B_k(q)` for some query `q`, and every τ ≥ 1/ρ:
+
+  (★)  if  `d(u,q) ≤ τ·r_k(q)`  then there exists `v ∈ N⁺(u) ∩ L` with
+       `d(v, x) ≤ ρ · d(u, x)`.
+
+Note **(★)** is stricter than the cover invariant of §3: it asks for a
+witness against the **actual top-k live points** rather than against a
+random query sample.
+
+**Theorem 11′.** If (★) holds at L0 and `τ ≥ 1/ρ`, then for any query `q`
+and any τ-terminal node `u` reached by search, beam search of width `B ≥ k`
+from `u` visits every point in `B_k(q)` in at most `⌈log_(1/ρ) τ⌉` rounds.
+
+**Proof sketch.**
+
+Step 1 — every `x ∈ B_k(q)` is itself a ρ-descent witness for u toward q.
+Because u is τ-terminal,
+```
+d(u,q) ≤ τ·r_k(q)   ⇒   r_k(q) ≤ d(u,q)/τ ≤ ρ·d(u,q).
+```
+Therefore for `x ∈ B_k(q)`, `d(x,q) ≤ r_k(q) ≤ ρ·d(u,q)`.
+
+Step 2 — (★) provides a witness toward each `x`. By (★) applied with q=x
+(which is in B_k(x) trivially since r_k(x)=0; equivalently, x ∈ B_k(q)
+implies x is reachable by a ρ-descent step), some neighbor `v ∈ N⁺(u) ∩ L`
+satisfies `d(v, x) ≤ ρ · d(u, x)`. So beam search expanding u sees a
+neighbor that has moved closer to `x` by factor ρ.
+
+Step 3 — `⌈log_(1/ρ) τ⌉` iterations suffice. By induction on the depth of
+beam expansion: after `t` rounds, the beam contains some live `u_t` with
+`d(u_t, x) ≤ ρ^t · d(u_0, x)`. Since `u_0 = u` and `d(u, x) ≤ d(u,q) +
+d(q,x) ≤ τ·r_k(q) + r_k(q) = (τ+1)·r_k(q)`, after `t = ⌈log_(1/ρ)(τ+1)⌉`
+rounds, `d(u_t, x) ≤ r_k(q)`, so `u_t = x` or `u_t ∈ B_k(q)`.
+
+Step 4 — beam width B ≥ k holds all k points. Beam search of width B keeps
+the B closest unvisited candidates. After Step 3, each `x ∈ B_k(q)` is
+reached on some descent path of length `≤ ⌈log_(1/ρ)(τ+1)⌉`. Since all k
+of them have distance ≤ r_k(q) and the beam keeps the B closest, with B ≥ k
+all k are retained.   ∎
+
+**What (★) costs at construction.** At L0 the cover must witness against the
+top-k live neighbors of each potential `q`. Approximated by sampling: take
+`Q_u^{L0} ⊇ {top-k live neighbors of u itself}`. So **the framework's
+descent-cover construction at L0 must include the candidate's own
+top-k as members of the witness set**.
+
+**Implementation consequence.** The current `BuildGlobalQuerySample` draws
+Q_u uniformly at runner construction from already-known nodes. For (★) to
+hold approximately, augment Q_u (at L0 only) with each node's own
+nearest-k candidates during `FilterEdgesHeuristicWorker`. This is exactly
+the existing Theorem 11 `kCapture = M/2` reserve — but the reserve is for
+*pick-into-N(u)*, not for *measurement-in-Q_u*. Both are needed: pick the
+nearest as edges (capture) AND treat them as witness anchors (cover).
+
 ---
 
 ## 11. The RavenDB invariant
