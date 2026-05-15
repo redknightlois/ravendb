@@ -551,3 +551,21 @@ clustered workloads.
 **This closes the efficiency proof.** The branch is shippable on
 cohere-like production data with no perf regression and a small but
 real speedup over legacy.
+
+**Reproducibility check (2026-05-15, fresh rebuild).** Second
+independent 5-run set on the same Sphere-100K cohere-768 N=100K M=12
+m=50 configuration, ratios = apo / legacy wall:
+
+| run | legacy ms | apollonius ms | ratio |
+|----:|----------:|--------------:|------:|
+| 1   |   15118   |     13480     | 0.89× |
+| 2   |   14501   |     12301     | 0.85× |
+| 3   |   14244   |     11894     | 0.84× |
+| 4   |   11184   |      8678     | 0.78× |
+| 5   |   10973   |     10783     | 0.98× |
+
+mean **0.87 ± 0.07** (worst case 0.98×, never ≥ 1.0). Combined with
+the prior set (0.81 ± 0.07): **10/10 runs across two independent
+sessions show apollonius ≤ legacy wall**. No further micro-opt
+expected to move the floor — witness + distToSrc (~71 % of cover
+profile) is at the AVX-512 `TensorPrimitives.Dot` ceiling.
