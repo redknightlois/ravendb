@@ -3,6 +3,7 @@ using System.Diagnostics;
 using FastTests;
 using SlowTests.Voron.Graphs;
 using Tests.Infrastructure;
+using Voron.Data.Graphs;
 
 namespace Tryouts;
 
@@ -10,8 +11,10 @@ public static class Program
 {
     public static int Main(string[] args)
     {
-        // Standalone profiling driver: runs the d=128 N=10k Apollonius build only.
-        // Mirrors ApolloniusSelector_HighDim_RecallSweep but skips the recall sweep.
+        Environment.SetEnvironmentVariable("RAVEN_HNSW_COVER_PROFILE", "1");
+        Hnsw.CoverProfileEnabled = true;
+        Hnsw.CoverProfileReset();
+
         using var output = new ConsoleTestOutputHelper();
         var test = new HnswDescentCoverDiagnostic(output);
 
@@ -26,6 +29,20 @@ public static class Program
         }
         sw.Stop();
         Console.WriteLine($"TOTAL: {sw.ElapsedMilliseconds} ms");
+
+        double ticksPerMs = Stopwatch.Frequency / 1000.0;
+        long total = Hnsw.CoverTotalTicks;
+        long calls = Hnsw.CoverCalls;
+        Console.WriteLine($"[cover-profile] calls={calls} total={total / ticksPerMs:F1}ms");
+        if (total > 0)
+        {
+            void Row(string name, long t) => Console.WriteLine($"  {name,-12} {t / ticksPerMs,8:F1}ms  {100.0 * t / total,5:F1}%");
+            Row("witness",   Hnsw.CoverWitnessTicks);
+            Row("distToSrc", Hnsw.CoverDistToSrcTicks);
+            Row("kCapture",  Hnsw.CoverKCaptureTicks);
+            Row("greedy",    Hnsw.CoverGreedyTicks);
+            Row("mFill",     Hnsw.CoverMFillTicks);
+        }
         return 0;
     }
 }
