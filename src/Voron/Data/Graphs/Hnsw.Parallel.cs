@@ -1204,6 +1204,38 @@ public partial class Hnsw
                         }
                         if (bestI == -1)
                             break;
+
+                        // Same page-locality tie-break as the main dist-greedy loop.
+                        // M-fill is the top-up phase that runs after the greedy stops
+                        // because every remaining witness=0; topology bias here is the
+                        // same shape as above.
+                        if (pageTiebreak)
+                        {
+                            int defaultBest = bestI;
+                            int inWindow = 0;
+                            float tieCeiling = bestDist * (1f + pageTol);
+                            long bestPageDist = Math.Abs((indexVectorIds[bestI] / Voron.Global.Constants.Storage.PageSize) - srcPage);
+                            for (int i = 0; i < N; i++)
+                            {
+                                if (picked[i]) continue;
+                                float d = distToSrc[i];
+                                if (d > tieCeiling) continue;
+                                inWindow++;
+                                long pd = Math.Abs((indexVectorIds[i] / Voron.Global.Constants.Storage.PageSize) - srcPage);
+                                if (pd < bestPageDist)
+                                {
+                                    bestPageDist = pd;
+                                    bestI = i;
+                                }
+                            }
+                            if (inWindow >= 2)
+                                Interlocked.Increment(ref PageTiebreakChecks);
+                            if (bestI != defaultBest)
+                                Interlocked.Increment(ref PageTiebreakChanges);
+                            Interlocked.Add(ref PageDistSumPicked, bestPageDist);
+                            Interlocked.Increment(ref PageDistSumCount);
+                        }
+
                         if (PassesAngularSpread(searchState, vectors, distToSrc, bestI, candidates, AngularSpreadChi, fastCosine ? magV : default) == false)
                         {
                             picked[bestI] = true;

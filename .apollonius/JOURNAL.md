@@ -741,3 +741,47 @@ for future workloads where the geometry might differ (e.g. very high d, or
 when the EdgeCost Theorem-10 hook is wired to actual page-fault cost
 rather than abstract Δpage). The `_indexVectorIds` precompute is cheap and
 race-free, so it can stay enabled-by-flag.
+
+---
+
+## 2026-05-15 — Page-tiebreak extended to M-fill (also null, structurally inevitable)
+
+Followup on the page-tiebreak null. Extended the same two-pass tie-break to
+the M-fill top-up loop in `DoWorkApolloniusCover` so the full greedy surface
+is instrumented before declaring null.
+
+### Why this could not have moved recall
+
+M-fill is **0.2 % of cover wall** (combined cover-profile: witness 38 %,
+distToSrc 33 %, greedy 28 %, **mFill 0.2 %**, kCapture 0.2 %). The
+PageTiebreakChanges counter stays at ~1.85 M flips per build — identical
+to the dist-greedy-only version — confirming M-fill barely fires at all
+on Sphere-100K with M=12. So even at a 100 % flip rate inside M-fill,
+recall cannot move from this lever.
+
+### Clean A/B (3+3, no concurrent load)
+
+| efSearch | ptb=0 | ptb=1 | Δ        |
+|---------:|------:|------:|---------:|
+|       32 | 63.07 | 62.00 | −1.07 pp |
+|       64 | 71.27 | 70.80 | −0.47 pp |
+|      128 | 76.73 | 77.53 | +0.80 pp |
+
+All deltas within run-to-run noise. Apollonius build wall ≈ 0.80 × legacy
+in both modes. Conclusion stands: default OFF, prototype kept on the
+branch as a measurement vehicle. The Theorem-10 cost hook needs *real*
+cost (page faults, hazards, degree fan-out) to have any chance — the
+abstract Δpage tie-break is recall-equivalent here.
+
+### Efficiency proof on Sphere-100K cohere-768 — closed
+
+| metric             | legacy | apollonius | result          |
+|--------------------|-------:|-----------:|-----------------|
+| build wall (avg)   |  10.5s |   8.5s     | **0.80× faster**|
+| r@1 ef=128         |    72% |     76%    | **+4 pp**       |
+| r@10 ef=128        |  77.3% |   77.5%    | parity / +0.2 pp|
+| search wall ef=128 |    —   |    −30%    | (prior commit)  |
+
+Apollonius is empirically faster AND ≥ recall on real cohere-768 at 100K
+scale. The d=128 isotropic 1.69× wall regression observed earlier was a
+small-d artifact. Stopping the build-time recall sweep here.
