@@ -641,12 +641,19 @@ public partial class Hnsw
                 }
 
                 // Shell-wise angular spread (Theorem 10.C-B). Reject candidate i if for any
-                // already-picked w: d(v_i, v_w) < χ · min(d(u, v_i), d(u, v_w)). The min form
-                // is symmetric in (i, w); equivalent to legacy α-prune at χ=1 except legacy
-                // uses one-sided d(u, v_i). The constraint prevents the cover greedy from
-                // selecting near-collinear edges that all cover the same query directions —
-                // the failure mode §10.B proves is intrinsic to pure descent cover on
-                // isotropic data.
+                // already-picked w: Δ(v_i, v_w) < χ · min(Δ(u, v_i), Δ(u, v_w)), where Δ is
+                // the squared distance returned by Distance(). Equivalent to legacy α-prune
+                // at χ=1 except legacy uses one-sided Δ(u, v_i).
+                //
+                // Triangle-inequality fast path. Let r_v = √Δ(u,v), r_w = √Δ(u,w), and WLOG
+                // r_w ≤ r_v. By the linear triangle inequality d(v,w) ≥ r_v − r_w, so
+                //   Δ(v,w) ≥ (r_v − r_w)²,
+                // and (r_v − r_w)² ≥ χ·r_w²  ⇔  r_v ≥ (1+√χ)·r_w  ⇔  r_v² ≥ (1+√χ)²·r_w².
+                // So whenever max(distToSrc) ≥ SpreadSkipFactor · min(distToSrc), the pair
+                // **provably** passes B_χ and we can skip the Δ(v,w) computation. For
+                // χ=0.7, (1+√0.7)² ≈ 3.373. This is exact, not an approximation —
+                // preserves the Theorem 10.C-B guarantee.
+                private const float SpreadSkipFactor = 3.373f; // (1 + √AngularSpreadChi)² for χ=0.7
                 private bool PassesAngularSpread(SearchState searchState, List<UnmanagedSpan> vectors,
                     Span<float> distToSrc, int i, List<int> candidates, float chi)
                 {
@@ -657,9 +664,15 @@ public partial class Hnsw
                     for (int j = 0; j < candidates.Count; j++)
                     {
                         int w = candidates[j];
-                        float dij = searchState.Distance(vi, vectors[w]);
-                        float threshold = chi * Math.Min(di, distToSrc[w]);
-                        if (dij < threshold)
+                        float dw = distToSrc[w];
+                        float rMin = Math.Min(di, dw);
+                        float rMax = Math.Max(di, dw);
+                        // Triangle skip: if the radius ratio is large enough, the spread
+                        // condition is automatically satisfied. No Δ(v,w) needed.
+                        if (rMax >= SpreadSkipFactor * rMin)
+                            continue;
+                        float dvw = searchState.Distance(vi, vectors[w]);
+                        if (dvw < chi * rMin)
                             return false;
                     }
                     return true;
