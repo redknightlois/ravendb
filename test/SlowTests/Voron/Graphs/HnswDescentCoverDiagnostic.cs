@@ -1364,6 +1364,118 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
     }
 
     [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport()
+    {
+        // FRAMEWORK §23.B + §23.G run on REAL clustered cohere-768 Sphere data
+        // rather than isotropic unit vectors. If the isotropy-driven §8 obstruction
+        // is what saturates η̂ on the random-vector test, then η̂ on Sphere should
+        // be markedly lower — clustering makes the effective cap mass much larger
+        // because queries do NOT sample uniformly from S^{d-1}.
+        //
+        // Reads a pre-extracted subset of Sphere passages from /tmp/sphere-10500.jsonl
+        // (one JSONL record per line, .vector = 768-dim float array). The test
+        // is skipped if the file is absent so CI doesn't depend on this artifact.
+        string path = Environment.GetEnvironmentVariable("APOLLO_SPHERE_JSONL")
+            ?? "/tmp/sphere-10500.jsonl";
+        if (System.IO.File.Exists(path) == false)
+        {
+            Output.WriteLine($"[skip] no Sphere JSONL at {path}; set APOLLO_SPHERE_JSONL to override.");
+            return;
+        }
+        const int vectorSize = 768;
+        const int vectorSizeInBytes = vectorSize * sizeof(float);
+        int numberOfEntries = int.TryParse(Environment.GetEnvironmentVariable("APOLLO_SPHERE_N"), out var nEnv) ? nEnv : 10_000;
+        int numberOfQueries = int.TryParse(Environment.GetEnvironmentVariable("APOLLO_SPHERE_Q"), out var qEnv) ? qEnv : 200;
+        int M = int.TryParse(Environment.GetEnvironmentVariable("APOLLO_M"), out var mEnv) ? mEnv : 12;
+        float[] rhoSweep = [0.50f, 0.70f, 0.85f, 0.95f];
+        int[] beamSweep = [4, 8, 16, 32];
+
+        Output.WriteLine($"[Sphere d={vectorSize} N={numberOfEntries} M={M} m={numberOfQueries}] loading from {path}");
+
+        var vectors = new float[numberOfEntries][];
+        var queries = new float[numberOfQueries][];
+        int loaded = 0;
+        using (var sr = new System.IO.StreamReader(path))
+        {
+            string line;
+            while ((line = sr.ReadLine()) != null && loaded < numberOfEntries + numberOfQueries)
+            {
+                // Skip UTF-8 BOM on first line.
+                if (loaded == 0 && line.Length > 0 && line[0] == '﻿') line = line.Substring(1);
+                var doc = System.Text.Json.JsonDocument.Parse(line);
+                var arr = doc.RootElement.GetProperty("vector");
+                int len = arr.GetArrayLength();
+                if (len != vectorSize)
+                    throw new InvalidOperationException($"unexpected vector dim {len} at line {loaded}");
+                var v = new float[vectorSize];
+                int i = 0;
+                foreach (var e in arr.EnumerateArray())
+                    v[i++] = e.GetSingle();
+                if (loaded < numberOfEntries)
+                    vectors[loaded] = v;
+                else
+                    queries[loaded - numberOfEntries] = v;
+                loaded++;
+            }
+        }
+        if (loaded < numberOfEntries + numberOfQueries)
+        {
+            Output.WriteLine($"[skip] only {loaded} records in {path}; need {numberOfEntries + numberOfQueries}");
+            return;
+        }
+
+        void Build(string label)
+        {
+            using var s = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_{label}", out var treeName);
+            using var wTx = Env.WriteTransaction();
+            Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: M, numberOfCandidates: 32, VectorEmbeddingType.Single);
+            using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
+            {
+                for (int i = 0; i < numberOfEntries; i++)
+                    registration.Register(i + 1, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                registration.Commit(CancellationToken.None);
+            }
+            wTx.Commit();
+        }
+
+        Hnsw.UseLegacyHeuristic = true;
+        Build("legacy");
+        Hnsw.UseLegacyHeuristic = false;
+        Build("apollonius");
+
+        var queryBuffer = new byte[numberOfQueries * vectorSizeInBytes];
+        for (int q = 0; q < numberOfQueries; q++)
+            MemoryMarshal.Cast<float, byte>(queries[q]).CopyTo(queryBuffer.AsSpan(q * vectorSizeInBytes));
+
+        Output.WriteLine("Node-level η̂ (greedy descent path):");
+        Output.WriteLine($"{"ρ",6}  {"legacy η̂",10}  {"apo η̂",10}  {"Δη̂",8}  {"legacy mW",10}  {"apo mW",10}  {"meanH(L)",10}  {"meanH(A)",10}");
+        using var rTx = Env.ReadTransaction();
+        foreach (var rho in rhoSweep)
+        {
+            using var sl = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_legacy", out var legacyName);
+            var rL = Hnsw.MeasureDescentCover(rTx.LowLevelTransaction, legacyName, queryBuffer, numberOfQueries, rho);
+            using var sa = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_apollonius", out var apoName);
+            var rA = Hnsw.MeasureDescentCover(rTx.LowLevelTransaction, apoName, queryBuffer, numberOfQueries, rho);
+            Output.WriteLine($"{rho,6:F2}  {rL.FractionUncovered,10:F4}  {rA.FractionUncovered,10:F4}  {rA.FractionUncovered - rL.FractionUncovered,+8:F4}  {rL.MeanWitnessesWhenCovered,10:F2}  {rA.MeanWitnessesWhenCovered,10:F2}  {rL.MeanPathLength,10:F2}  {rA.MeanPathLength,10:F2}");
+        }
+
+        Output.WriteLine("");
+        Output.WriteLine("Frontier η_front (b · F_t survival count):");
+        Output.WriteLine($"{"ρ",6}  {"b",4}  {"legacy η_f",12}  {"apo η_f",12}  {"Δ",8}  {"legacy mΓ",10}  {"apo mΓ",10}  {"steps(L)",10}  {"steps(A)",10}");
+        foreach (var rho in rhoSweep)
+        {
+            foreach (var b in beamSweep)
+            {
+                using var sl = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_legacy", out var legacyName);
+                var fL = Hnsw.MeasureFrontierDescentCover(rTx.LowLevelTransaction, legacyName, queryBuffer, numberOfQueries, rho, b);
+                using var sa = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_apollonius", out var apoName);
+                var fA = Hnsw.MeasureFrontierDescentCover(rTx.LowLevelTransaction, apoName, queryBuffer, numberOfQueries, rho, b);
+                Output.WriteLine($"{rho,6:F2}  {b,4}  {fL.FractionStepsUncovered,12:F4}  {fA.FractionStepsUncovered,12:F4}  {fA.FractionStepsUncovered - fL.FractionStepsUncovered,+8:F4}  {fL.MeanGammaWhenCovered,10:F2}  {fA.MeanGammaWhenCovered,10:F2}  {fL.MeanStepsPerQuery,10:F2}  {fA.MeanStepsPerQuery,10:F2}");
+            }
+        }
+    }
+
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
     public void NodeDescentCover_Apollonius_vs_Legacy_DiagnosticReport()
     {
         // §23.B/D Layer-B diagnostic: walk each built graph as pure greedy ρ-descent
