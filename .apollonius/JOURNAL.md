@@ -693,3 +693,51 @@ the entry-point candidacy shifts. Sort-by-VectorId happens to produce
 a slightly better graph on Sphere. Empirically defensible to default
 ON, but not theoretically guaranteed across all datasets — flip to 0
 if a regression appears on a different workload.
+
+---
+
+## 2026-05-15 — Page-locality tie-breaker prototype: null result
+
+Followed up the sort-by-VectorId topology win with an explicit page-locality
+tie-breaker in the dist-greedy edge selector. Hypothesis: when two candidates
+are near-tied in distance to u, prefer the one whose VectorId lives on the
+same Voron page as u (within 1 % ε). Two-pass tie-break, gated on
+`RAVEN_APOLLO_PAGE_TIEBREAK=1`, default OFF.
+
+Implementation crash trail captured the cost of touching `SearchState.Nodes`
+from worker threads: sibling NodePlacement workers grow `_nodes`
+concurrently and the captured `Span<Node>.Length` goes stale (and the ref
+accessor can hit reallocated memory → AV). Fix: precompute per-candidate
+`VectorId` in the orchestrator (both _indexes population paths — the
+slow path at line 531 *and* the worker-thread `PopulateWorkListsOnWorker`
+fast path at line 1502), pass them through to the cover.
+
+### A/B (Sphere-100K cohere-768, 3 runs each, apollonius r@10)
+
+| efSearch | ptb=0  | ptb=1  | Δ        |
+|---------:|-------:|-------:|---------:|
+|       32 | 64.33% | 64.60% | +0.27 pp |
+|       64 | 72.67% | 72.27% | −0.40 pp |
+|      128 | 78.47% | 79.27% | +0.80 pp |
+
+All deltas inside run-to-run noise (±2 pp at n=50 queries). Telemetry:
+~6.0 M edge-pick events, **fires 46.8 %** of picks (≥2 candidates in the
+ε-window), **flipped 30.6–30.7 %** of those picks to the page-near
+alternative (mean Δpage ≈ 7900). So the tie-breaker is doing real
+topology work — it just doesn't move recall.
+
+### Interpretation
+
+The page-near alternative is functionally equivalent under recall@K. The
+batch reordering already delivered by sort-by-VectorId is the load-bearing
+locality effect; a per-pick tie-break adds no further headroom in this
+regime. Build wall is ≈ neutral (12.07 / 10.95 / 8.47 s ptb=0 vs
+11.52 / 8.41 / 9.21 s ptb=1).
+
+### Disposition
+
+Leave `RAVEN_APOLLO_PAGE_TIEBREAK` default OFF. Keep the prototype + counters
+for future workloads where the geometry might differ (e.g. very high d, or
+when the EdgeCost Theorem-10 hook is wired to actual page-fault cost
+rather than abstract Δpage). The `_indexVectorIds` precompute is cheap and
+race-free, so it can stay enabled-by-flag.

@@ -51,6 +51,17 @@ public static class Program
             Row("greedy",    Hnsw.CoverGreedyTicks);
             Row("mFill",     Hnsw.CoverMFillTicks);
         }
+
+        // Page-locality tie-breaker telemetry — only meaningful when
+        // RAVEN_APOLLO_PAGE_TIEBREAK=1 was set for this run. Otherwise all zeros.
+        long ptbCount = Hnsw.PageDistSumCount;
+        if (ptbCount > 0)
+        {
+            long ptbFires = Hnsw.PageTiebreakChecks;
+            long ptbChanges = Hnsw.PageTiebreakChanges;
+            double meanPageDist = (double)Hnsw.PageDistSumPicked / ptbCount;
+            Console.WriteLine($"[page-tiebreak] picks={ptbCount}  fires={ptbFires} ({100.0 * ptbFires / ptbCount:F1}%)  changed={ptbChanges} ({100.0 * ptbChanges / ptbCount:F1}%)  meanΔpage={meanPageDist:F1}");
+        }
         return 0;
     }
 }

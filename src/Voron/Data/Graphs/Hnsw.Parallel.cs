@@ -43,6 +43,18 @@ public partial class Hnsw
     internal static long CoverMFillTicks;
     internal static long CoverCalls;
     internal static long CoverTotalTicks;
+    // Page-locality tie-breaker telemetry (only meaningful when _envPageTiebreak is on).
+    //   PageTiebreakChecks  — picks where ≥2 candidates were inside the near-tie window.
+    //   PageTiebreakChanges — picks where the page-near candidate was chosen over the
+    //                         distance-only winner (i.e., the tie-breaker actually flipped
+    //                         the selection). PageTiebreakChanges / CoverCalls·M is the
+    //                         "fraction of edges affected by page-locality tie-break".
+    //   PageDistSumPicked   — sum of |Δpage| across all picked edges (post-tie-break).
+    //                         PageDistSumPicked / total-picks = mean page distance.
+    internal static long PageTiebreakChecks;
+    internal static long PageTiebreakChanges;
+    internal static long PageDistSumPicked;
+    internal static long PageDistSumCount;
     internal static void CoverProfileReset()
     {
         CoverWitnessTicks = 0;
@@ -52,6 +64,10 @@ public partial class Hnsw
         CoverMFillTicks = 0;
         CoverCalls = 0;
         CoverTotalTicks = 0;
+        PageTiebreakChecks = 0;
+        PageTiebreakChanges = 0;
+        PageDistSumPicked = 0;
+        PageDistSumCount = 0;
     }
 
     private static bool ReadLegacyHeuristicEnv()
@@ -111,6 +127,29 @@ public partial class Hnsw
     // to disable for A/B comparison.
     internal static readonly bool _envSortByPage =
         string.Equals(Environment.GetEnvironmentVariable("RAVEN_APOLLO_SORT_BY_PAGE") ?? "1", "1", StringComparison.OrdinalIgnoreCase);
+
+    // Page-locality tie-breaker for dist-greedy edge selection. When two
+    // candidates are within ε of the same distance to u, prefer the one whose
+    // VectorId is page-near u. After RAVEN_APOLLO_SORT_BY_PAGE has reordered
+    // the batch, recent batch-mates of u are page-clustered with u, so this
+    // biases selection toward intra-batch edges in the near-tie window. The
+    // batch-order topology shift from sort-by-page is the dominant effect;
+    // this tie-breaker may add a small further nudge. Off by default — flip
+    // RAVEN_APOLLO_PAGE_TIEBREAK=1 and inspect PageTiebreakChanges /
+    // PageDistSumPicked telemetry to assess.
+    internal static readonly bool _envPageTiebreak =
+        string.Equals(Environment.GetEnvironmentVariable("RAVEN_APOLLO_PAGE_TIEBREAK") ?? "0", "1", StringComparison.OrdinalIgnoreCase);
+    // Near-tie tolerance: a candidate is considered "tied" with bestDist when
+    // d ≤ bestDist · (1 + ε). Default 0.01 = 1 %. ε = 0 = strict float ties
+    // (almost never fires on continuous-valued distances).
+    internal static readonly float _envPageTiebreakTol = ReadPageTiebreakTol();
+    private static float ReadPageTiebreakTol()
+    {
+        var s = Environment.GetEnvironmentVariable("RAVEN_APOLLO_PAGE_TIEBREAK_TOL");
+        if (string.IsNullOrEmpty(s) == false && float.TryParse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var f) && f >= 0f)
+            return f;
+        return 0.01f;
+    }
     // Triangle-skip factor (1+√χ)². Recomputed once based on _envChi so the skip is
     // still exact for whatever χ was set at process start.
     internal static readonly float _envSpreadSkip = (1f + MathF.Sqrt(MathF.Max(0f, _envChi))) * (1f + MathF.Sqrt(MathF.Max(0f, _envChi)));
@@ -316,6 +355,11 @@ public partial class Hnsw
             private readonly List<int> _indexes = [];
             private readonly List<int> _requiresEdgeFiltering = [];
             private readonly List<UnmanagedSpan> _vectors = [];
+            // Per-candidate VectorId snapshot captured at _indexes population time.
+            // Worker reads this instead of touching _searchState.Nodes during the
+            // greedy loop — sibling workers may grow _nodes concurrently.
+            private readonly List<long> _indexVectorIds = [];
+            private long _currentVectorId;
             private readonly PriorityQueue<int, float> _candidatesQ = new();
             private readonly PriorityQueue<int, float> _nearestEdgesQ = new();
             private ulong[] _visitedBitmap = [];
@@ -486,12 +530,15 @@ public partial class Hnsw
                         {
                             _indexes.Clear();
                             _vectors.Clear();
+                            _indexVectorIds.Clear();
                             foreach (var candidate in _candidates)
                             {
                                 ref var cn = ref _searchState.GetNodeByIndex(candidate);
                                 _indexes.Add(candidate);
                                 _vectors.Add(cn.GetVectorUnmanagedSpan(_searchState));
+                                _indexVectorIds.Add(cn.VectorId);
                             }
+                            _currentVectorId = _searchState.GetNodeByIndex(currentNodeIndex).VectorId;
 
                             // disable preloading - we already got everything from the
                             // previous preloading step and are operating purely in memory
@@ -591,6 +638,8 @@ public partial class Hnsw
                     var candidates = Owner._candidates;
                     var vectors = Owner._vectors;
                     var indexes = Owner._indexes;
+                    var indexVectorIds = Owner._indexVectorIds;
+                    long currentVectorId = Owner._currentVectorId;
 
                     int N = indexes.Count;
                     candidates.Clear();
@@ -600,7 +649,7 @@ public partial class Hnsw
                     if (Hnsw.UseLegacyHeuristic)
                         DoWorkLegacyRobustPrune(searchState, candidates, vectors, indexes, N);
                     else
-                        DoWorkApolloniusCover(searchState, candidates, vectors, indexes, N, runner.GlobalQuerySample, runner.NodeMagnitudes, runner.QuDotCache, runner.QuDotStride);
+                        DoWorkApolloniusCover(searchState, candidates, vectors, indexes, N, runner.GlobalQuerySample, runner.NodeMagnitudes, runner.QuDotCache, runner.QuDotStride, indexVectorIds, currentVectorId);
                 }
 
                 // True Apollonius cover faithful to Theorems 1, 7, 8, 9.
@@ -709,7 +758,7 @@ public partial class Hnsw
                 // λ_code hyperparameter — see Registration._envApolloLambda. Selector uses
                 // δ(v,q) ≤ λ_code · δ(u,q); chordal ρ_metric = √λ_code (FRAMEWORK §15).
 
-                private void DoWorkApolloniusCover(SearchState searchState, List<int> candidates, List<UnmanagedSpan> vectors, List<int> indexes, int N, UnmanagedSpan[] Qu, float[] nodeMagnitudes, float[] quDotCache, int quDotStride)
+                private void DoWorkApolloniusCover(SearchState searchState, List<int> candidates, List<UnmanagedSpan> vectors, List<int> indexes, int N, UnmanagedSpan[] Qu, float[] nodeMagnitudes, float[] quDotCache, int quDotStride, List<long> indexVectorIds, long currentVectorId)
                 {
                     int M = searchState.Options.NumberOfEdges;
                     int Qm = Qu.Length;
@@ -1029,6 +1078,21 @@ public partial class Hnsw
                     // best-gain on the next round (any future picked set is a superset of
                     // the current one, so the same conflicting w would re-block them).
                     bool greedyByDist = _envGreedyByDist;
+                    // Page-locality tie-breaker: when on, prefer candidates whose vector
+                    // shares (or is near) u's page within a configurable near-tie window.
+                    // Page = VectorId / PageSize per Voron's container layout. The source
+                    // node's page is looked up once per cover call.
+                    bool pageTiebreak = _envPageTiebreak;
+                    float pageTol = _envPageTiebreakTol;
+                    long srcPage = 0;
+                    if (pageTiebreak)
+                    {
+                        // Use precomputed VectorIds (captured in the orchestrator while
+                        // node access was serial) — sibling workers grow _nodes concurrently
+                        // so a captured Span<Node> or ref Node here is unsafe.
+                        srcPage = currentVectorId / Voron.Global.Constants.Storage.PageSize;
+                    }
+
                     while (candidates.Count < M)
                     {
                         ulong needsMore = ~coveredTwice;
@@ -1052,6 +1116,39 @@ public partial class Hnsw
                                 bestI = i;
                             }
                             if (bestI == -1) break;
+
+                            // Two-pass tie-break. After bestDist is known, scan again for
+                            // any candidate inside [bestDist, bestDist·(1+ε)] that is
+                            // strictly closer to srcPage. We track whether the tie-break
+                            // FIRED (≥ 2 candidates in window incl. winner) and whether it
+                            // CHANGED the winner — the change rate / mean Δpage is what
+                            // tells us if the locality bias is doing useful work.
+                            if (pageTiebreak)
+                            {
+                                int defaultBest = bestI;
+                                int inWindow = 0;
+                                float tieCeiling = bestDist * (1f + pageTol);
+                                long bestPageDist = Math.Abs((indexVectorIds[bestI] / Voron.Global.Constants.Storage.PageSize) - srcPage);
+                                for (int i = 0; i < N; i++)
+                                {
+                                    if (picked[i]) continue;
+                                    float d = distToSrc[i];
+                                    if (d > tieCeiling) continue;
+                                    inWindow++;
+                                    long pd = Math.Abs((indexVectorIds[i] / Voron.Global.Constants.Storage.PageSize) - srcPage);
+                                    if (pd < bestPageDist)
+                                    {
+                                        bestPageDist = pd;
+                                        bestI = i;
+                                    }
+                                }
+                                if (inWindow >= 2)
+                                    Interlocked.Increment(ref PageTiebreakChecks);
+                                if (bestI != defaultBest)
+                                    Interlocked.Increment(ref PageTiebreakChanges);
+                                Interlocked.Add(ref PageDistSumPicked, bestPageDist);
+                                Interlocked.Increment(ref PageDistSumCount);
+                            }
                         }
                         else
                         {
@@ -1404,10 +1501,13 @@ public partial class Hnsw
                 ref var n = ref _searchState.GetNodeByIndex(currentNodeIndex);
                 _indexes.Clear();
                 _vectors.Clear();
+                _indexVectorIds.Clear();
+                _currentVectorId = n.VectorId;
                 if (MarkVisited(currentNodeIndex))
                 {
                     _indexes.Add(currentNodeIndex);
                     _vectors.Add(n.GetVectorUnmanagedSpan(_searchState));
+                    _indexVectorIds.Add(n.VectorId);
                 }
 
                 ref var edgesIndexes = ref n.EdgesIndexesPerLevel[level];
@@ -1418,6 +1518,7 @@ public partial class Hnsw
                     _indexes.Add(idx);
                     ref var edge = ref _searchState.GetNodeByIndex(idx);
                     _vectors.Add(edge.GetVectorUnmanagedSpan(_searchState));
+                    _indexVectorIds.Add(edge.VectorId);
                 }
 
                 return _indexes.Count > 0;
