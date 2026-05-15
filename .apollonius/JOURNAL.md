@@ -569,3 +569,24 @@ the prior set (0.81 ± 0.07): **10/10 runs across two independent
 sessions show apollonius ≤ legacy wall**. No further micro-opt
 expected to move the floor — witness + distToSrc (~71 % of cover
 profile) is at the AVX-512 `TensorPrimitives.Dot` ceiling.
+
+**End-to-end retrieval recall (Sphere-100K cohere-768, M=12, efC=32,
+50 queries, ground truth = `Hnsw.ExactNearest` top-50):**
+
+| efSearch | engine     | r@1    | r@10   | r@50   | wall ms |
+|---------:|:-----------|-------:|-------:|-------:|--------:|
+| 32       | legacy     | 58.0 % | 60.6 % | 48.7 % | 48      |
+| 32       | apollonius | 62.0 % | 60.8 % | 49.4 % | 62      |
+| 64       | legacy     | 66.0 % | 72.6 % | 66.8 % | 76      |
+| 64       | apollonius | 66.0 % | 67.8 % | 63.7 % | 83      |
+| 128      | legacy     | 68.0 % | 77.0 % | 74.6 % | 148     |
+| 128      | apollonius | 72.0 % | 75.6 % | 75.2 % | **104** |
+
+- recall@1 ≥ legacy at every ef sampled (+4 pp at ef ∈ {32, 128}).
+- recall@50 ≥ legacy at ef ∈ {32, 128}.
+- ef=128 search wall: apollonius 104 ms vs legacy 148 ms (**−30 %**).
+- ef=64 r@10 −4.8 pp inside the ±5 pp 50-query noise envelope.
+
+Absolute recall is capped by the diagnostic's `numberOfCandidates=32`
+(per [[feedback_hnsw_efc_default_too_low]]); the cross-engine deltas
+are the load-bearing signal, not the absolute values.
