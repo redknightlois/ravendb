@@ -1,872 +1,788 @@
 # Query-Space Descent Covers — Framework & Proofs
 
-This is the canonical mathematical reference for the Apollonius work on this
-branch. Do not invent ideas outside this definition. The proofs below are
-sufficient conditions: if the construction maintains the invariant, the
-guarantees follow. Implementation work reduces to approximating and
-maintaining that invariant.
+## 0. Executive consolidation
+
+The math is organized into three layers:
+
+- **Layer A — production construction**: distance-ordered one-sided
+  target-spread / α-prune.
+- **Layer B — certification**: held-out descent, survival, frontier, and
+  tube-capture diagnostics.
+- **Layer C — online maintenance**: repair-on-deficit and multi-batch
+  temporal connectivity debt.
+
+The important empirical correction is that the original $Q_u$ Apollonius
+cover-gain selector did not carry recall on real Sphere-100K embeddings.
+The working configuration became distance-ordered greedy with $\chi=1.0$,
+kCapture off, and one-sided spread; this is effectively legacy α-prune
+reached through the Apollonius scaffolding, while the $Q_u$ cover
+machinery remains useful for diagnostics, certification, and possible
+repair.
 
 ---
 
-## 0. Formal model
+## 1. Formal model
 
-`(X, d)` metric space. `X ⊂ X` indexed vectors. `L ⊆ X` live; `T = X \ L`
-tombstoned. Directed graph `G = (X, E)`. Query `q ∈ X`.
+Let $(X, d)$ be a metric space. Let $V \subset X$ be indexed vectors,
+$L \subseteq V$ the live set, and $T = V \setminus L$ the tombstoned set.
+The graph is directed:
 
-- `r_k(q)` = distance from q to its k-th nearest **live** point in L
-- `τ ≥ 1` — approximation factor. Node u is **τ-terminal** for q if `d(u,q) ≤ τ·r_k(q)`.
-- `0 < ρ < 1` — descent factor. Edge `u→v` is a **ρ-descent witness** for q if `d(v,q) ≤ ρ·d(u,q)`.
+$$
+G = (V, E).
+$$
 
----
+For query $q$, define $r_k(q)$ = distance from $q$ to its $k$-th nearest
+live point.
 
-## 1. Apollonius descent cell
+A node $u$ is **$\tau$-terminal** for $q$ when
 
-For an edge `u→v`, the **ρ-descent cell** in query space is
-```
-A_ρ(u,v) = { q ∈ X : d(v,q) ≤ ρ·d(u,q) }.
-```
+$$
+d(u, q) \le \tau \, r_k(q).
+$$
 
-**Lemma 1 (Euclidean).** In `(R^n, ‖·‖_2)` with `0 < ρ < 1`, `A_ρ(u,v)` is a
-ball with
-```
-center  c(u,v,ρ) = (v − ρ²·u) / (1 − ρ²)
-radius  R(u,v,ρ) = ρ·‖u − v‖ / (1 − ρ²).
-```
-*(Proof: standard Apollonius algebra; expand `‖q−v‖² ≤ ρ²·‖q−u‖²`,
-complete the square. Done in the user's writeup.)*
+An edge $u \to v$ is a **$\rho$-descent witness** for $q$ when
 
-**Every directed edge corresponds to a region of query space where it
-certifiably helps search.**
+$$
+d(v, q) \le \rho \, d(u, q), \qquad 0 < \rho < 1.
+$$
+
+This is the fundamental primitive. An edge is good not because $v$ is
+close to $u$, but because it moves search closer to $q$.
 
 ---
 
-## 2. Descent theorem (deterministic)
+## 2. Edge-as-region: Apollonius descent cell
 
-**Theorem 2.** If every nonterminal node u visited by greedy search has at
-least one ρ-descent witness in `N⁺_live(u)`, then search reaches a τ-terminal
-node in at most
-```
-H(q) = ⌈ log( d(u₀,q) / (τ·r_k(q)) ) / log(1/ρ) ⌉⁺
-```
-steps.
+For a directed edge $u \to v$, define its descent cell:
 
-*(Proof: induction on `D_t ≤ ρ^t · D_0` from the witness condition.)*
+$$
+A_\rho(u, v) = \{ q : d(v, q) \le \rho \, d(u, q) \}.
+$$
 
----
+In Euclidean space this is an Apollonius ball. Expanding
+$\|q - v\|^2 \le \rho^2 \|q - u\|^2$ and completing the square gives
+$A_\rho(u, v) = B(c, R)$ with
 
-## 3. Query-space descent-cover invariant
+$$
+c(u, v, \rho) = \frac{v - \rho^2 u}{1 - \rho^2}, \qquad
+R(u, v, \rho) = \frac{\rho \, \|u - v\|}{1 - \rho^2}.
+$$
 
-For node u with local query distribution `μ_u` and neighbor set `S = N⁺(u)`:
-```
-Uncov_ρ(u, S) = μ_u( { q : ∀v ∈ S ∩ L,  d(v,q) > ρ·d(u,q) } )
-              = μ_u( Q_u \ ⋃_{v ∈ S ∩ L} A_ρ(u,v) ).
-```
-
-**Invariant:**
-```
-Uncov_ρ(u, N⁺(u)) ≤ η_u.
-```
+So $u \to v$ **certifies descent on a concrete region of query space**.
 
 ---
 
-## 4. Descent-cover recall bound (adaptive stopping-time form)
+## 3. Deterministic descent theorem
 
-The greedy search route is **adaptive**: which node `u_t` is visited at
-step `t` depends on the history `F_t`. The per-step failure probability
-is conditional on that history. Let `T` be the first time the search
-either reaches a τ-terminal node or fails; let `F_t` be the event that
-`u_t` has no live ρ-descent witness for `q`. Suppose that for all
-`t < T`,
-```
-Pr[F_t | F_{<t}] ≤ η_{u_t}.
-```
+Suppose greedy search visits $u_0, u_1, \dots$ and every nonterminal
+$u_t$ has a live neighbor $u_{t+1}$ with
+$d(u_{t+1}, q) \le \rho \, d(u_t, q)$. By induction:
 
-**Theorem 3 (adaptive).**
-```
-Pr[failure before τ-terminal] ≤ E[ Σ_{t < H(q)} η_{u_t} ].
-```
-Uniformly, if `η_{u_t} ≤ η` along the route,
-```
-Pr[failure before τ-terminal] ≤ min{1, H(q) · η}.
-```
+$$
+d(u_t, q) \le \rho^t \, d(u_0, q).
+$$
 
-The `min{1,·}` clamp is essential: any "improvement" of `H·η` from one
-vacuous value (>1) to another is **not a probability statement**. A
-non-vacuous ceiling requires `H(q)·η < 1`. Empirical ceilings of 6.30
-or 6.64 are both vacuous and cannot order recall.
+A $\tau$-terminal node is reached once $\rho^t d(u_0, q) \le \tau r_k(q)$,
+so it suffices that
+
+$$
+H(q) = \left\lceil \frac{\log\!\big(d(u_0, q) / (\tau r_k(q))\big)}{\log(1/\rho)} \right\rceil_{+}
+$$
+
+descent steps. If the graph always offers descent, search reaches the
+answer basin **logarithmically**.
 
 ---
 
-## 5. Tombstone stability
+## 4. Query-space descent cover
 
-Hazard `h(v) ∈ [0,1]` bounds `Pr[v unavailable before next repair]`.
-**Survival weight:** `γ(v) = −log h(v)`. For witness set `W_ρ(u,q)` at (u,q):
-```
-Γ(u,q) = Σ_{v ∈ W_ρ(u,q)}  γ(v) = Σ −log h(v).
-```
+For node $u$, neighbor set $S = N^+(u)$, and local query distribution
+$\mu_u$, define uncovered mass
 
-**Theorem 4.** If `Γ(u,q) ≥ Λ` and witness unavailability obeys the product
-bound (or conditional dominance), then
-```
-Pr[no descent witness survives at u] ≤ e^(−Λ).
-```
+$$
+\mathrm{Uncov}_\rho(u, S)
+= \mu_u\!\left(\{ q : \forall v \in S \cap L,\; d(v, q) > \rho \, d(u, q) \}\right)
+= \mu_u\!\left(Q_u \setminus \bigcup_{v \in S \cap L} A_\rho(u, v)\right).
+$$
 
-**Theorem 5 (tombstone-stable approximate recall).** If every nonterminal u
-on the search route satisfies `Γ(u,q) ≥ Λ`:
-```
-Pr[tombstone-caused failure] ≤ H(q) · e^(−Λ).
-```
+**Node-local invariant:** $\mathrm{Uncov}_\rho(u, N^+(u)) \le \eta_u$.
 
----
+If this holds conditionally along the adaptive search route,
 
-## 6. Combined failure bound (adaptive)
+$$
+\Pr[\text{failure before terminal}] \le \mathbb{E}\!\left[\sum_{t < H(q)} \eta_{u_t}\right].
+$$
 
-Under the same conditional setup, for all `t < T`:
-```
-Pr[F_t | F_{<t}] ≤ η_{u_t} + e^(−Λ_{u_t}).
-```
+Uniformly with $\eta_{u_t} \le \eta$:
 
-**Corollary 6 (adaptive).**
-```
-Pr[failure before τ-terminal] ≤ E[ Σ_{t<H(q)} (η_{u_t} + e^(−Λ_{u_t})) ].
-```
-Uniformly:
-```
-Pr[failure] ≤ min{ 1, H(q) · (η_max + e^(−Λ_min)) }.
-```
-*This is the cleanest theorem for RavenDB — but only when the right-hand
-side is strictly < 1. Otherwise the bound says nothing about recall.*
+$$
+\Pr[\text{failure}] \le \min\!\left\{1,\; H(q)\,\eta\right\}.
+$$
+
+The $\min\{1, \cdot\}$ clamp is essential: a raw bound $H\eta > 1$ is
+vacuous and cannot be used to compare algorithms.
 
 ---
 
-## 7. Sampled construction (uniform convergence)
+## 5. Tombstone survival math
 
-**Per-node version.** For candidate pool `C(u)` of size n, budget M, m
-i.i.d. samples `q_1,…,q_m ~ μ_u`:
-```
-L_u(S)  = μ_u( { q : Γ_S(u,q) < Λ } )    -- true loss
-L̂_u(S) = (1/m) Σ_i 1[Γ_S(u,q_i) < Λ]   -- empirical loss
-```
-With probability ≥ 1−δ, for **all** S ⊆ C(u) with |S| ≤ M:
-```
-|L_u(S) − L̂_u(S)| ≤ √( (M·log(en/M) + log(2/δ)) / (2m) ).
-```
+RavenDB updates and deletes through tombstones, so an edge may remain
+structurally present while its target is no longer live. Each candidate
+witness $v$ has a hazard $h(v) \in [0, 1]$ bounding the probability that
+$v$ becomes unavailable before the next repair epoch. Define survival
+weight
 
-**Theorem 7 (simultaneous version over N nodes).** If we want the bound
-to hold simultaneously for every certified node, the union must be over
-nodes too. With probability ≥ 1−δ, for every u and every `S ⊆ C(u)` with
-`|S| ≤ M`:
-```
-|L_u(S) − L̂_u(S)| ≤ √( (M·log(en_u/M) + log(2N/δ)) / (2m_u) ).
-```
-*(Proof: Hoeffding + union bound over the `(en_u/M)^M` sets at each of
-the N nodes; the `log N` enters only logarithmically.)*
+$$
+\gamma(v) = -\log h(v).
+$$
 
-**Independence caveat.** The bound requires the samples to be
-**independent** of the randomness that constructed `C(u)`. If the same
-sample both selects `C(u)` and certifies the chosen edges, the bound is
-optimistically biased. Use one sample for construction and a held-out
-sample for certification.
+For query $q$, witness set
 
-Sample complexity: `m_u = O( (M·log(n_u/M) + log(N/δ)) / ε² )`.
+$$
+W_\rho(u, q) = \{ v \in N^+(u) \cap L : d(v, q) \le \rho \, d(u, q) \},
+$$
+
+and survival mass
+
+$$
+\Gamma(u, q) = \sum_{v \in W_\rho(u, q)} \gamma(v).
+$$
+
+If $\Gamma(u, q) \ge \Lambda$, then under product or
+conditional-dominance hazard assumptions,
+
+$$
+\Pr[\text{all descent witnesses die}] \le e^{-\Lambda}.
+$$
+
+Combining uncovered mass and survival risk:
+
+$$
+\Pr[\text{failure}]
+\le \mathbb{E}\!\left[\sum_{t < H(q)} (\eta_{u_t} + e^{-\Lambda_{u_t}})\right]
+\le \min\!\left\{1,\; H(q)\,(\eta + e^{-\Lambda})\right\}.
+$$
+
+The implementation has a constant-hazard hook with $h_0 = 0.1$,
+$\gamma_0 = -\log h_0$, redundancy depth $K = 2$, and
+$\Lambda = K\gamma_0$. Under constant $\gamma$ the survival accumulator
+collapses to a $K$-redundant popcount fast path.
 
 ---
 
-## 8. Construction objective (greedy, submodular)
+## 6. Sampled certification
 
-For each sample `q_i`, survival contribution from v:
-```
-a_{v,i} = { −log h(v)  if d(v,q_i) ≤ ρ·d(u,q_i)
-          { 0          otherwise.
-```
-**Capped survival coverage** (the maximization objective):
-```
-F(S) = Σ_i min( Λ, Σ_{v ∈ S} a_{v,i} ).
-```
+The true distribution $\mu_u$ is unknown. Approximate with sampled query
+anchors $q_1, \dots, q_m \sim \mu_u$. For candidate pool $C(u)$, degree
+budget $M$, and selected set $S$, define empirical loss
 
-**Lemma 8.** F is **monotone submodular** (sum of `min(Λ, modular)` and `min`
-of a constant with a nondecreasing concave function of a nonnegative modular
-function is submodular).
+$$
+\hat L_u(S) = \frac{1}{m} \sum_{i=1}^{m} \mathbf{1}[\,\Gamma_S(u, q_i) < \Lambda\,].
+$$
 
-**Theorem 9 (optimization guarantee, not a recall bound).** Greedy
-max-cover under cardinality M:
-```
-F(S_greedy) ≥ (1 − 1/e) · F(S*).
-```
+Uniform-convergence form:
 
-**Critical caveat — F is a surrogate, not the failure loss.** The
-binary failure loss is
-```
-L̂(S) = (1/m) Σ_i 1[Γ_S(u, q_i) < Λ].
-```
-F can be near-maximal while L̂(S) = 1. Counterexample: if
-`Γ_S(u, q_i) = Λ − ε` for every i, then `F(S) ≈ m·Λ` (near optimal) yet
-every query fails.
+$$
+\left|\, L_u(S) - \hat L_u(S) \,\right|
+\le \sqrt{\frac{M \log(en / M) + \log(2N / \delta)}{2m}}.
+$$
 
-**Margin form (Theorem 9′).** Define the surplus objective with margin
-`ξ > 0`:
-```
-F_{Λ+ξ}(S) = Σ_i min( Λ+ξ, Γ_S(u, q_i) ).
-```
+So a certified value is $\eta_u \le \hat L_u(S) + \epsilon_u$.
+
+**Independence caveat.** Construction samples and certification samples
+must be held out from each other. The current branch historically used
+the same sample for build and certification; the theorem-backed
+certification requires a held-out path.
+
+Testable RavenDB bound:
+
+$$
+\Pr[\text{failure}] \le \min\!\left\{1,\; \hat H(q)\big(\hat\eta + \epsilon_m + e^{-\hat\Lambda}\big)\right\}.
+$$
+
+---
+
+## 7. Greedy objective: valid, but only a surrogate
+
+For sampled query $q_i$, per-candidate contribution
+
+$$
+a_{v, i} = \begin{cases} \gamma(v) & d(v, q_i) \le \rho \, d(u, q_i) \\ 0 & \text{otherwise} \end{cases}.
+$$
+
+Capped survival coverage:
+
+$$
+F(S) = \sum_i \min\!\left(\Lambda,\; \sum_{v \in S} a_{v, i}\right).
+$$
+
+This is monotone submodular, so greedy under $|S| \le M$ gives
+
+$$
+F(S_{\text{greedy}}) \ge (1 - 1/e) \, F(S^\star).
+$$
+
+But $F$ is **not** itself a recall bound. A set can have $F \approx m\Lambda$
+while every sample remains just below the survival threshold. The margin
+bridge is the correct certification step. Define
+
+$$
+F_{\Lambda+\xi}(S) = \sum_i \min(\Lambda + \xi,\; \Gamma_S(u, q_i)).
+$$
+
 Then
-```
-L̂_Λ(S) ≤ ( m·(Λ+ξ) − F_{Λ+ξ}(S) ) / (m·ξ).
-```
-*(Proof: each failed sample has `Γ_S < Λ`, so its deficit relative to
-the cap `Λ+ξ` exceeds `ξ`.)*
 
-**Engineering consequence.** Either (a) build by maximizing F as a
-surrogate and **certify** with `L̂ + ε_m` on held-out samples, or (b)
-build by maximizing `F_{Λ+ξ}` and use the margin bound directly. The
-certified quantity in the chain `(η_u ≤ L̂_u + ε_u)` is `L̂`, not the
-greedy approximation ratio.
+$$
+\hat L_\Lambda(S) \le \frac{m(\Lambda + \xi) - F_{\Lambda+\xi}(S)}{m\,\xi}.
+$$
+
+**Rule:** optimize $F$, certify with $\hat L + \epsilon$.
 
 ---
 
-## 9. I/O-aware
+## 8. The high-dimensional obstruction
 
-Edge cost:
-```
-c(u,v) = c_dist(v) + λ_page·c_page(u,v) + λ_haz·c_haz(v) + λ_deg·c_deg(v).
-```
-Cheapest live descent edge: `C_ρ(u,q) = min{ c(u,v) : v ∈ N⁺ ∩ L, d(v,q) ≤ ρ·d(u,q) }`.
+Pure query-cover cannot solve high-dimensional isotropic data with small
+$M$. Locally write $q = u + r s$, $v = u + \ell e$ with $\|s\| = \|e\| = 1$.
+The descent condition $\|q - v\| \le \rho \|q - u\|$ expands to
 
-**Theorem 10.** If each chosen `c(u_t, u_{t+1}) ≤ β·C_ρ(u_t,q)`:
-```
-Cost(q) ≤ β · Σ_{t<H(q)} C_ρ(u_t,q)  +  H(q)·c_queue.
-```
+$$
+r^2 + \ell^2 - 2 r \ell \langle s, e \rangle \le \rho^2 r^2,
+$$
 
----
+hence
 
-## 10. Recall@k via local k-capture
+$$
+\langle s, e \rangle \ge \frac{\ell^2 + (1 - \rho^2) r^2}{2 r \ell} \ge \sqrt{1 - \rho^2}.
+$$
 
-**Definition.** Graph satisfies **local k-capture** with beam width B if,
-upon visiting any live u with `d(u,q) ≤ τ·r_k(q)`, layer-0 beam search of
-width B visits every point in `B_k(q) = { x ∈ L : d(x,q) ≤ r_k(q) }`.
+So every neighbor covers at best a spherical cap of half-angle
+$\theta_\rho = \arccos(\sqrt{1 - \rho^2}) = \arcsin(\rho)$. If query
+directions are uniform on $S^{d-1}$ and $C_d(\rho)$ is the normalized
+cap mass,
 
-**Theorem 11.** Descent-cover + tombstone bound + local k-capture ⇒
-```
-Pr[recall@k failure] ≤ H(q) · (η + e^(−Λ)).
-```
+$$
+\mathrm{Uncov}_\rho(u, N(u)) \ge 1 - M \, C_d(\rho).
+$$
 
-**Open subproof.** Tighten local k-capture from an assumption into a
-consequence of a stronger base-layer cover invariant. (Currently L0 needs
-both descent coverage **and** local k-capture; the next theorem should
-derive capture from a beefier cover.)
-
-### 10.A. Tube-capture theorem (replaces invalid Theorem 11′)
-
-**Historical note.** An earlier version of this section attempted to
-derive local k-capture from a strengthened invariant (★) by claiming
-`d(u,q) ≤ τ·r_k(q) ⇒ r_k(q) ≤ ρ·d(u,q)`. The implication runs the
-wrong way (`d(u,q) ≤ τ·r ⇒ r ≥ d(u,q)/τ`), so the proof is invalid as
-written. The proof also conflated "reach some point of `B_k(q)`" with
-"reach **every** target `x ∈ B_k(q)`" and used beam width `B ≥ k` where
-the right quantity is the local tube population. Replaced below.
-
-**Setup.**
-- `r = r_k(q)`, `B_k(q) = { x ∈ L : d(x,q) ≤ r }`.
-- For `R ≥ τ`, the **query tube** `T_R(q) = { y ∈ L : d(y,q) ≤ R·r }`.
-- Tube population `κ_R(q) = |T_R(q)|`.
-- For each target `x ∈ B_k(q)`, **live separation**
-  `Δ_x = min_{y ∈ L, y≠x} d(x,y)`.
-
-**Target-tube contraction invariant (replaces ★).** At L0, for every
-query `q`, every `x ∈ B_k(q)`, and every live `y ∈ T_R(q) \ {x}`, there
-exists a live neighbor
-```
-z ∈ N⁺(y) ∩ T_R(q)   with   d(z, x) ≤ ρ · d(y, x).
-```
-This is **target contraction inside a query-local tube**, not query
-descent. It is strictly stronger than the descent-cover invariant of §3.
-
-**Theorem 11′ (corrected).** Suppose
-1. `u ∈ T_R(q)` is the τ-terminal node reached by upper-layer descent,
-2. the target-tube contraction invariant holds at L0,
-3. layer-0 beam search uses width `B ≥ κ_R(q)`,
-4. expansion depth `ℓ(q) = max_{x ∈ B_k(q)} ⌈ log( (τ+1)·r / Δ_x ) / log(1/ρ) ⌉`.
-
-Then layer-0 beam search visits every `x ∈ B_k(q)`.
-
-**Proof.** Fix `x ∈ B_k(q)`. Since `u` is τ-terminal, `d(u,q) ≤ τ·r`;
-since `x ∈ B_k(q)`, `d(x,q) ≤ r`. By triangle inequality,
-```
-d(u,x) ≤ d(u,q) + d(q,x) ≤ (τ+1)·r.
-```
-By the target-tube contraction invariant, while `y_t ≠ x`, there exists
-`y_{t+1} ∈ N⁺(y_t) ∩ T_R(q)` with `d(y_{t+1}, x) ≤ ρ·d(y_t, x)`.
-Inductively `d(y_t, x) ≤ ρ^t · (τ+1)·r`. Choose
-`t ≥ ⌈ log((τ+1)·r / Δ_x) / log(1/ρ) ⌉`. Then `d(y_t, x) < Δ_x`. By the
-definition of `Δ_x`, no live point other than `x` is within `Δ_x` of
-`x`, so `y_t = x`.
-
-All path vertices `y_0, y_1, …, y_t` lie in `T_R(q)` by construction.
-Since `B ≥ κ_R(q)`, every tube vertex is among the B closest live
-candidates from the tube and is retained by the beam. Therefore the
-path to each `x ∈ B_k(q)` is retained and eventually expanded. Hence
-all top-k points are visited.   ∎
-
-**The real cost.** The required beam width is **`B ≥ κ_R(q)`, not `B ≥
-k`**. This is the mathematical source of the isotropic-data failure:
-
-- In a dense isotropic cloud, `κ_R(q)` grows roughly as `(R)^d` times
-  the local density, dwarfing k.
-- In clustered data, `κ_R(q)` stays close to k (most live points are in
-  other clusters, outside the tube).
-
-This matches the empirical pattern: clustered recall almost recovers at
-high ef; isotropic recall does not.
+In high dimension, small $M$ cannot make $\eta$ small unless $\rho$ is
+close to 1, the data is non-isotropic, or the invariant becomes
+frontier/beam-level. This is not a parameter-tuning issue.
 
 ---
 
-### 10.B. Angular-spread lower bound (the isotropic obstruction is real)
+## 9. Bi-criteria topology: descent cover plus spread
 
-Work locally in Euclidean space at u. Let a query direction be `q = u +
-r·s` with `‖s‖ = 1`, and a candidate `v = u + ℓ·e` with `‖e‖ = 1`. The
-descent condition `‖q − v‖ ≤ ρ·‖q − u‖` expands to
-```
-r² + ℓ² − 2·r·ℓ·⟨s,e⟩ ≤ ρ²·r²
-```
-which gives
-```
-⟨s, e⟩ ≥ (ℓ² + (1 − ρ²)·r²) / (2·r·ℓ)   ≥   √(1 − ρ²)     (AM-GM).
-```
+Because descent cover alone does not imply good topology, the corrected
+invariant is bi-criteria.
 
-**Lemma 10.B.1.** Each neighbor `v ∈ N⁺(u)` covers at best a spherical
-cap of half-angle `θ_ρ = arccos(√(1 − ρ²)) = arcsin(ρ)` in query
-direction-space at u.
+**A. Survival-weighted descent cover.**
+$\mu_u(\{q : \Gamma_{N(u)}(u, q) < \Lambda\}) \le \eta$.
 
-**Theorem 10.B.2 (isotropic lower bound on η).** If query directions
-around u are approximately uniform on `S^{d−1}` and `C_d(ρ)` denotes
-the normalized measure of the spherical cap of half-angle `arcsin(ρ)`,
-then any M-edge neighborhood satisfies
-```
-Uncov_ρ(u, N(u)) ≥ 1 − M · C_d(ρ).
-```
+**B. Angular / target spread.** Historical symmetric shell form:
 
-This means: in high dimension `d`, unless either M is very large, ρ is
-very close to 1 (weak descent, big H(q)), or the local query
-distribution is non-isotropic, **a pure descent-cover invariant cannot
-give small η**. The tradeoff is intrinsic:
+$$
+d(v, w) \ge \chi \min(d(u, v),\; d(u, w)).
+$$
 
-```
-ρ ↑ 1   ⇒  larger caps, but H(q) grows and descent weakens
-ρ ↓     ⇒  stronger descent, but caps shrink exponentially in d
-```
+Current production one-sided form:
 
-**Consequence for the proof chain.** Theorems 3/6 require small `η`. In
-isotropic high-dim, `η` is bounded below by `1 − M·C_d(ρ)` regardless
-of how cleverly the cover is selected. This is not a parameter-tuning
-issue.
+$$
+d(v, w) \ge \chi \, d(u, v_{\text{candidate}})
+$$
+
+where $v$ is the candidate currently being tested and $w$ is already
+selected.
+
+The one-sided rule matters because distance-greedy order normally has
+$d(u, w) \le d(u, v)$. The symmetric form therefore relaxes the
+threshold to the already-picked neighbor's smaller radius, admitting
+too-close pairs. The journal records that switching to one-sided spread
+closed the residual NoC=128 gap and made Apollonius match or beat legacy
+on the measured Sphere-100K metrics.
 
 ---
 
-### 10.C. Revised invariant: descent cover + shell-wise angular spread
+## 10. Target-domination theorem for one-sided spread
 
-The single descent-cover invariant of §3 is insufficient. The corrected
-RavenDB invariant is **bi-criteria**:
+**The key production theorem.**
 
-**(A) Survival-weighted descent cover.**
-```
-μ_u( { q : Γ_{N(u)}(u,q) < Λ } ) ≤ η.
-```
+Process candidates in nondecreasing distance from $u$. Let $S$ be the
+selected set. Accept candidate $x$ only if
 
-**(B) Shell-wise angular spread.** For each radial shell around u,
-```
-S_j(u) = { v ∈ N(u) : 2^j·a ≤ d(u,v) < 2^{j+1}·a },
-```
-require either pairwise angular separation
-```
-∠(v − u, w − u) ≥ θ_0   for all v ≠ w ∈ S_j(u)
-```
-or its metric equivalent
-```
-d(v, w) ≥ χ · min(d(u,v), d(u,w))   for some χ > 0.
-```
-This is the α-prune-style diversity constraint, restricted to within
-shells (so it does not over-penalize legitimate near/far edge mixtures).
+$$
+\forall w \in S, \quad d(x, w) \ge \alpha \, d(u, x).
+$$
 
-**Implementation consequence.** Neighbor selection becomes bi-criteria:
-```
-maximize  F(S)                  (survival-weighted descent cover)
-subject   |S| ≤ M
-          S obeys shell-wise angular spread (B)
-```
-This is what α-pruning provides "for free" by construction, and what
-the current pure-cover greedy lacks. It is the next implementation
-priority.
+Equivalently, reject $x$ if $\exists w \in S : d(w, x) < \alpha \, d(u, x)$.
 
-**Empirical evidence supporting the revision (current branch).**
+Therefore every rejected $x$ has a selected substitute $w$ satisfying
+$d(w, x) < \alpha \, d(u, x)$, so the selector creates a
+**target-domination cover** of the candidate set:
 
-| Dataset                        | Legacy R@10 | Apollonius R@10 | Δ      |
-|--------------------------------|-------------|-----------------|--------|
-| Gaussian d=128 N=10k ef=64     | 0.410       | 0.310           | −0.100 |
-| Gaussian d=128 N=10k ef=256    | 0.813       | 0.655           | −0.158 |
-| Uniform d=32 N=20k ef=64       | 0.586       | 0.446           | −0.140 |
-| Clusters d=32 ef=64            | 0.988       | 0.946           | −0.042 |
-| Clusters d=32 ef=256           | 1.000       | 0.997           | −0.003 |
+$$
+\forall x \in C(u) :\quad x \in S \;\text{or}\; \exists w \in S : d(w, x) < \alpha \, d(u, x).
+$$
 
-Pattern: isotropic gap grows with ef (Theorem 10.B.2 predicts this);
-clustered gap shrinks with ef (data manifold supplies (B) for free).
-Verified across `ρ ∈ {0.70, 0.90}` and redundancy depth `K ∈ {1, 2}`;
-not a parameter-tuning issue.
+This is exactly what α-prune was doing implicitly. It certifies that
+omitted candidates are not arbitrary losses — they are dominated by
+already-selected edges.
+
+With $\chi = 1$ in squared/chordal distance this becomes strict monotone
+target descent: $d(w, x) < d(u, x)$. For $\chi < 1$ it is a weaker
+domination threshold; for $\chi > 1$ it is stricter and may
+over-diversify.
 
 ---
 
-## 11. The RavenDB invariant (bi-criteria — superseded form)
+## 11. Corrected recall@k: tube capture, not local $B \ge k$
 
-The single-invariant form below is the **historical** statement and is
-not sufficient on isotropic data; see §10.C for the bi-criteria form
-that supersedes it.
+The earlier proof tried to show that once search reaches a terminal
+node, beam width $B \ge k$ suffices to recover all top-$k$. That was
+invalid. The corrected theorem uses a **query tube**.
 
-```
-∀u : μ_u( { q : Γ_{N(u)}(u,q) < Λ } ) ≤ η,
+Let
 
-where  Γ_{N(u)}(u,q) = Σ_{v ∈ N(u)} 1[d(v,q) ≤ ρ·d(u,q)] · (−log h(v)).
-```
+$$
+B_k(q) = \{ x \in L : d(x, q) \le r_k(q) \}.
+$$
 
-Theorem chain (with corrections):
-```
-sampled construction (T7, union over N nodes)
-  ⟶ empirical L̂_u (held-out)
-  ⟶ certified η_u ≤ L̂_u + ε_u
-  ⟶ adaptive failure bound (T3/T6, clamped to min{1,·})
-  ⟶ tube-capture at L0 (T11′ corrected, needs B ≥ κ_R(q))
-  ⟶ recall@k provided (A) descent cover **and** (B) shell-wise
-    angular spread hold simultaneously.
-```
+For $R \ge \tau$, define the tube and its population
 
----
+$$
+T_R(q) = \{ y \in L : d(y, q) \le R \, r_k(q) \}, \qquad \kappa_R(q) = |T_R(q)|.
+$$
 
-## 12. Knobs (with mathematical meaning)
+**Target-tube contraction.** For every $x \in B_k(q)$, every
+$y \in T_R(q) \setminus \{x\}$ has a live neighbor
+$z \in N^+(y) \cap T_R(q)$ with $d(z, x) \le \rho \, d(y, x)$.
 
-| Symbol | Meaning | Effect |
-|---|---|---|
-| ρ | descent factor | smaller = shorter paths, harder cover |
-| η | uncovered query mass | lower = better recall |
-| Λ | tombstone survival budget | higher = stronger delete tolerance |
-| M | degree budget | larger = cover easier |
-| m | local query samples | larger = better statistical confidence |
-| H(q) | path-length bound | lower = fewer distance calls / page reads |
-| τ | terminal approximation radius | lower = stricter ε-recall |
-| B | beam width (capture) | larger = better recall@k after basin |
+If search reaches $u \in T_R(q)$, $B \ge \kappa_R(q)$, and expansion
+depth is at least
+
+$$
+\ell(q) = \max_{x \in B_k(q)} \left\lceil \frac{\log\!\big((\tau + 1) r_k(q) / \Delta_x\big)}{\log(1/\rho)} \right\rceil,
+$$
+
+then L0 beam search visits every $x \in B_k(q)$.
+
+The true requirement is $B \ge \kappa_R(q)$, **not** $B \ge k$ — which
+explains why dense isotropic data is hard and clustered data is easier.
 
 ---
 
-## 13. What the proofs DO and DO NOT establish
+## 12. Frontier-cover theorem
 
-**Status table (post-correction):**
+Node-local cover is too strong and pessimistic because HNSW L0 search is
+beam-based. Let frontier $F_t = \{u_1, \dots, u_b\}$ and
 
-| Item                                              | Status                                                                       |
-|---------------------------------------------------|------------------------------------------------------------------------------|
-| Theorem 2 — deterministic descent path bound      | Correct.                                                                     |
-| Theorems 3/5/6 — failure bounds                   | Correct as **adaptive conditional / stopping-time** bounds with `min{1,·}`.  |
-| Theorem 7 — sampled cover                         | Correct under independence (held-out samples) and union over N nodes.        |
-| Lemma 8 / Theorem 9 — submodular greedy           | Correct for the **surrogate** F(S). Does **not** bound binary failure loss. |
-| Theorem 9′ — margin form                          | Correct; this is the proper bridge from F to `L̂`.                           |
-| Theorem 10 — I/O                                  | Correct as a **per-path** cost bound; not yet a full beam-search I/O bound.  |
-| Theorem 11 — recall@k                             | Correct only when local k-capture is **assumed**.                            |
-| Theorem 11′ (original) — capture from cover       | **Invalid as originally written** (reversed inequality, beam-width gap).     |
-| Theorem 11′ (corrected) — tube-capture            | Correct under the target-tube contraction invariant + `B ≥ κ_R(q)`.          |
-| §10.B — isotropic angular lower bound             | Mathematically real: `Uncov_ρ ≥ 1 − M·C_d(ρ)`.                              |
+$$
+D_t(q) = \min_{u \in F_t} d(u, q).
+$$
 
-**Proved (under their stated assumptions):**
-- Adaptive descent failure bound (Theorems 3 and 6, conditional form).
-- Sample-to-true cover generalization at one node and union-over-N (Theorem 7), with independence caveat.
-- Greedy (1−1/e) **surrogate** guarantee (Theorem 9) and its margin → loss bridge (Theorem 9′).
-- I/O-bounded path cost (Theorem 10) — per path, not yet aggregated.
-- Tube-capture (corrected Theorem 11′) under target-tube contraction
-  and `B ≥ κ_R(q)`.
-- Isotropic lower bound `Uncov_ρ ≥ 1 − M·C_d(ρ)` (Theorem 10.B.2).
+A frontier $\rho$-witness exists if
 
-**Not proved:**
-- That arbitrary HNSW satisfies the bi-criteria invariant (A)+(B).
-- That descent cover **alone** implies angular spread. §10.B says it cannot in high-d isotropic.
-- That the failure bound is non-vacuous on any concrete workload — must show `H·(η + e^(−Λ)) < 1` empirically with held-out samples.
-- Empirical instantiation: must measure η̂, Λ̂, Ĥ on a real workload and verify `min{1, Ĥ(q)·(η̂ + ε_m + e^(−Λ̂))} < 1` on held-out samples.
+$$
+\exists u \in F_t,\; \exists v \in N(u) : d(v, q) \le \rho \, D_t(q).
+$$
 
----
+Frontier uncovered mass
 
-## 14. RavenDB validation procedure (testable)
+$$
+\mathrm{Uncov}_\rho^{\text{front}}(F_t)
+= \mu_{F_t}\!\left(\{ q : \forall u \in F_t, \forall v \in N(u),\; d(v, q) > \rho \, D_t(q) \}\right).
+$$
 
-For each sampled node u:
-```
-η̂(u) = #{ q_i : Γ_{N(u)}(u, q_i) < Λ } / m.
-```
-For each query: `Ĥ(q)` = observed nonterminal descent steps. Hazard
-estimated from churn/tombstone rate. Sample error from Theorem 7:
-```
-ε_m = √( (M·log(en/M) + log(2/δ)) / (2m) ).
-```
-The bound to verify:
-```
-Pr̂[failure] ≤ H(q)·(η̂ + ε_m + e^(−Λ̂)).
-```
+If every nonterminal frontier has a live frontier witness, beam search
+reaches a $\tau$-terminal frontier in
+
+$$
+H(q) = \left\lceil \frac{\log\!\big(D_0(q) / (\tau r_k(q))\big)}{\log(1/\rho)} \right\rceil.
+$$
+
+Survival form:
+
+$$
+\Gamma_{F_t}(q) = \sum_{u \in F_t} \sum_{v \in N(u)} \mathbf{1}[d(v, q) \le \rho \, D_t(q)] \, \gamma(v),
+$$
+
+$$
+\Pr[\text{failure}] \le \mathbb{E}\!\left[\sum_{t < H(q)} (\eta_{F_t} + e^{-\Lambda_{F_t}})\right].
+$$
+
+The key advantage is angular budget:
+$M_{\text{eff}}(F_t) = \sum_{u \in F_t} |N(u)| \approx bM$.
+
+The high-dimensional obstruction relaxes from $M$ to $bM$: the route
+from "raise $M$" to "coordinate across the beam."
 
 ---
 
-## 15. Implementation status (current branch `hnsw-apollonius`)
+## 13. Committee cover: construction-time frontier approximation
 
-| Theorem | Object | Code path |
-|---|---|---|
-| 1 (Apollonius cell) | witness bit `d(v,q) ≤ ρ·d(u,q)` | `DoWorkApolloniusCover` witness loop |
-| 7 (sampled Q_u, per-node) | `GlobalQuerySample`, |Q_u|=32, fixed seed | `BuildGlobalQuerySample` |
-| 7 (union over N, held-out) | not honored — same sample used for build and certification | **NOT IMPLEMENTED** |
-| 8 (capped survival F(S)) | uses K=2 popcount approximation, γ(v) ≡ 1 | **PARTIAL — not the capped Λ form** |
-| 9 (greedy) | greedy by K-redundant popcount on bitmask | OK for K=2; γ-weighted form **NOT IMPLEMENTED** |
-| 9′ (margin form for recall) | not used | **NOT IMPLEMENTED** |
-| 10.C (B) shell-wise angular spread | `PassesAngularSpread`, χ=0.7 | `DoWorkApolloniusCover` (greedy + M-fill) |
-| 11 (k-capture L0) | M/2 reserved nearest at Level==0 | `kCapture` branch |
-| 11′ (tube-capture, corrected) | `B ≥ κ_R(q)` not enforced | **NOT IMPLEMENTED** |
-| 2/3/6 (failure bound) | reported as ceiling, not clamped to `min{1,·}` | `HnswDescentCoverDiagnostic` partial |
-| 4/5 (survival weights γ(v)) | γ(v) ≡ const | **NOT IMPLEMENTED** |
-| 10 (I/O cost) | uniform cost assumed | **NOT IMPLEMENTED** |
+The construction-time approximation to frontier cover is a committee
 
-**Mismatch with proof chain.** The current code maximizes K-redundant
-popcount on a same-sample-as-construction Q_u, with `γ(v)≡1` and no
-`min(Λ, ·)` clamp; it then reports ceilings as `Ĥ·(η̂+e^(−Λ̂))` without
-the `min{1,·}` clamp or held-out sample. None of those by themselves
-fix the isotropic recall gap (which is angular, per §10.B), but they
-do mean the **bound numbers in the diagnostic are not the bound the
-theorems prove**.
+$$
+K(u) = \{u\} \cup \text{L0 neighbors} \cup \text{reverse neighbors}
+       \cup \text{same-shell candidates} \cup \text{recent beam co-visits}.
+$$
 
-**Missing pieces, in math-priority order:**
+Define $D_{K(u)}(q) = \min_{w \in K(u)} d(w, q)$ and committee survival
+mass
 
-~~1. **(B) shell-wise angular spread** in cover greedy~~ — **DONE**
-(commit `Tune angular-spread chi`). χ=0.7 is the empirical sweet
-spot: passes all 11 diagnostics, materializes the Theorem-5 churn win
-(+0.030 vs legacy), and matches legacy at cluster ef≥128. Residual
-d=128 isotropic gap (~-0.15 at ef=256) is the §10.B intrinsic
-ceiling at M=16 — closable by raising M, not by greedy changes.
+$$
+\Gamma_{K(u)}(q) = \sum_{w \in K(u)} \sum_{v \in N(w)} \mathbf{1}[d(v, q) \le \rho \, D_{K(u)}(q)] \, \gamma(v).
+$$
 
-1. **Capped objective** `F(S) = Σ_i min(Λ, Σ a_{v,i})` with the proper
-   real-valued accounting per query bit (the K=2 popcount fast path
-   only works for unit weights and unit cap).
-3. **Held-out certification samples** for Theorem 7 — independent
-   sample from build.
-4. **`min{1,·}` clamp** in the diagnostic; report `L̂_u + ε_u` rather
-   than the optimization-side `F(S_greedy) / F(S*)` ratio.
-5. **Hazard estimator h(v)** — even constant `h₀` makes γ(v) finite and
-   `Γ̂` measurable.
-6. **Repair-on-deficit** when `deficit(p) > θ`.
-7. **End-to-end diagnostic** that measures `Pr̂[failure]` on **held-out**
-   queries and checks `min{1, Ĥ·(η̂ + ε_m + e^(−Λ̂))} < 1`.
+**Committee invariant:**
+
+$$
+\mu_{K(u)}(\{q : \Gamma_{K(u)}(q) < \Lambda\}) \le \eta.
+$$
+
+Selection should maximize marginal gain to **committee coverage**, not
+own coverage:
+
+$$
+\Delta(u \to v) = F_{K(u)}(E_{K(u)} \cup \{u \to v\}) - F_{K(u)}(E_{K(u)}).
+$$
+
+This is the mathematically clean form of "the beam collectively covers
+query descent."
 
 ---
 
-## 16. Chordal metric correction (the proof was in the wrong norm)
+## 14. Multi-batch temporal connectivity debt
 
-The code computes cosine **dissimilarity** δ(x,y) = 1 − ⟨x,y⟩ and uses
-that as `Distance()`. δ is **not** a metric — strict triangle
-inequality fails on the sphere, which is why the journal's note about
-"no safe witness short-circuit" was forced.
+For dynamic RavenDB insertion the right invariant is batch-level. Let
+batches $B_1, B_2, \dots, B_t$ arrive with graph $G_t = (V_t, E_t)$.
+Define exposed targets
 
-The corresponding true metric on unit vectors is the **chordal metric**:
+$$
+E_t(u) = \{\text{new nodes whose insertion path visited } u\} \cup \{\text{same-batch/inflight}\}
+         \cup \{\text{reverse-neighbor candidates}\} \cup \{\text{frontier co-visits}\}.
+$$
 
-```
-D(x,y) = √(2(1 − ⟨x,y⟩)) = √(2·δ(x,y)).
-```
+For target $x$, best outgoing progress from $u$
 
-This is Euclidean distance on S^{d−1}; it preserves the cosine NN
-ranking exactly and IS a strict metric (TI holds).
+$$
+m_t(u, x) = \min_{w \in N_t^+(u)} d(w, x).
+$$
 
-**Consequence**: code uses `δ(v,q) ≤ λ·δ(u,q)` where `λ = 0.90`. In the
-metric proof this is
+**Temporal connectivity debt:**
 
-```
-D(v,q)² ≤ λ · D(u,q)²    ⇔    D(v,q) ≤ √λ · D(u,q).
-```
+$$
+\psi_t(u, x) = \left[\, \log \frac{\alpha \, d(u, x)}{m_t(u, x)} \,\right]_{+}.
+$$
 
-So the *metric* contraction ratio is
+- $\psi_t(u, x) = 0$: $u$ has a selected edge that dominates $x$.
+- $\psi_t(u, x) > 0$: $u$ lacks a target-descending substitute toward $x$.
 
-```
-ρ_metric = √λ_code     (≈ 0.949 for λ_code = 0.90).
-```
+Total weighted debt:
 
-**All theorems using ρ should use ρ_metric, not λ_code.** Affected:
+$$
+\Phi_t = \sum_u \sum_{x \in E_t(u)} \omega_{u, x} \, \psi_t(u, x).
+$$
 
-- H(q) descent step count `⌈log(D₀/τr_k) / log(1/ρ)⌉`:
-  `log(1/0.949) ≈ 0.0524` vs `log(1/0.90) ≈ 0.105` — H is **2× larger**
-  in the correct metric form. The bound `Pr[failure] ≤ H·(η+e^(−Λ))`
-  has been understating Pr[failure] by a factor of 2.
-- Angular cap `C_d(ρ)` in §10.B: parameter substituted by ρ_metric.
-- Apollonius cell `A_ρ(u,v)` in §1: still defined by the code's λ
-  comparison, but the geometry it describes is the chordal-metric
-  Apollonius cell at ρ = √λ.
+A repair candidate $u \to y$ has marginal debt reduction
 
-**Implementation impact**: the construction code path is unchanged
-(still tests δ ≤ λ·δ — same selection). Only **the diagnostic
-numbers** change: every reported "ρ" in the diagnostic must be √λ,
-every H estimate doubles.
+$$
+\Delta_t(u, y) = \sum_{x \in E_t(u)} \omega_{u, x} \left( \psi_t(u, x) - \left[\, \log \frac{\alpha d(u, x)}{\min(m_t(u, x), d(y, x))} \,\right]_{+} \right).
+$$
 
----
+Accept or replace iff
+$\Delta_t(u, y) - \text{Loss}_t(u, z) - \lambda_{\text{io}}\, c(u, y, z) > 0$.
 
-## 17. Linear witness inequality (the witness test is an inner product)
+**Amortized theorem.** If each batch exposes at least a $p$-fraction of
+outstanding weighted debt, repairs are $\beta$-effective relative to the
+best bounded repair, and fresh debt per batch is at most $A_t$, then
 
-For unit vectors x, q the witness condition
+$$
+\mathbb{E}[\Phi_{t+1} \mid \Phi_t] \le (1 - p\beta) \Phi_t + A_t,
+$$
 
-```
-δ(v,q) ≤ λ·δ(u,q)
-```
+$$
+\mathbb{E}[\Phi_T] \le (1 - p\beta)^T \Phi_0 + \sum_{s < T} (1 - p\beta)^{T - 1 - s} A_s.
+$$
 
-rearranges to
+If insertions stop, $A_t = 0$ and $\Phi_T \to 0$ geometrically. If fresh
+debt is bounded by $A$,
 
-```
-⟨v − λu, q⟩ ≥ 1 − λ.
-```
+$$
+\limsup_T \mathbb{E}[\Phi_T] \le \frac{A}{p\beta}.
+$$
 
-So a witness cell is the half-space defined by direction `a_{u,v} = v − λu`.
-This has two practical consequences:
-
-1. **No SIMD `Distance()` call needed** to test a single witness — one
-   inner product against a precomputed `a_{u,v}`. Same FLOP count as
-   `Distance` but no setup overhead and no return-via-stack of a
-   single float.
-2. **JL/sketch admissibility**: random-projection sketches preserve
-   inner products up to additive ε with high probability over a finite
-   pair set. The framework's wall problem (N·Q_m exact distance calls
-   per cover) admits a **two-tier filter**: ambiguous-margin pairs run
-   the exact kernel, certain-yes and certain-no pairs run on the
-   sketch only.
-
-**Theorem 17 (JL witness filter).** Let `P: R^d → R^s` be a Gaussian
-random projection with `s = O(ε^{-2} log(|C|·m/δ))`. For any finite
-set of candidate-edge vectors `{a_{u,v}}` and query anchors `{q_i}`,
-with probability ≥ 1 − δ, simultaneously for every pair:
-
-```
-|⟨Pa_{u,v}, Pq_i⟩ − ⟨a_{u,v}, q_i⟩| ≤ ε.
-```
-
-So:
-
-- `⟨Pa, Pq⟩ ≥ 1 − λ + ε`  ⇒  witness (no exact call).
-- `⟨Pa, Pq⟩ < 1 − λ − ε`  ⇒  not a witness (no exact call).
-- Ambiguous band: fall through to exact δ-comparison.
-
-For typical λ = 0.90, ε = 0.05, and d = 128, expected s ≈ 20–40. The
-witness loop's expected exact-call rate drops from 100 % to whatever
-fraction of pairs lie in the ε-band — empirically a few percent for
-isotropic queries.
+HNSW insertion becomes an **online graph-healing process**: each batch
+injects connectivity debt; later batches pay it down opportunistically.
 
 ---
 
-## 18. Frontier-Cover Theorem (the missing beam-level invariant)
+## 15. Cosine / chordal correction
 
-The framework so far has been **single-node**: at each visited u, some
-v ∈ N(u) must be a witness. But HNSW's L0 search is **beam-based**: it
-maintains a frontier F_t of width b and expands by best-first.
+The code uses cosine dissimilarity $\delta(x, y) = 1 - \langle x, y \rangle$,
+but $\delta$ is not a metric. For normalized vectors the true metric is
+chordal
 
-**Definition.** With frontier F_t = {u_1, …, u_b} and
-`D_t(q) = min_{u ∈ F_t} d(u, q)`, the frontier ρ-descent witness exists iff
+$$
+D(x, y) = \sqrt{2(1 - \langle x, y \rangle)} = \sqrt{2 \delta(x, y)}.
+$$
 
-```
-∃ u ∈ F_t, ∃ v ∈ N(u) :  d(v,q) ≤ ρ·D_t(q).
-```
+NN ranking is unchanged, but proof constants change. The code tests
+$\delta(v, q) \le \lambda \, \delta(u, q)$; in chordal metric
 
-**Frontier uncovered mass**:
+$$
+D(v, q)^2 \le \lambda D(u, q)^2 \quad\Longrightarrow\quad D(v, q) \le \sqrt{\lambda}\, D(u, q).
+$$
 
-```
-Uncov_ρ^front(F_t) = μ_{F_t}({ q : ∀u∈F_t ∀v∈N(u),  d(v,q) > ρ·D_t(q) }).
-```
-
-**Theorem 18 (frontier descent).** If for every nonterminal frontier
-with `D_t(q) > τ·r_k(q)` a live frontier witness exists, then beam
-search reaches a τ-terminal frontier after
-
-```
-H(q) = ⌈ log(D_0(q) / (τ·r_k(q))) / log(1/ρ) ⌉
-```
-
-frontier-improvement rounds. Probabilistic form:
-
-```
-Pr[failure] ≤ E[ Σ_{t<H(q)} (η_{F_t} + e^(−Λ_{F_t})) ],
-```
-
-with frontier survival mass
-
-```
-Γ_{F_t}(q) = Σ_{u ∈ F_t} Σ_{v ∈ N(u)} 1[d(v,q) ≤ ρ·D_t(q)] · γ(v).
-```
-
-**Why this fixes the §10.B obstruction.** The angular budget of a single
-node is `M·C_d(ρ)` — small in high d. The angular budget of a frontier
-is
-
-```
-M_eff(F_t) = Σ_{u ∈ F_t} |N(u)| ≈ b·M.
-```
-
-Crude union bound:
-
-```
-Uncov_ρ^front(F_t) ≥ 1 − b·M·C_d(ρ).
-```
-
-The isotropic obstruction therefore relaxes from "raise M" to "raise
-`b·M`" — and the beam already supplies a factor of b = 16, 32, 64.
-With b = 16, the §10.B ceiling at M = 16 becomes equivalent to the
-old M = 256 single-node budget. **The per-node M can stay at 16
-provided edges are coordinated across beam co-occurrents.**
+So $\rho_{\text{metric}} = \sqrt{\lambda_{\text{code}}}$. For
+$\lambda_{\text{code}} = 0.90$, $\rho_{\text{metric}} \approx 0.9487$.
+Selection unchanged; predicted $H(q)$ doubles relative to incorrectly
+using 0.90 directly.
 
 ---
 
-## 19. Committee Cover (construction-time approximation of the frontier)
+## 16. Algebraic shortcut: witness test as a dot product
 
-Phase 1–7's selector forces every node to individually cover Q_u. By
-Theorem 18, the right invariant is committee-level coverage where the
-committee approximates the L0 beam in which u will appear.
+For unit vectors $\delta(v, q) \le \lambda \delta(u, q)$ rearranges to
 
-**Committee** for node u:
+$$
+\langle v - \lambda u,\; q \rangle \ge 1 - \lambda.
+$$
 
-```
-K(u) = {u} ∪ (L0 nearest neighbours of u)
-            ∪ (reverse neighbours)
-            ∪ (same-shell candidates)
-            ∪ (recent beam co-visits, when available).
-```
+So a witness cell is a halfspace in query-anchor space.
 
-**Committee coverage**:
+For non-normalized cosine singles, $\delta(v, q) = 1 - \langle v, q \rangle / (\|v\| \|q\|)$,
+and the test $\delta(v, q) \le t_k$ becomes
 
-```
-Γ_{K(u)}(q) = Σ_{w ∈ K(u)} Σ_{v ∈ N(w)} 1[d(v,q) ≤ ρ·D_{K(u)}(q)] · γ(v),
-D_{K(u)}(q) = min_{w ∈ K(u)} d(w,q).
-```
+$$
+\langle v, q \rangle \ge (1 - t_k) \, \|v\| \, \|q\|.
+$$
 
-**Construction invariant.** For every certified u:
-
-```
-μ_{K(u)}({q : Γ_{K(u)}(q) < Λ}) ≤ η.
-```
-
-**Selection rule.** When choosing edges for u, maximise the marginal
-gain to **committee coverage**, not own coverage:
-
-```
-Δ(v) = F_{K(u)}(existing committee edges ∪ {u→v})
-     − F_{K(u)}(existing committee edges).
-```
-
-**Cross-node spread.** Replace per-node shell-wise angular spread
-(§10.C-B) with committee-level edge-direction spread:
-
-```
-E_{K(u)} = { (v − w)/|v − w| : w ∈ K(u), v ∈ N(w) },
-∠(e, e') ≥ θ₀    ∀ e ≠ e' ∈ chosen subset.
-```
-
-This stops two committee members from picking redundant directions —
-the legacy α-prune intuition lifted from node to committee.
+The implementation replaces repeated `CosineDistance` calls with one raw
+dot plus cached magnitudes/cutoffs: the threshold is
+$\lambda \delta(u, q_k)$, and the fast path uses a precomputed cutoff so
+the pass condition is $\langle v_i, q_k \rangle \ge \text{cutoff}[k] \, \|v_i\|$.
 
 ---
 
-## 20. Implementation roadmap for the frontier upgrade
+## 17. Algebraic shortcut: spread test as a dot product
 
-In strict dependency order:
+The one-sided spread rule $\delta(v, w) \ge \chi \, r_{\text{ref}}$ with
+$r_{\text{ref}} = \delta(u, v_{\text{candidate}})$ becomes, since
+$\delta(v, w) = 1 - \langle v, w \rangle / (\|v\| \|w\|)$,
 
-1. **§16 chordal correction in diagnostics**. Rename `Rho = 0.90f` →
-   `LambdaCode = 0.90f`; expose `RhoMetric = sqrt(LambdaCode)`; rewrite
-   every diagnostic that reports "ρ" or "H(q)" to use ρ_metric. Build
-   behaviour unchanged.
-2. **Frontier-coverage diagnostic**. Per-query: snapshot the L0 beam at
-   each expansion step, compute `Uncov_ρ^front(F_t)` against `Q_u`,
-   compare to per-node `Uncov_ρ(u, N(u))`. If `η_frontier ≪ η_node`,
-   the theory predicts we can lower per-node M.
-3. **JL witness filter (§17)**. Threshold band ±ε on the sketch; exact
-   call only on ambiguous pairs. Targets the cover wall directly
-   without touching the cover algorithm.
-4. **Committee cover (§19)**. Replace own-coverage objective with
-   committee-marginal-gain. Requires a K(u) lookup (already available
-   via the candidate set's reverse-adjacency at filter time) and a
-   committee-level spread check.
-5. **Repair-on-deficit (Phase 5b, deferred)**. Becomes meaningful once
-   frontier coverage is the certified invariant — deficit is then
-   measured against `Γ_{K(u)}` not `Γ_u`.
+$$
+\langle v, w \rangle > (1 - \chi \, r_{\text{ref}}) \, \|v\| \, \|w\| \;\Longrightarrow\; \text{reject}.
+$$
 
-Phases 1–7 of the prior framework remain in code as the single-node
-specialisation. They are correct under the chordal correction (§16),
-just numerically pessimistic. The frontier upgrade adds a layer above
-them.
+The code uses exactly this magnitude-sharing fast path for
+`PassesAngularSpread` — a spread check becomes one raw dot product when
+magnitudes are available.
 
-## 21. Empirical resolution on Sphere-100K (the recipe that works)
+---
 
-After §18–§20 mapped what *should* close the recall gap, the empirical
-sweep on real cohere d=768 embeddings produced a different answer: the
-selection criterion (Q_u cover gain) is not what carries recall. What
-carries recall is the **edge-spread test under ascending distance order**
-— exactly the invariant the legacy α-prune already enforces.
+## 18. Algebraic shortcut: triangle skip for spread
 
-### 21.1 The four flips that closed the gap
+True metric radii $r_v = d(u, v)$, $r_w = d(u, w)$. Triangle inequality:
+$d(v, w) \ge |r_v - r_w|$. So if spread requires
+$d(v, w)^2 \ge \chi \, r_{\text{ref}}^2$, it is auto-satisfied when
+$(r_{\max} - r_{\min})^2 \ge \chi \, r_{\text{ref}}^2$.
 
-The χ × greedy-mode × kCapture × spread-symmetry sweep at NoC ∈ {16, 128}
-showed each axis contributes independently. The final defaults on the
-`hnsw-apollonius` branch:
+For the symmetric form with $r_{\text{ref}} = r_{\min}$:
 
-| axis            | old default                       | new default                     | what it does                                                              |
-|-----------------|-----------------------------------|---------------------------------|---------------------------------------------------------------------------|
-| χ (strictness)  | 0.7                               | 1.0                             | match α-prune strictness; below 1.0 admits too-close edge pairs           |
-| greedy mode     | cover-gain (popcount on witness)  | dist (ascending Δ(u,v))         | cover-gain underperformed by 3–4pp at every χ on real clustered data      |
-| L0 kCapture     | M/2 nearest, unfiltered           | off (spread filters every edge) | unconditional M/2 fill bypassed spread → redundant near-edges             |
-| spread test     | symmetric `min(Δ(u,v), Δ(u,w))`   | one-sided `Δ(u, cur)` only      | in dist-greedy order Δ(u,w) ≤ Δ(u,v), so `min` relaxed the test by ~2–5pp |
+$$
+r_{\max} \ge (1 + \sqrt\chi) \, r_{\min}
+\quad\Longleftrightarrow\quad
+\Delta_{\max} \ge (1 + \sqrt\chi)^2 \, \Delta_{\min}.
+$$
 
-Each is overridable via `RAVEN_APOLLO_CHI`, `RAVEN_APOLLO_GREEDY_MODE`,
-`RAVEN_APOLLO_KCAPTURE_OFF`, `RAVEN_APOLLO_SPREAD`.
+For one-sided with $r_{\text{ref}} = r_v$, use
+$(r_{\max} - r_{\min})^2 \ge \chi r_v^2$. The triangle skip is exact,
+not an approximation, preserving the spread guarantee.
 
-### 21.2 Final numbers (defaults only, n=48 queries)
+---
 
-NoC=16 (Corax default):
+## 19. Algebraic shortcut: constant hazard = $K$-redundant popcount
 
-| metric                | apollonius | legacy   |
-|-----------------------|------------|----------|
-| Wall (3-run mean)     | 4.33 s     | 4.29 s   |
-| r@1  ef=256           | 64.6 %     | 53.1 %   |
-| r@10 ef=256           | 71.9 %     | 69.0 %   |
+If $\gamma(v) \equiv \gamma_0$ and $\Lambda = K\gamma_0$,
 
-NoC=128 (recommended production setting):
+$$
+F(S) = \gamma_0 \sum_i \min(K, c_i(S)).
+$$
 
-| ef  | apollo r@1 | apollo r@10 | legacy r@1 | legacy r@10 |
-|-----|------------|-------------|------------|-------------|
-| 64  | 72.9 %     | **85.0 %**  | 75.0 %     | 84.0 %      |
-| 256 | **87.5 %** | 92.9 %      | 85.4 %     | 93.1 %      |
-| 512 | **97.9 %** | **95.4 %**  | 87.5 %     | 94.8 %      |
+For $K = 2$, the marginal gain of candidate $v$ is proportional to the
+bits not yet covered twice:
 
-Apollonius matches or beats legacy on every metric at both build budgets.
+$$
+\Delta(v) \propto \mathrm{popcount}(b_v \wedge \neg \mathrm{coveredTwice}).
+$$
 
-### 21.3 What this means for the framework
+The bitset fast path is exact **only** under uniform hazard and fixed
+$K = 2$. If $\gamma(v)$ becomes variable, the implementation must switch
+to a real-valued accumulator.
 
-The sweep falsifies the framework's central conjecture that the Q_u
-descent cover provides selection-time information that legacy α-prune
-lacks. On real isotropic-by-shell clustered embeddings:
+---
 
-- The cover-gain criterion is dead weight for selection. Across
-  χ ∈ {0.7, 0.9, 1.0, 1.2}, picking by popcount(witness) is 3–4pp behind
-  picking by ascending Δ(u,v). The §10.B isotropic obstruction reproduces
-  on real data, even after §10.C-B bi-criteria spread is added.
-- What carries recall is the **bi-criteria spread itself**, with
-  parameters matched to legacy: one-sided Δ(u, cur), χ=1.0, applied to
-  every selected edge (no kCapture bypass).
-- Therefore the working configuration *is* legacy α-prune reached through
-  the Apollonius scaffolding. The QuDotCache, witness bitmask, kCapture
-  preamble, and cover-gain greedy are all computed-but-unused under the
-  new defaults.
+## 20. Algebraic shortcut: lazy spread check is exact
 
-### 21.4 Status of §18–§20
+If candidate $x$ fails spread against current selected $S$, then
+$\exists w \in S : d(x, w) < \alpha \, d(u, x)$. For any future
+$S' \supseteq S$, the same $w$ remains, so $x$ still fails.
 
-The frontier-cover theorem (§18) and committee cover (§19) remain open
-*as theory*. The empirical result does not refute them; it only says that
-on Sphere-100K with M=12, no version of single-node Q_u cover (with or
-without committee K(u), with or without JL filter) beats distance-ordered
-+ spread. They might still win at much smaller M, on highly anisotropic
-data, or under a different metric — but the §10.B obstruction documented
-on this branch will need a fundamentally different invariant to bypass,
-not a tighter cover.
+**Once a candidate fails spread, it can be permanently rejected.**
 
-### 21.5 Cleanup follow-up (not done in this round)
+This justifies lazy spread checking: pick tentative best, test it
+against the current selected set, mark it rejected on failure. The
+journal records that this removed eager $O(N^2)$ conflict precomputation
+while preserving bit-for-bit recall.
 
-Under the new defaults the witness loop (Qm·N dots/cover), Q_u sampling,
-NodeMagnitudes/QuDotCache, and the cover-gain greedy branch are all dead
-weight. Wall is at parity *despite* paying for them, because QuDotCache
-amortises the witness cost. Stripping them entirely should free 5–10 %
-wall. Left as a follow-up so this commit only changes behaviour, not
-surface.
+---
+
+## 21. JL / sketch certificate
+
+Using the linear witness form $\langle a_{u, v}, q_i \rangle \ge 1 - \lambda$
+with $a_{u, v} = v - \lambda u$, let $P : \mathbb{R}^d \to \mathbb{R}^s$
+be a Johnson–Lindenstrauss projection such that for all relevant finite
+pairs $|\langle P a_{u, v}, P q_i \rangle - \langle a_{u, v}, q_i \rangle| \le \epsilon$.
+
+Then:
+
+- $\langle Pa, Pq \rangle \ge 1 - \lambda + \epsilon \;\Rightarrow\;$ definite witness
+- $\langle Pa, Pq \rangle < 1 - \lambda - \epsilon \;\Rightarrow\;$ definite non-witness
+- otherwise fall back to exact comparison.
+
+This is a **safe relaxation**, not a heuristic, provided the projection
+error bound is honored.
+
+**Engineering caveat.** The journal found the per-cover JL variant
+regressed; to pay off it needs cached projections and a custom
+GEMV-style implementation rather than per-cover setup.
+
+---
+
+## 22. I/O-aware certification
+
+Edge cost
+
+$$
+c(u, v) = c_{\text{dist}}(v) + \lambda_{\text{page}} c_{\text{page}}(u, v) + \lambda_{\text{haz}} c_{\text{haz}}(v) + \lambda_{\text{deg}} c_{\text{deg}}(v).
+$$
+
+For query $q$, cheapest live descent edge
+
+$$
+C_\rho(u, q) = \min\{ c(u, v) : v \in N^+(u) \cap L,\; d(v, q) \le \rho \, d(u, q) \}.
+$$
+
+If $c(u_t, u_{t+1}) \le \beta \, C_\rho(u_t, q)$,
+
+$$
+\mathrm{Cost}(q) \le \beta \sum_{t < H(q)} C_\rho(u_t, q) + H(q) \, c_{\text{queue}}.
+$$
+
+**Implementation rule.** Use cost as a strict **tie-breaker**, not as a
+primary gain/cost ratio. Using gain/cost as the main objective would
+weaken the $(1 - 1/e)$ greedy guarantee, so cost is only secondary on
+equal gain.
+
+---
+
+## 23. Certification checklist
+
+For every diagnostic run, compute these quantities.
+
+**A. Metric correctness.** Log both $\lambda_{\text{code}}$ and
+$\rho_{\text{metric}} = \sqrt{\lambda_{\text{code}}}$.
+
+**B. Node cover.** $\hat\eta(u) = \frac{1}{m} \, \#\{q_i : \Gamma_{N(u)}(u, q_i) < \Lambda\}$.
+
+**C. Held-out sample error.** $\epsilon_m = \sqrt{(M \log(en/M) + \log(2N/\delta)) / (2m)}$.
+
+**D. Observed descent length.** $\hat H(q)$ = observed nonterminal
+descent/frontier-improvement steps.
+
+**E. Certified failure ceiling.**
+$\hat p_{\text{fail}} = \min\{1, \hat H(q)(\hat\eta + \epsilon_m + e^{-\hat\Lambda})\}$.
+
+**F. Target domination.** For construction candidate set $C_R(u)$,
+
+$$
+\mathrm{DomFail}(u) = \frac{\#\{ x \in C_R(u) : x \notin S(u),\; \forall w \in S(u),\, d(w, x) \ge \alpha \, d(u, x) \}}{|C_R(u)|}.
+$$
+
+For production distance-spread this is the most direct internal certificate.
+
+**G. Frontier cover.** For actual beam snapshots $F_t$,
+$\hat\eta_{\text{front}}(F_t) = \frac{1}{m} \, \#\{q_i : \Gamma_{F_t}(q_i) < \Lambda\}$.
+Compare $\hat\eta_{\text{front}}$ vs $\hat\eta_{\text{node}}$. If
+$\hat\eta_{\text{front}} \ll \hat\eta_{\text{node}}$ the beam is
+supplying the missing angular budget.
+
+**H. Tube capture.** Estimate $\hat\kappa_R(q) = |\{y \in L : d(y, q) \le R r_k(q)\}|$.
+Check whether $B \ge \hat\kappa_R(q)$. If not, recall@k failure may be a
+beam-capture failure, not a graph-descent failure.
+
+**I. Temporal connectivity debt.** $\Phi_t = \sum_{u, x} \omega_{u, x} \big[\log(\alpha d(u, x) / m_t(u, x))\big]_{+}$.
+Certification target: $\Phi_{t+1} \le (1 - p\beta) \Phi_t + A_t$.
+
+---
+
+## 24. What is proved versus conditional
+
+**Proved under stated assumptions.**
+
+- Apollonius cell geometry.
+- Deterministic multiplicative descent path bound.
+- Adaptive descent-cover failure bound with clamp.
+- Tombstone survival bound $e^{-\Lambda}$.
+- Sample-to-true cover bound with held-out samples and union over nodes.
+- Submodularity of capped survival coverage.
+- Greedy $(1 - 1/e)$ approximation for surrogate $F$.
+- Margin bridge from $F_{\Lambda+\xi}$ to empirical loss.
+- I/O path-cost bound.
+- Corrected tube-capture theorem with $B \ge \kappa_R(q)$.
+- Isotropic lower bound $\mathrm{Uncov}_\rho \ge 1 - M C_d(\rho)$.
+
+**Conditional — must be certified per workload.**
+
+- Arbitrary HNSW satisfies the invariant.
+- Failure bound is non-vacuous on a workload.
+- Local $k$-capture without tube assumptions.
+- Frontier/committee construction actually lowers $\eta$.
+- Temporal repair debt decays under real insertion traffic.
+
+---
+
+## 25. Final canonical invariant
+
+**Production local invariant — one-sided target domination.** For each
+$u$, selected $S = N^+(u)$, relevant target set $C_R(u)$:
+
+$$
+\forall x \in C_R(u) :\quad x \in S \;\text{or}\; \exists w \in S : d(w, x) < \alpha \, d(u, x).
+$$
+
+**Certification invariant — survival-weighted held-out descent.**
+
+$$
+\mu_u(\{q : \Gamma_{N(u)}(u, q) < \Lambda\}) \le \eta.
+$$
+
+**Beam invariant — frontier survival descent.**
+
+$$
+\mu_{F_t}(\{q : \Gamma_{F_t}(q) < \Lambda\}) \le \eta_{F_t}.
+$$
+
+**Dynamic invariant — temporal connectivity debt is bounded or decays.**
+
+$$
+\mathbb{E}[\Phi_{t+1} \mid \Phi_t] \le (1 - p\beta) \Phi_t + A_t.
+$$
+
+This is the complete certifiable story:
+
+- α-prune builds target-monotone topology;
+- Apollonius / survival math certifies query descent and tombstone robustness;
+- frontier / tube math certifies beam recall;
+- batch-debt math certifies online graph healing.
