@@ -1833,6 +1833,70 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                 Output.WriteLine($"{rho,6:F2}  {b,4}  {fL.FractionStepsUncovered,12:F4}  {fA.FractionStepsUncovered,12:F4}  {fA.FractionStepsUncovered - fL.FractionStepsUncovered,+8:F4}  {fL.MeanGammaWhenCovered,10:F2}  {fA.MeanGammaWhenCovered,10:F2}  {fL.MeanStepsPerQuery,10:F2}  {fA.MeanStepsPerQuery,10:F2}");
             }
         }
+
+        // End-to-end retrieval recall@K. Ground truth is exact-search top-K on the
+        // legacy graph (distances are graph-independent), then approximate-search
+        // top-K on each built graph. recall@K = |truth ∩ approx| / K averaged over
+        // queries. This is the only honest "does it actually retrieve neighbours"
+        // measurement; η̂ and η_front are structural proxies, not retrieval rates.
+        int[] kSweep = [1, 10, 50];
+        int kMax = 50;
+        // Default Corax-style efSearch sweep so we can see the recall/wall curve
+        // rather than a single point.
+        int[] efSweep = [32, 64, 128];
+        Output.WriteLine("");
+        Output.WriteLine($"End-to-end recall (queries={numberOfQueries}, ground truth = exact top-{kMax} on legacy):");
+        Output.WriteLine($"{"efSearch",10}  {"engine",12}  {"recall@1",10}  {"recall@10",10}  {"recall@50",10}  {"wall ms",10}");
+
+        // Ground truth via exact search (linear scan, same for any built graph).
+        using var sGt = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_legacy", out var gtName);
+        var truth = new long[numberOfQueries][];
+        for (int q = 0; q < numberOfQueries; q++)
+        {
+            var qmem = new System.ReadOnlyMemory<byte>(queryBuffer, q * vectorSizeInBytes, vectorSizeInBytes);
+            var ret = Hnsw.ExactNearest(rTx.LowLevelTransaction, gtName, kMax, System.Runtime.InteropServices.MemoryMarshal.AsMemory(qmem), 0f, false);
+            var ids = new long[kMax];
+            var dists = new float[kMax];
+            int got = ret.Fill(ids, dists, null);
+            truth[q] = new long[got];
+            System.Array.Copy(ids, truth[q], got);
+        }
+
+        foreach (var ef in efSweep)
+        {
+            foreach (var (label, treeLabel) in new[] { ("legacy", "legacy"), ("apollonius", "apollonius") })
+            {
+                using var sx = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_{treeLabel}", out var name);
+                long[] hits = new long[kSweep.Length];
+                long[] counts = new long[kSweep.Length];
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                for (int q = 0; q < numberOfQueries; q++)
+                {
+                    var qmem = new System.ReadOnlyMemory<byte>(queryBuffer, q * vectorSizeInBytes, vectorSizeInBytes);
+                    var ret = Hnsw.ApproximateNearest(rTx.LowLevelTransaction, name, ef, System.Runtime.InteropServices.MemoryMarshal.AsMemory(qmem), 0f);
+                    var ids = new long[kMax];
+                    var dists = new float[kMax];
+                    int got = ret.Fill(ids, dists, null);
+                    var t = truth[q];
+                    for (int ki = 0; ki < kSweep.Length; ki++)
+                    {
+                        int k = kSweep[ki];
+                        var tSet = new System.Collections.Generic.HashSet<long>();
+                        for (int j = 0; j < System.Math.Min(k, t.Length); j++) tSet.Add(t[j]);
+                        int matches = 0;
+                        for (int j = 0; j < System.Math.Min(k, got); j++)
+                            if (tSet.Contains(ids[j])) matches++;
+                        hits[ki] += matches;
+                        counts[ki] += System.Math.Min(k, t.Length);
+                    }
+                }
+                sw.Stop();
+                double r1 = counts[0] > 0 ? (double)hits[0] / counts[0] : 0;
+                double r10 = counts[1] > 0 ? (double)hits[1] / counts[1] : 0;
+                double r50 = counts[2] > 0 ? (double)hits[2] / counts[2] : 0;
+                Output.WriteLine($"{ef,10}  {label,12}  {r1,10:P2}  {r10,10:P2}  {r50,10:P2}  {sw.ElapsedMilliseconds,10}");
+            }
+        }
     }
 
     [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
