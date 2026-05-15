@@ -378,19 +378,94 @@ land a graph that is queryable at production cost?" — is answered
 
 ---
 
+## Layer B — descent-cover certification
+
+Three diagnostics were added to make Layer A's parity result
+*mechanical*, not just empirical on benchmark metrics.
+
+**Node-level certification (§23.B/D)** — `MeasureDescentCover` walks
+each built graph as pure greedy ρ-descent for every query and reports
+the path-level $\hat\eta = $ fraction of (visited node, query) pairs
+with zero ρ-descent witnesses. Test
+`NodeDescentCover_Apollonius_vs_Legacy_DiagnosticReport`
+(commit `b7036031f64`) on isotropic d=128 N=10K M=16:
+
+| $\rho$ | legacy $\hat\eta$ | apo $\hat\eta$ | $\Delta\hat\eta$ |
+| ------ | ----------------- | -------------- | ---------------- |
+| 0.50   | 1.0000            | 1.0000         | 0.0000           |
+| 0.70   | 0.9997            | 0.9997         | 0.0000           |
+| 0.85   | 0.9717            | 0.9711         | -0.0006          |
+| 0.95   | 0.8963            | 0.8971         | +0.0008          |
+
+Both selectors are within $\pm 0.001$ at every $\rho$.
+
+**Frontier certification (§12 / §23.G)** — `MeasureFrontierDescentCover`
+runs an L0 beam search of width $b$ and, at each non-terminal step,
+captures the frontier $F_t$ and computes $\Gamma_{F_t}(q)$ over the
+beam union. Same isotropic test, sweep $b \in \{4, 8, 16, 32\}$
+(commit `3d3e9d1d8f0`):
+
+| $\rho$ | $b$ | legacy $\eta_f$ | apo $\eta_f$ |
+| ------ | --- | --------------- | ------------ |
+| 0.85   | 4   | 1.0000          | 0.9992       |
+| 0.85   | 32  | 0.9992          | 0.9990       |
+| 0.95   | 4   | 0.9808          | 0.9880       |
+| 0.95   | 32  | 0.9373          | 0.9446       |
+
+The angular-budget relaxation from $M$ to $bM$ is real but
+quantitatively insufficient at $d=128$ small $M$ — both selectors
+saturate at $\eta_f \approx 1$ at production $\rho$.
+
+**Real-data certification.** Test
+`Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport` reads a
+10K + 200 cohere-768 subset and runs both diagnostics
+(commit `2cd7e47394f`):
+
+| metric                              | legacy | apo    |
+| ----------------------------------- | ------ | ------ |
+| node $\hat\eta$ at $\rho=0.85$      | 1.0000 | 1.0000 |
+| node $\hat\eta$ at $\rho=0.95$      | 0.9654 | 0.9651 |
+| frontier $\eta_f$ at $b=32$, $\rho=0.95$ | 0.9984 | 0.9992 |
+
+The cap mass $C_d(\rho)$ shrinks exponentially with $d$, so at $d=768$
+the obstruction binds **more** severely than at $d=128$, not less. Both
+selectors hit the same floor identically on real Sphere geometry.
+
+**Mechanical consequence.** Apollonius and legacy α-prune are
+descent-cover equivalent under the framework's own invariant on
+cohere-like data. The ~80% r@10 at $\mathrm{ef}=256$ that the Layer A
+QPS sweep measured is not produced by descent witnesses — it is
+produced entirely by FRAMEWORK §11 tube capture
+($B \ge \kappa_R(q)$) at query time. **No node- or frontier-level
+graph-mutation change can structurally improve recall on this data
+class**; the lever, if any, is in query-time beam parameters
+(efSearch / tube-capture criterion / minimum similarity gating).
+
+This closes Layer B: the certification math is implemented and run,
+and it says Layer A is at the ceiling.
+
+---
+
 ## Open follow-ups (not on the critical path)
 
-- **Phase 9 — frontier-coverage diagnostic.** Per-query: snapshot L0
-  beam at each expansion, compute $\mathrm{Uncov}_\rho^{\text{front}}(F_t)$
-  vs $\mathrm{Uncov}_\rho(u, N(u))$. Diagnostic only, no behaviour
-  change. Validates the §12 angular-budget argument empirically.
 - **Phase 10 — JL witness filter with per-node Pv cache.** Per-cover
   JL regressed; per-node cache analogous to QuDotCache would amortise.
   Now moot under the new defaults unless cover-gain is re-enabled.
-- **Phase 11 — committee cover (§13).** Multi-week change: $K(u)$
-  construction, marginal gain to committee coverage, cross-node edge
-  spread. Only justifiable if Phase 9 shows
-  $\eta_{\text{front}} \ll \eta_{\text{node}}$.
+- **Phase 11 — committee cover (§13).** No longer justifiable as a
+  recall lever — the Layer B diagnostics ruled out node- AND
+  frontier-level headroom on cohere-like data. Would only matter
+  if a target dataset shows $\eta_{\text{front}} \ll \eta_{\text{node}}$
+  on the diagnostic.
+- **Layer C — §14 online maintenance.** Repair-on-deficit can only
+  fix what the cover diagnostic shows is broken. On the data classes
+  measured here the diagnostic says nothing is broken; repair would
+  be a no-op. Re-evaluate when low-dim clustered or
+  non-isotropic data exposes a non-trivial $\eta$.
+- **Query-time tube criterion.** If recall improvement is desired on
+  Sphere, the mechanism is §11. Concretely: tune efSearch / candidate
+  cap dynamically by query, or expose a `minimumSimilarity` knob that
+  truncates the beam earlier when tube population is small. Not on
+  this branch.
 - **Cleanup pass.** Strip QuDotCache, NodeMagnitudes, witness bitmask,
   JL scaffolding, kCapture, cover-gain greedy branch. Mechanical
   ~5-10% memory reduction; wall unchanged. Left so this branch's
