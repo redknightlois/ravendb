@@ -1362,4 +1362,65 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
             return result;
         }
     }
+
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void NodeDescentCover_Apollonius_vs_Legacy_DiagnosticReport()
+    {
+        // §23.B/D Layer-B diagnostic: walk each built graph as pure greedy ρ-descent
+        // and report η̂ (uncovered fraction) + mean witness count along the search
+        // path. Quantifies the FRAMEWORK §8 obstruction empirically: if η̂ is small
+        // on legacy/apollonius alike, §13/§14 repair has little recall headroom;
+        // if η̂ is large, repair is justified. No graph mutation, no behaviour
+        // change — pure measurement.
+        int vectorSize = int.TryParse(Environment.GetEnvironmentVariable("APOLLO_D"), out var dEnv) ? dEnv : 128;
+        int vectorSizeInBytes = vectorSize * sizeof(float);
+        int numberOfEntries = int.TryParse(Environment.GetEnvironmentVariable("APOLLO_N"), out var nEnv) ? nEnv : 10_000;
+        const int numberOfQueries = 200;
+        int M = int.TryParse(Environment.GetEnvironmentVariable("APOLLO_M"), out var mEnv) ? mEnv : 16;
+        float[] rhoSweep = [0.50f, 0.70f, 0.85f, 0.95f];
+
+        var rng = new Random(101);
+        var vectors = new float[numberOfEntries][];
+        for (int i = 0; i < numberOfEntries; i++)
+            vectors[i] = RandomUnitVector(rng, vectorSize);
+        var queries = new float[numberOfQueries][];
+        for (int q = 0; q < numberOfQueries; q++)
+            queries[q] = RandomUnitVector(rng, vectorSize);
+
+        void Build(string label)
+        {
+            using var s = Slice.From(Allocator, $"{nameof(NodeDescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_{label}", out var treeName);
+            using var wTx = Env.WriteTransaction();
+            Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: M, numberOfCandidates: 32, VectorEmbeddingType.Single);
+            using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
+            {
+                for (int i = 0; i < numberOfEntries; i++)
+                    registration.Register(i + 1, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                registration.Commit(CancellationToken.None);
+            }
+            wTx.Commit();
+        }
+
+        Output.WriteLine($"[d={vectorSize} N={numberOfEntries} M={M} m={numberOfQueries}] η̂ sweep");
+
+        Hnsw.UseLegacyHeuristic = true;
+        Build("legacy");
+        Hnsw.UseLegacyHeuristic = false;
+        Build("apollonius");
+
+        var queryBuffer = new byte[numberOfQueries * vectorSizeInBytes];
+        for (int q = 0; q < numberOfQueries; q++)
+            MemoryMarshal.Cast<float, byte>(queries[q]).CopyTo(queryBuffer.AsSpan(q * vectorSizeInBytes));
+
+        Output.WriteLine($"{"ρ",6}  {"legacy η̂",10}  {"apo η̂",10}  {"Δη̂",8}  {"legacy mW",10}  {"apo mW",10}  {"meanH(legacy)",14}  {"meanH(apo)",12}");
+        using var rTx = Env.ReadTransaction();
+        foreach (var rho in rhoSweep)
+        {
+            using var sl = Slice.From(Allocator, $"{nameof(NodeDescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_legacy", out var legacyName);
+            var rL = Hnsw.MeasureDescentCover(rTx.LowLevelTransaction, legacyName, queryBuffer, numberOfQueries, rho);
+            using var sa = Slice.From(Allocator, $"{nameof(NodeDescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_apollonius", out var apoName);
+            var rA = Hnsw.MeasureDescentCover(rTx.LowLevelTransaction, apoName, queryBuffer, numberOfQueries, rho);
+            Output.WriteLine($"{rho,6:F2}  {rL.FractionUncovered,10:F4}  {rA.FractionUncovered,10:F4}  {rA.FractionUncovered - rL.FractionUncovered,+8:F4}  {rL.MeanWitnessesWhenCovered,10:F2}  {rA.MeanWitnessesWhenCovered,10:F2}  {rL.MeanPathLength,14:F2}  {rA.MeanPathLength,12:F2}");
+        }
+    }
 }
