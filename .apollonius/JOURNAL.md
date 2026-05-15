@@ -590,3 +590,44 @@ profile) is at the AVX-512 `TensorPrimitives.Dot` ceiling.
 Absolute recall is capped by the diagnostic's `numberOfCandidates=32`
 (per [[feedback_hnsw_efc_default_too_low]]); the cross-engine deltas
 are the load-bearing signal, not the absolute values.
+
+**Framework audit (2026-05-15) — §15 closed, §6 reassessed.**
+
+A line-by-line audit of FRAMEWORK.md vs the implementation
+(`Hnsw.Parallel.cs`, `Hnsw.cs`, `Hnsw.Debug.cs`) flagged three
+incomplete-or-violating sections. After investigation:
+
+- **§15 (cosine/chordal correction logging) — fixed.** The constants
+  `LambdaCode = 0.90f` and `RhoMetric = √λ_code ≈ 0.9487` existed as
+  `internal` consts inside `NodePlacement` but never reached
+  diagnostic output, so §23.A's "log both λ_code and ρ_metric"
+  requirement was unmet. Promoted to `public` on `Hnsw` (single
+  source of truth) and the Sphere diagnostic now prints
+  `[metric] λ_code=0.9000  ρ_metric=√λ_code=0.9487`. Verified on
+  Sphere-100K: build wall 0.82× legacy (in envelope), recall@K
+  unchanged.
+
+- **§6 (held-out certification samples) — reassessed: already
+  satisfied.** The audit's initial read flagged this as a theorem
+  violation because the framework explicitly calls it "historically
+  violated." On inspection, current code structurally separates the
+  two sample pools:
+  - Build sample (Q_u): `BuildGlobalQuerySample(state, 32)` in
+    `Hnsw.Parallel.cs:1513` draws 32 random vectors FROM THE INDEX
+    (`state.Nodes`, i.e., already-inserted nodes).
+  - Cert sample: `MeasureDescentCover` (`Hnsw.Debug.cs:148`) takes an
+    EXTERNAL `queriesBlob` parameter — never read from the index.
+  On the Sphere diagnostic path, indexed vectors are JSONL rows
+  [0, 100 000) and cert queries are JSONL rows [100 000, 100 050).
+  The two pools are physically disjoint, satisfying the
+  uniform-convergence independence assumption. No code change
+  required; the framework's caveat refers to a prior code state.
+
+- **§7 / §10 (distance-greedy vs cover-gain selector path; one-sided
+  spread semantics on cover-gain mode) — deferred.** The production
+  path is distance-greedy + one-sided spread (legacy α-prune algebra
+  reached through the Apollonius scaffolding), and FRAMEWORK §0
+  itself records this as the working configuration. The cover-gain
+  selector remains opt-in via `RAVEN_APOLLO_GREEDY_MODE=cover`. Will
+  revisit when there is a workload where distance-greedy hits a
+  recall ceiling that cover-gain can lift.
