@@ -479,52 +479,13 @@ public partial class Hnsw
                     const int RedundancyDepth = 2;
 
                     int M = searchState.Options.NumberOfEdges;
-                    int QmGlobal = Qu.Length;
-                    Debug.Assert(QmGlobal >= 0 && QmGlobal <= 64, $"|Q_u| must fit one ulong (≤64). Got {QmGlobal}.");
+                    int Qm = Qu.Length;
+                    Debug.Assert(Qm >= 0 && Qm <= 64, $"|Q_u| must fit one ulong (≤64). Got {Qm}.");
 
-                    Span<bool> picked = stackalloc bool[N <= 1024 ? N : 0];
-                    bool[] pickedHeap = null;
-                    if (picked.Length == 0)
-                    {
-                        pickedHeap = new bool[N];
-                        picked = pickedHeap;
-                    }
-
-                    // L0 k-capture (Theorem 11): reserve M/2 slots for nearest-to-u BEFORE
-                    // cover. Upper layers route by descent so cover gets the full budget.
-                    // Also: at L0 we record those nearest as local witness anchors per
-                    // Theorem 11′ — the strengthened invariant (★) needs Q_u to contain
-                    // each node's own top-k as measurement points, not only as edge picks.
-                    int kCapture = Level == 0 ? Math.Max(1, M / 2) : 0;
-                    Span<int> kCaptureIdx = stackalloc int[64];
-                    int kCaptureCount = 0;
-                    if (kCapture > 0)
-                    {
-                        var queue = Owner._candidatesQ;
-                        Debug.Assert(queue.Count == 0);
-                        for (int i = 0; i < N; i++)
-                            queue.Enqueue(i, searchState.Distance(_src, vectors[i]));
-                        while (candidates.Count < kCapture && queue.TryDequeue(out var cur, out _))
-                        {
-                            candidates.Add(cur);
-                            picked[cur] = true;
-                            if (kCaptureCount < 64 - QmGlobal)
-                                kCaptureIdx[kCaptureCount++] = cur;
-                        }
-                        queue.Clear();
-                    }
-
-                    // Build the combined witness anchor set: Q_u (global, Theorem 7) plus
-                    // the candidate's own nearest-k (local, Theorem 11′). Capped at 64.
-                    int Qm = QmGlobal + kCaptureCount;
-                    Debug.Assert(Qm <= 64);
-
-                    // ρ · d(u, q_k) thresholds for each q in the combined witness set.
+                    // ρ · d(u, q_k) thresholds for each q in Q_u.
                     Span<float> threshold = stackalloc float[64];
-                    for (int k = 0; k < QmGlobal; k++)
+                    for (int k = 0; k < Qm; k++)
                         threshold[k] = Rho * searchState.Distance(_src, Qu[k]);
-                    for (int k = 0; k < kCaptureCount; k++)
-                        threshold[QmGlobal + k] = Rho * searchState.Distance(_src, vectors[kCaptureIdx[k]]);
 
                     // Witness bitmask per candidate. Bit k set iff candidate i covers q_k.
                     Span<ulong> witness = stackalloc ulong[N <= 1024 ? N : 0];
@@ -538,17 +499,37 @@ public partial class Hnsw
                     {
                         ulong bits = 0;
                         var v = vectors[i];
-                        for (int k = 0; k < QmGlobal; k++)
+                        for (int k = 0; k < Qm; k++)
                         {
                             if (searchState.Distance(v, Qu[k]) <= threshold[k])
                                 bits |= 1UL << k;
                         }
-                        for (int k = 0; k < kCaptureCount; k++)
-                        {
-                            if (searchState.Distance(v, vectors[kCaptureIdx[k]]) <= threshold[QmGlobal + k])
-                                bits |= 1UL << (QmGlobal + k);
-                        }
                         witness[i] = bits;
+                    }
+
+                    Span<bool> picked = stackalloc bool[N <= 1024 ? N : 0];
+                    bool[] pickedHeap = null;
+                    if (picked.Length == 0)
+                    {
+                        pickedHeap = new bool[N];
+                        picked = pickedHeap;
+                    }
+
+                    // L0 k-capture (Theorem 11): reserve M/2 slots for nearest-to-u BEFORE
+                    // cover. Upper layers route by descent so cover gets the full budget.
+                    int kCapture = Level == 0 ? Math.Max(1, M / 2) : 0;
+                    if (kCapture > 0)
+                    {
+                        var queue = Owner._candidatesQ;
+                        Debug.Assert(queue.Count == 0);
+                        for (int i = 0; i < N; i++)
+                            queue.Enqueue(i, searchState.Distance(_src, vectors[i]));
+                        while (candidates.Count < kCapture && queue.TryDequeue(out var cur, out _))
+                        {
+                            candidates.Add(cur);
+                            picked[cur] = true;
+                        }
+                        queue.Clear();
                     }
 
                     // K=2 redundant cover state, encoded as two bitmasks (O(1) per pick):
