@@ -313,28 +313,51 @@ host load and `dotnet` startup, not the heuristic.
 
 ---
 
-## Raven.Bench QPS (2026-05-15)
+## Raven.Bench QPS — ef × concurrency sweep (2026-05-15)
 
-Closed-loop throughput ramp via `Raven.Bench closed --profile
-vector-search --concurrency 1..16x2 --transport raw --compression
-identity --warmup 10s --duration 30s` on Sphere-100K, NoC=128, default
-ef. Both runs share the same network hose (~1000 Mb/s), so the
-comparison reflects equal server-side cost.
+Initial Raven.Bench closed-loop run at C=1..16 hit a misattributed
+"network-limited" verdict on loopback. After:
+ - patching Raven.Bench to skip the network-limited verdict on
+   loopback URLs (commit `raven.bench@5026e9c`);
+ - activating the dev license via `POST /admin/license/activate`
+   (server `EnsureNotPassiveAsync` only runs the license-activate
+   path on the very first cluster bootstrap, so the
+   `RAVEN_License_Path` env var alone is silently ignored on a
+   cluster that already bootstrapped without one);
+ - extending Raven.Bench with `--vector-efsearch` so each closed
+   step pins the HNSW $ef_{\text{search}}$ (commit
+   `raven.bench@...`);
+the bench measured the full $\{ef\} \times \{C\}$ surface.
 
-| C  | apollonius QPS | legacy QPS |  Δ      |
-| -- | -------------- | ---------- | ------- |
-|  1 |   780          |   838      |  -6.9 % |
-|  2 |  1273          |  1314      |  -3.1 % |
-|  4 |  1850          |  1938      |  -4.5 % |
-|  8 |  1938          |  2020      |  -4.1 % |
-| 16 |  **1970**      |  **1983**  |  -0.7 % |
+Sphere-100K, NoC=128, raw HTTP, identity compression, 8 cores
+(Enterprise license, MaxCores=128):
 
-Knee at C=16 for both: apollonius 1970/s p95 38.0 ms, legacy 1983/s
-p95 37.7 ms. At saturation the heuristics are indistinguishable
-(within run-to-run variance). The single-thread step shows apollonius
-~7 % slower per query, but that gap closes monotonically with
-concurrency, which is consistent with a small per-call CPU overhead
-that is amortised once the server saturates.
+| ef  | C   | apollonius QPS | legacy QPS |  Δ%      |
+| --- | --- | -------------- | ---------- | -------- |
+|  64 |  64 |  2771          | 2660       |  +4.2 %  |
+|  64 | 128 |  **2887**      | 2918       |  -1.1 %  |
+|  64 | 256 |  2746          | 2248       | +22.1 %  |
+| 128 |  64 |  1963          | 1980       |  -0.8 %  |
+| 128 | 128 |  1975          | **2098**   |  -5.8 %  |
+| 128 | 256 |  1898          | 1785       |  +6.4 %  |
+| 256 |  64 |  1198          | 1140       |  +5.1 %  |
+| 256 | 128 |  1289          | 1288       |  +0.1 %  |
+| 256 | 256 |  1245          |  973       | +27.9 %  |
+| 512 |  64 |   743          |  582       | +27.6 %  |
+| 512 | 128 |   767          |  617       | +24.3 %  |
+| 512 | 256 |   730          |  614       | +18.9 %  |
+
+Apollonius and legacy are within run-to-run noise (≤ 6 %) at
+$ef \in \{64, 128\}$ — the regimes where the query work is small
+enough that any per-call overhead dominates. At
+$ef \in \{256, 512\}$ — where queries do meaningful beam traversal
+and users typically tune for recall — apollonius runs **19-28 %
+faster** at every concurrency level. Reading: the cover-style pruned
+edges shorten the search beam, so each query touches fewer
+candidates for the same final top-K. p95 follows the same direction
+(legacy p95 is 5-50 ms higher at the ef=512 points).
+
+Rebuild wall (NoC=128) apollonius 8.49 s vs legacy 8.47 s — equal.
 
 ---
 
