@@ -470,3 +470,84 @@ and it says Layer A is at the ceiling.
   JL scaffolding, kCapture, cover-gain greedy branch. Mechanical
   ~5-10% memory reduction; wall unchanged. Left so this branch's
   behavioural change is bisectable independently of the cleanup.
+
+---
+
+## Efficiency proof at production scale (commits `bf9220c4de9` … `d75a6508704`)
+
+Standalone Tryouts driver runs the full Sphere-100K diagnostic with
+`RAVEN_HNSW_COVER_PROFILE=1` and per-build wall timing. The Sphere
+test's local `Build()` helper now returns elapsed ms so the
+diagnostic prints `[build wall] legacy=… apollonius=… ratio=…`.
+
+**Five stable runs on `/tmp/sphere-100200.jsonl` (N=100000, d=768, M=12):**
+
+| run | legacy ms | apo ms | ratio |
+| --- | ---------:| ------:| -----:|
+| 1   | 12998     | 10791  | 0.83× |
+| 2   | 12986     | 10889  | 0.84× |
+| 3   | 12553     | 11312  | 0.90× |
+| 4   | 13468     | 10523  | 0.78× |
+| 5   | 16166     | 11484  | 0.71× |
+
+Mean **0.81 ± 0.07** — apollonius is decisively faster than legacy on
+cohere-like production data, the inverse of the d=128 isotropic result
+(1.69× *slower*). At d=768 the O(N·d) shared terms (witness magnitudes,
+distToSrc cosine) dominate the O(N·M²·d) spread overhead, and the
+better candidate ordering reduces total cover work.
+
+**Cover-profile breakdown at d=768** (combined legacy + apollonius
+builds; instrumentation already in `Hnsw.Parallel.cs`):
+
+```
+calls=294521 total=13012ms
+  witness         5180ms  39.8%   (magV + Qm·N skipped in dist-greedy)
+  distToSrc       4043ms  31.1%   (one cosine per candidate per cover)
+  greedy          3737ms  28.7%   (cursor + PassesAngularSpread)
+  kCapture          27ms   0.2%   (off by default)
+  mFill             25ms   0.2%
+```
+
+Compare to d=128 N=10K M=16:
+
+```
+  witness          815ms  25.9%
+  distToSrc        347ms  11.0%
+  greedy          1868ms  59.3%
+  kCapture         115ms   3.6%
+  mFill              7ms   0.2%
+```
+
+The d=128 "greedy is the hotspot" reading is dimension-specific; at
+d=768 the witness magnitudes dominate. Both are at the SIMD floor of
+TensorPrimitives. **No remaining micro-opt has moved the needle.**
+
+**Verified-dead micro-opts (do not retry without a different mechanism):**
+
+- Hand-rolled `Vector<float>` SIMD dot in PassesAngularSpread:
+  **REGRESSES** vs TensorPrimitives.Dot<float> on the d=128 hot path
+  (greedy 1868→2059ms, +10%). TensorPrimitives auto-targets AVX-512
+  (Vector512) on this CPU; `System.Numerics.Vector<float>` tops out at
+  AVX2 (Vector256) on .NET 10.
+- Hoist `vectors[i].ToSpan()` + `MemoryMarshal.Cast` to the
+  `if (mv == 0f)` branch in the witness step: no measurable change at
+  d=768 (±500ms run variance swallows it). Algebraically valid but
+  doesn't carry its weight.
+- `RAVEN_APOLLO_CHI=0` (disable spread): build wall **increases**
+  (1249ms vs 1211ms at d=128) because cover count rises 27% (180626 vs
+  142808). Spread filtering is doing work both for recall AND for
+  cover-count control.
+
+**Layer C empirical demonstration (commit `edddd97320b`)**: synthetic
+M-starved d=8 N=600 data (12 clusters × 50 pts, M=4 deliberately
+starved). FRAMEWORK §14 repair-on-deficit drops $\Phi$ by **84.8 %**
+(3664 → 555) with 1500 swaps when the swap-set is selected by global
+$(y, nb)$ $\Phi_u$ minimisation. Local heuristics (single swap-out,
+worst-q swap-in) stall at < 6 % drop. The primitive only works when
+the §8 cap-mass obstruction does NOT bind — which by Layer B is never
+the case on cohere data, so this lever is reserved for low-dim
+clustered workloads.
+
+**This closes the efficiency proof.** The branch is shippable on
+cohere-like production data with no perf regression and a small but
+real speedup over legacy.
