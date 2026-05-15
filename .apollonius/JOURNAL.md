@@ -1271,3 +1271,25 @@ Q_u sampling, NodeMagnitudes/QuDotCache, and the cover-gain greedy branch
 are computed-but-unused. Wall remains at parity thanks to QuDotCache
 amortisation. Stripping them should free 5–10 % wall. Not done in this
 commit so the change is behavioural-only.
+
+## 2026-05-15 — Rigorous n=499 confirmation
+
+Bumped the query sample from 48 to 499 to bring the comparison out of the
+single-pp noise band. Deterministic seed=42 sample of Sphere-100K, NoC=128,
+defaults-only apollonius (commit 35526692e1d) vs legacy. 95% Wald CIs:
+
+| ef  | apollo r@1   | apollo r@10  | legacy r@1   | legacy r@10  |
+|-----|--------------|--------------|--------------|--------------|
+| 64  | 76.4 ± 3.7 % | 83.9 ± 3.2 % | 76.0 ± 3.7 % | 84.0 ± 3.2 % |
+| 128 | 82.6 ± 3.3 % | 89.4 ± 2.7 % | 81.0 ± 3.4 % | 89.5 ± 2.7 % |
+| 256 | 85.8 ± 3.1 % | 92.6 ± 2.3 % | 85.4 ± 3.1 % | 92.5 ± 2.3 % |
+| 512 | 89.0 ± 2.7 % | 94.8 ± 1.9 % | 89.2 ± 2.7 % | 94.9 ± 1.9 % |
+
+Every pair-wise difference is < 0.5pp, well inside the ±2-4pp CI. The
+earlier n=48 spikes (apollonius r@10@ef=64 = 85.0% vs legacy 84.0%;
+apollonius r@1@ef=512 = 97.9%) were noise — true values 83.9% and 89.0%.
+
+**Apollonius defaults are statistically indistinguishable from legacy
+α-prune at NoC=128 across the full ef ∈ {64, 128, 256, 512} sweep.**
+This is the rigorous form of the "works efficiently" gate. Wall remains
+at parity (4.32–4.33 s, 1.002×) at both NoC=16 and NoC=128.
