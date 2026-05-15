@@ -246,6 +246,190 @@ public unsafe partial class Hnsw
             return MeasureDescentCover(llt, slice, queriesBlob, queryCount, rho);
     }
 
+    /// <summary>
+    /// FRAMEWORK §12 / §23.G frontier-cover diagnostic.
+    /// Runs an L0 beam search of width <paramref name="beam"/> for each query; at each
+    /// non-terminal step captures the current frontier F_t and computes the survival
+    /// count Γ_{F_t}(q) = #{(u,v) : u ∈ F_t, v ∈ N(u), d(v,q) ≤ ρ·D_t(q)} where
+    /// D_t(q) = min_{u ∈ F_t} d(u, q). Aggregates η_front = fraction of (step, query)
+    /// pairs with Γ_{F_t} below the K-redundant threshold <paramref name="redundancy"/>.
+    /// Compare to the node-level η̂ from <see cref="MeasureDescentCover"/>: a large
+    /// gap (η_front ≪ η_node) is what justifies §13 committee / §14 repair work.
+    /// </summary>
+    public readonly record struct FrontierCoverReport(
+        float Rho,
+        int Beam,
+        int Redundancy,
+        int QueriesSampled,
+        double MeanStepsPerQuery,
+        double FractionStepsUncovered,
+        double MeanGammaWhenCovered)
+    {
+        public override string ToString() =>
+            $"FrontierCoverReport(ρ={Rho:F2}, b={Beam}, K={Redundancy}, queries={QueriesSampled}, " +
+            $"meanSteps={MeanStepsPerQuery:F2}, η_front={FractionStepsUncovered:F4}, meanΓ={MeanGammaWhenCovered:F2})";
+    }
+
+    public static FrontierCoverReport MeasureFrontierDescentCover(
+        LowLevelTransaction llt,
+        Slice name,
+        ReadOnlySpan<byte> queriesBlob,
+        int queryCount,
+        float rho,
+        int beam,
+        int redundancy = 2,
+        int maxSteps = 256)
+    {
+        if (rho <= 0f || rho >= 1f)
+            throw new ArgumentOutOfRangeException(nameof(rho));
+        if (beam <= 0)
+            throw new ArgumentOutOfRangeException(nameof(beam));
+
+        var searchState = new SearchState(llt, name);
+        if (searchState.IsEmpty)
+            return new FrontierCoverReport(rho, beam, redundancy, 0, 0, 0, 0);
+
+        int vectorSizeBytes = searchState.Options.VectorSizeBytes;
+        if (queriesBlob.Length != queryCount * vectorSizeBytes)
+            throw new ArgumentException($"queriesBlob length {queriesBlob.Length} != {queryCount}·{vectorSizeBytes}");
+
+        long totalSteps = 0;
+        long totalUncoveredSteps = 0;
+        long totalGammaOnCovered = 0;
+        long totalCoveredSteps = 0;
+
+        // Reusable buffers (per query).
+        var beamIdx = new int[beam];
+        var beamDist = new float[beam];
+        var visited = new HashSet<int>();
+        var expanded = new HashSet<int>();
+
+        for (int q = 0; q < queryCount; q++)
+        {
+            var query = queriesBlob.Slice(q * vectorSizeBytes, vectorSizeBytes);
+            visited.Clear();
+            expanded.Clear();
+
+            int entry = searchState.GetNodeIndexById(EntryPointId);
+
+            // Greedy descent down upper levels to set the L0 entry.
+            int curIdx = entry;
+            float curDist = searchState.Distance(query, -1, curIdx);
+            for (int level = searchState.Options.MaxLevel; level > 0; level--)
+            {
+                while (true)
+                {
+                    ref var node = ref searchState.GetNodeByIndex(curIdx);
+                    if (node.EdgesPerLevel.Count <= level) break;
+                    ref var edges = ref node.EdgesPerLevel[level];
+                    int bestIdx = -1;
+                    float bestDist = curDist;
+                    for (int i = 0; i < edges.Count; i++)
+                    {
+                        int nb = searchState.GetNodeIndexById(edges[i]);
+                        float d = searchState.Distance(query, -1, nb);
+                        if (d < bestDist) { bestDist = d; bestIdx = nb; }
+                    }
+                    if (bestIdx == -1) break;
+                    curIdx = bestIdx;
+                    curDist = bestDist;
+                }
+            }
+
+            // L0 beam-search loop. Beam = top-b nearest seen-so-far (sorted ascending).
+            int beamCount = 1;
+            beamIdx[0] = curIdx;
+            beamDist[0] = curDist;
+            visited.Add(curIdx);
+
+            for (int step = 0; step < maxSteps; step++)
+            {
+                // Pick smallest-dist unexpanded beam member.
+                int pickPos = -1;
+                for (int i = 0; i < beamCount; i++)
+                {
+                    if (expanded.Contains(beamIdx[i])) continue;
+                    if (pickPos == -1 || beamDist[i] < beamDist[pickPos]) pickPos = i;
+                }
+                if (pickPos == -1) break;
+                int u = beamIdx[pickPos];
+                expanded.Add(u);
+
+                // Expand u's L0 neighbours into the beam.
+                ref var uNode = ref searchState.GetNodeByIndex(u);
+                if (uNode.EdgesPerLevel.Count == 0) continue;
+                ref var uEdges = ref uNode.EdgesPerLevel[0];
+                for (int i = 0; i < uEdges.Count; i++)
+                {
+                    int v = searchState.GetNodeIndexById(uEdges[i]);
+                    if (visited.Contains(v)) continue;
+                    visited.Add(v);
+                    float dv = searchState.Distance(query, -1, v);
+                    if (beamCount < beam)
+                    {
+                        beamIdx[beamCount] = v;
+                        beamDist[beamCount] = dv;
+                        beamCount++;
+                    }
+                    else
+                    {
+                        // Replace worst if v is closer.
+                        int worst = 0;
+                        for (int j = 1; j < beamCount; j++)
+                            if (beamDist[j] > beamDist[worst]) worst = j;
+                        if (dv < beamDist[worst])
+                        {
+                            beamIdx[worst] = v;
+                            beamDist[worst] = dv;
+                        }
+                    }
+                }
+
+                // Snapshot F_t: current beam. D_t = min beam dist. Γ_t = count of
+                // (member, neighbour) pairs with d(neighbour, q) ≤ ρ · D_t.
+                float dT = float.MaxValue;
+                for (int i = 0; i < beamCount; i++)
+                    if (beamDist[i] < dT) dT = beamDist[i];
+                float witnessCeiling = rho * dT;
+                int gamma = 0;
+                for (int i = 0; i < beamCount; i++)
+                {
+                    ref var fNode = ref searchState.GetNodeByIndex(beamIdx[i]);
+                    if (fNode.EdgesPerLevel.Count == 0) continue;
+                    ref var fEdges = ref fNode.EdgesPerLevel[0];
+                    for (int j = 0; j < fEdges.Count; j++)
+                    {
+                        int w = searchState.GetNodeIndexById(fEdges[j]);
+                        float dw = searchState.Distance(query, -1, w);
+                        if (dw <= witnessCeiling) gamma++;
+                    }
+                }
+
+                totalSteps++;
+                if (gamma < redundancy)
+                {
+                    totalUncoveredSteps++;
+                }
+                else
+                {
+                    totalCoveredSteps++;
+                    totalGammaOnCovered += gamma;
+                }
+            }
+        }
+
+        double meanSteps = (double)totalSteps / Math.Max(queryCount, 1);
+        double frac = totalSteps == 0 ? 0.0 : (double)totalUncoveredSteps / totalSteps;
+        double meanG = totalCoveredSteps == 0 ? 0.0 : (double)totalGammaOnCovered / totalCoveredSteps;
+        return new FrontierCoverReport(rho, beam, redundancy, queryCount, meanSteps, frac, meanG);
+    }
+
+    public static FrontierCoverReport MeasureFrontierDescentCover(LowLevelTransaction llt, string name, ReadOnlySpan<byte> queriesBlob, int queryCount, float rho, int beam, int redundancy = 2, int maxSteps = 256)
+    {
+        using (Slice.From(llt.Allocator, name, out var slice))
+            return MeasureFrontierDescentCover(llt, slice, queriesBlob, queryCount, rho, beam, redundancy, maxSteps);
+    }
+
     public static void RenderAndShow(LowLevelTransaction llt, string name, Span<byte> vector)
     {
         using (Slice.From(llt.Allocator, name, out var slice))

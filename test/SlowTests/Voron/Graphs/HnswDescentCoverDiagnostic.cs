@@ -1412,6 +1412,7 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         for (int q = 0; q < numberOfQueries; q++)
             MemoryMarshal.Cast<float, byte>(queries[q]).CopyTo(queryBuffer.AsSpan(q * vectorSizeInBytes));
 
+        Output.WriteLine("Node-level η̂ (greedy descent path):");
         Output.WriteLine($"{"ρ",6}  {"legacy η̂",10}  {"apo η̂",10}  {"Δη̂",8}  {"legacy mW",10}  {"apo mW",10}  {"meanH(legacy)",14}  {"meanH(apo)",12}");
         using var rTx = Env.ReadTransaction();
         foreach (var rho in rhoSweep)
@@ -1421,6 +1422,25 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
             using var sa = Slice.From(Allocator, $"{nameof(NodeDescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_apollonius", out var apoName);
             var rA = Hnsw.MeasureDescentCover(rTx.LowLevelTransaction, apoName, queryBuffer, numberOfQueries, rho);
             Output.WriteLine($"{rho,6:F2}  {rL.FractionUncovered,10:F4}  {rA.FractionUncovered,10:F4}  {rA.FractionUncovered - rL.FractionUncovered,+8:F4}  {rL.MeanWitnessesWhenCovered,10:F2}  {rA.MeanWitnessesWhenCovered,10:F2}  {rL.MeanPathLength,14:F2}  {rA.MeanPathLength,12:F2}");
+        }
+
+        // FRAMEWORK §12 / §23.G frontier-cover diagnostic. Compares η_node above to
+        // η_front for several beam sizes — a large drop confirms the recall benefit
+        // is at the beam level, not the per-node level.
+        int[] beamSweep = [4, 8, 16, 32];
+        Output.WriteLine("");
+        Output.WriteLine("Frontier η_front (b · F_t survival count):");
+        Output.WriteLine($"{"ρ",6}  {"b",4}  {"legacy η_f",12}  {"apo η_f",12}  {"Δ",8}  {"legacy mΓ",10}  {"apo mΓ",10}  {"steps(L)",10}  {"steps(A)",10}");
+        foreach (var rho in rhoSweep)
+        {
+            foreach (var b in beamSweep)
+            {
+                using var sl = Slice.From(Allocator, $"{nameof(NodeDescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_legacy", out var legacyName);
+                var fL = Hnsw.MeasureFrontierDescentCover(rTx.LowLevelTransaction, legacyName, queryBuffer, numberOfQueries, rho, b);
+                using var sa = Slice.From(Allocator, $"{nameof(NodeDescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_apollonius", out var apoName);
+                var fA = Hnsw.MeasureFrontierDescentCover(rTx.LowLevelTransaction, apoName, queryBuffer, numberOfQueries, rho, b);
+                Output.WriteLine($"{rho,6:F2}  {b,4}  {fL.FractionStepsUncovered,12:F4}  {fA.FractionStepsUncovered,12:F4}  {fA.FractionStepsUncovered - fL.FractionStepsUncovered,+8:F4}  {fL.MeanGammaWhenCovered,10:F2}  {fA.MeanGammaWhenCovered,10:F2}  {fL.MeanStepsPerQuery,10:F2}  {fA.MeanStepsPerQuery,10:F2}");
+            }
         }
     }
 }
