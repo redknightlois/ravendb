@@ -515,7 +515,7 @@ Pr̂[failure] ≤ H(q)·(η̂ + ε_m + e^(−Λ̂)).
 | 8 (capped survival F(S)) | uses K=2 popcount approximation, γ(v) ≡ 1 | **PARTIAL — not the capped Λ form** |
 | 9 (greedy) | greedy by K-redundant popcount on bitmask | OK for K=2; γ-weighted form **NOT IMPLEMENTED** |
 | 9′ (margin form for recall) | not used | **NOT IMPLEMENTED** |
-| 10.C (B) shell-wise angular spread | no diversity constraint in greedy | **NOT IMPLEMENTED** |
+| 10.C (B) shell-wise angular spread | `PassesAngularSpread`, χ=0.7 | `DoWorkApolloniusCover` (greedy + M-fill) |
 | 11 (k-capture L0) | M/2 reserved nearest at Level==0 | `kCapture` branch |
 | 11′ (tube-capture, corrected) | `B ≥ κ_R(q)` not enforced | **NOT IMPLEMENTED** |
 | 2/3/6 (failure bound) | reported as ceiling, not clamped to `min{1,·}` | `HnswDescentCoverDiagnostic` partial |
@@ -531,9 +531,15 @@ do mean the **bound numbers in the diagnostic are not the bound the
 theorems prove**.
 
 **Missing pieces, in math-priority order:**
-1. **(B) shell-wise angular spread** in cover greedy — this is the
-   isotropic blocker; everything else is downstream optimization.
-2. **Capped objective** `F(S) = Σ_i min(Λ, Σ a_{v,i})` with the proper
+
+~~1. **(B) shell-wise angular spread** in cover greedy~~ — **DONE**
+(commit `Tune angular-spread chi`). χ=0.7 is the empirical sweet
+spot: passes all 11 diagnostics, materializes the Theorem-5 churn win
+(+0.030 vs legacy), and matches legacy at cluster ef≥128. Residual
+d=128 isotropic gap (~-0.15 at ef=256) is the §10.B intrinsic
+ceiling at M=16 — closable by raising M, not by greedy changes.
+
+1. **Capped objective** `F(S) = Σ_i min(Λ, Σ a_{v,i})` with the proper
    real-valued accounting per query bit (the K=2 popcount fast path
    only works for unit weights and unit cap).
 3. **Held-out certification samples** for Theorem 7 — independent

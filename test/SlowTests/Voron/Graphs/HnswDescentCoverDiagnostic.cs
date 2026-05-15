@@ -971,9 +971,15 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         (double H, double eta, double Lambda, double ceiling) legacyStats = MeasureCeiling(useLegacy: true);
         (double H, double eta, double Lambda, double ceiling) apolloniusStats = MeasureCeiling(useLegacy: false);
 
-        Output.WriteLine($"Legacy    : Ĥ={legacyStats.H:F2} η̂={legacyStats.eta:F4} Λ̂={legacyStats.Lambda:F2} ceiling={legacyStats.ceiling:F4}");
-        Output.WriteLine($"Apollonius: Ĥ={apolloniusStats.H:F2} η̂={apolloniusStats.eta:F4} Λ̂={apolloniusStats.Lambda:F2} ceiling={apolloniusStats.ceiling:F4}");
-        Output.WriteLine($"Δceiling = {apolloniusStats.ceiling - legacyStats.ceiling:F4} (negative is improvement)");
+        // FRAMEWORK §6: report the bound clamped to min{1,·}. Unclamped values >1 are
+        // vacuous as probability statements and comparing them does not order recall.
+        double legacyClamped = Math.Min(1.0, legacyStats.ceiling);
+        double apolloniusClamped = Math.Min(1.0, apolloniusStats.ceiling);
+        Output.WriteLine($"Legacy    : Ĥ={legacyStats.H:F2} η̂={legacyStats.eta:F4} Λ̂={legacyStats.Lambda:F2} raw={legacyStats.ceiling:F4} clamped={legacyClamped:F4}");
+        Output.WriteLine($"Apollonius: Ĥ={apolloniusStats.H:F2} η̂={apolloniusStats.eta:F4} Λ̂={apolloniusStats.Lambda:F2} raw={apolloniusStats.ceiling:F4} clamped={apolloniusClamped:F4}");
+        Output.WriteLine($"Δraw = {apolloniusStats.ceiling - legacyStats.ceiling:F4} (negative is improvement; meaningless when both raws >1)");
+        if (legacyStats.ceiling > 1.0 && apolloniusStats.ceiling > 1.0)
+            Output.WriteLine("WARN: both raw bounds >1, so min{1,·} clamps both to 1. The 'ceiling improvement' is vacuous; rely on recall@k from the other diagnostics.");
 
         // The whole point of the cover is to lower the theorem ceiling. Diagnostic-only
         // for now — confirms the direction even when the absolute bound is loose.
