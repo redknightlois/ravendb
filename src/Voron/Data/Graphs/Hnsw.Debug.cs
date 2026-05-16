@@ -1485,7 +1485,10 @@ public unsafe partial class Hnsw
         long NodesVisitedAtL0,
         long NodesWithUncoveredQueries,
         long NodesRepaired,
-        long TotalSwapsApplied)
+        long TotalSwapsApplied,
+        long ProposedSwaps = 0,
+        long RejectedByHoeffding = 0,
+        long RejectedBySpread = 0)
     {
         public double EtaPre  => L0Visits == 0 ? 0.0 : 1.0 - (double)L0UncoveredPre  / L0Visits;
         public double EtaPost => L0Visits == 0 ? 0.0 : 1.0 - (double)L0UncoveredPost / L0Visits;
@@ -1496,7 +1499,8 @@ public unsafe partial class Hnsw
             $"L0OneSwapSimulationReport(ρ={Rho:F2}, β0={BetaL0:F2}, Q={QueriesSampled}, " +
             $"Visits={L0Visits}, η_pre={EtaPre:F4}, η_post={EtaPost:F4}, Δη={EtaGain:F4}, " +
             $"nodes={NodesVisitedAtL0}, uncoveredNodes={NodesWithUncoveredQueries}, " +
-            $"repaired={NodesRepaired} ({NodeRepairRate:P1}), swaps={TotalSwapsApplied})";
+            $"repaired={NodesRepaired} ({NodeRepairRate:P1}), swaps={TotalSwapsApplied}, " +
+            $"proposed={ProposedSwaps}, rejHoeff={RejectedByHoeffding}, rejSpread={RejectedBySpread})";
     }
 
     public static L0OneSwapSimulationReport SimulateL0OneSwapRepair(
@@ -1519,7 +1523,7 @@ public unsafe partial class Hnsw
         // SearchState is created and mutations are discarded on return — measurement-only mode.
         var searchState = reuseSearchState ?? new SearchState(llt, name);
         if (searchState.IsEmpty)
-            return new L0OneSwapSimulationReport(rho, betaL0, 0, 0, 0, 0, 0, 0, 0, 0);
+            return new L0OneSwapSimulationReport(rho, betaL0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 
         int vectorSizeBytes = searchState.Options.VectorSizeBytes;
         if (queriesBlob.Length != queryCount * vectorSizeBytes)
@@ -1602,6 +1606,19 @@ public unsafe partial class Hnsw
         long nodesRepaired = 0;
         long totalSwaps = 0;
         long l0UncoveredPost = 0;
+        long proposedSwaps = 0;
+        long rejectedByHoeffding = 0;
+        long rejectedBySpread = 0;
+
+        // FRAMEWORK §7 Hoeffding-gated train/val acceptance. Even-qIdx visits feed candidate
+        // scoring (Q_train); odd-qIdx feed the validation gain estimate (Q_val). Accept only
+        // when Δ̂_val > sqrt(2 log(B/δ)/m) + τ. §5.3 spread check rejects v if any existing
+        // edge a has D(v, a) < D(u, v) (HNSW α-prune predicate, χ=1).
+        bool useHoeffding = Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_HOEFFDING") == "1";
+        bool useSpread = Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_SPREAD") == "1";
+        float delta = float.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_DELTA"), out var dEnv) && dEnv > 0 ? dEnv : 0.01f;
+        float tau = float.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_TAU"), out var tEnv) && tEnv >= 0 ? tEnv : 0.005f;
+        float lambda = rho * rho; // §0: λ = ρ² (cosine-dissimilarity space)
 
         var poolHash = new HashSet<int>();
         var twoHopFrontier = new List<int>(256);
@@ -1665,6 +1682,7 @@ public unsafe partial class Hnsw
                     for (int vi = 0; vi < visits.Count; vi++)
                     {
                         if (visits[vi].covered) continue;
+                        if (useHoeffding && (vi & 1) != 0) continue; // §7 train set = even-index visits
                         var query = queriesBlob.Slice(visits[vi].qIdx * vectorSizeBytes, vectorSizeBytes);
                         float dvq = searchState.Distance(query, -1, w);
                         if (dvq <= rho * visits[vi].dUQ)
@@ -1693,6 +1711,7 @@ public unsafe partial class Hnsw
                     for (int vi = 0; vi < visits.Count; vi++)
                     {
                         if (visits[vi].covered) continue;
+                        if (useHoeffding && (vi & 1) != 0) continue; // §7 train set = even-index visits
                         var query = queriesBlob.Slice(visits[vi].qIdx * vectorSizeBytes, vectorSizeBytes);
                         float dxq = searchState.Distance(query, -1, x);
                         if (dxq <= rho * visits[vi].dUQ)
@@ -1752,6 +1771,7 @@ public unsafe partial class Hnsw
                         for (int vi = 0; vi < visits.Count; vi++)
                         {
                             if (!visits[vi].covered) continue;
+                            if (useHoeffding && (vi & 1) != 0) continue; // §7 train-only for eviction scoring
                             var qbuf = queriesBlob.Slice(visits[vi].qIdx * vectorSizeBytes, vectorSizeBytes);
                             float dCand = searchState.Distance(qbuf, -1, cand);
                             if (dCand > rho * visits[vi].dUQ) continue;
@@ -1823,6 +1843,91 @@ public unsafe partial class Hnsw
                     }
                 }
 
+                // §5.3 spread invariant: for HNSW α-prune (χ=1) reject v if any retained
+                // edge a has D(v, a) < D(u, v). Existing N(u) is already spread-feasible
+                // by construction; we only need to check v vs S \ {worstS}.
+                bool spreadOk = true;
+                if (useSpread && worstS != -1 && bestV != -1)
+                {
+                    float dUV = searchState.Distance(ReadOnlySpan<byte>.Empty, u, bestV);
+                    for (int i = 0; i < uEdgeIdx.Count; i++)
+                    {
+                        if (uEdgeIdx[i] == worstS) continue;
+                        float dVA = searchState.Distance(ReadOnlySpan<byte>.Empty, bestV, uEdgeIdx[i]);
+                        if (dVA < dUV) { spreadOk = false; break; }
+                    }
+                }
+
+                // §7 Hoeffding validation gate: Δ̂_val > sqrt(2 log(B/δ)/m) + τ, where
+                // B = candidates with positive train coverage (union-bound size), m = |Q_val|.
+                // Loss ℓ_S(u,q) = min(1, [R_S(u,q) − λ]+ / (1 − λ)) ∈ [0, 1] per §0.
+                proposedSwaps++;
+                bool hoeffOk = true;
+                if (useHoeffding && worstS != -1)
+                {
+                    int B = Math.Max(1, bestVCoverage.Count);
+                    int m = 0;
+                    double sumDelta = 0.0;
+                    for (int vi = 0; vi < visits.Count; vi++)
+                    {
+                        if ((vi & 1) == 0) continue; // §7 val set = odd-index visits
+                        var qbuf = queriesBlob.Slice(visits[vi].qIdx * vectorSizeBytes, vectorSizeBytes);
+                        float dUQ = visits[vi].dUQ;
+                        if (dUQ <= 0f) continue;
+                        // R_S(u,q) = min over s ∈ S ∪ {u} of D(s,q) / D(u,q). Numerator is 1
+                        // (u itself), and each s contributes D(s,q)/D(u,q).
+                        float rS = 1f;
+                        for (int j = 0; j < uEdgeIdx.Count; j++)
+                        {
+                            float ds = searchState.Distance(qbuf, -1, uEdgeIdx[j]);
+                            float r = ds / dUQ;
+                            if (r < rS) rS = r;
+                        }
+                        // R_{S'} replaces worstS with bestV.
+                        float rSp = 1f;
+                        for (int j = 0; j < uEdgeIdx.Count; j++)
+                        {
+                            if (uEdgeIdx[j] == worstS) continue;
+                            float ds = searchState.Distance(qbuf, -1, uEdgeIdx[j]);
+                            float r = ds / dUQ;
+                            if (r < rSp) rSp = r;
+                        }
+                        float dVQ = searchState.Distance(qbuf, -1, bestV);
+                        float rV = dVQ / dUQ;
+                        if (rV < rSp) rSp = rV;
+
+                        float lossS = rS <= lambda ? 0f : Math.Min(1f, (rS - lambda) / (1f - lambda));
+                        float lossSp = rSp <= lambda ? 0f : Math.Min(1f, (rSp - lambda) / (1f - lambda));
+                        sumDelta += lossS - lossSp;
+                        m++;
+                    }
+                    if (m > 0)
+                    {
+                        double deltaHat = sumDelta / m;
+                        double threshold = Math.Sqrt(2.0 * Math.Log(B / (double)delta) / m) + tau;
+                        if (deltaHat <= threshold) hoeffOk = false;
+                    }
+                    else
+                    {
+                        hoeffOk = false; // no val samples → conservative reject
+                    }
+                }
+
+                if (!spreadOk)
+                {
+                    rejectedBySpread++;
+                    nodesRepaired--; totalSwaps--; // revert eager increments
+                    l0UncoveredPost += uncoveredCount;
+                    continue;
+                }
+                if (!hoeffOk)
+                {
+                    rejectedByHoeffding++;
+                    nodesRepaired--; totalSwaps--;
+                    l0UncoveredPost += uncoveredCount;
+                    continue;
+                }
+
                 // Net change in uncovered for this node:
                 //   −bestCov (newly covered) + regressionFromRemoval (newly uncovered)
                 int netChange = -bestCov + regressionFromRemoval;
@@ -1865,7 +1970,8 @@ public unsafe partial class Hnsw
 
         return new L0OneSwapSimulationReport(
             rho, betaL0, queryCount, l0Visits, l0UncoveredPre, l0UncoveredPost,
-            nodesVisitedAtL0, nodesWithUncovered, nodesRepaired, totalSwaps);
+            nodesVisitedAtL0, nodesWithUncovered, nodesRepaired, totalSwaps,
+            proposedSwaps, rejectedByHoeffding, rejectedBySpread);
     }
 
     public static L0OneSwapSimulationReport SimulateL0OneSwapRepair(LowLevelTransaction llt, string name, ReadOnlySpan<byte> queriesBlob, int queryCount, float rho, float betaL0, bool applyMutations = false, SearchState reuseSearchState = null)

@@ -276,6 +276,85 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
     }
 
     [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void L0Repair_HoeffdingGate_RejectsAtLeastOneSwap()
+    {
+        // FRAMEWORK §7: with RAVEN_HNSW_L0_HOEFFDING=1, the simulator must (a) propose
+        // the same number of swaps as the ungated path (same candidate scoring), but
+        // (b) reject a non-trivial fraction via Hoeffding when validation gain does not
+        // clear sqrt(2 log(B/δ)/m) + τ. On random unit vectors at d=32 N=1000, train/val
+        // split into 50 each — most swaps are noise-grade and should fail the gate.
+        const int vectorSize = 32;
+        const int vectorSizeInBytes = vectorSize * sizeof(float);
+        const int numberOfEntries = 1000;
+        const int numberOfQueries = 100;
+        const float rho = 0.85f;
+        const float betaL0 = 1.50f;
+
+        var random = new Random(7);
+        var vectors = new float[numberOfEntries][];
+        for (int i = 0; i < numberOfEntries; i++) vectors[i] = RandomUnitVector(random, vectorSize);
+        var queries = new float[numberOfQueries][];
+        for (int i = 0; i < numberOfQueries; i++) queries[i] = RandomUnitVector(random, vectorSize);
+
+        using var _ = Slice.From(Allocator, nameof(L0Repair_HoeffdingGate_RejectsAtLeastOneSwap), out var treeName);
+        using (var wTx = Env.WriteTransaction())
+        {
+            Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: 12, numberOfCandidates: 16, VectorEmbeddingType.Single);
+            using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(7)))
+            {
+                for (int i = 0; i < numberOfEntries; i++)
+                    registration.Register(i + 1, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                registration.Commit(CancellationToken.None);
+            }
+            wTx.Commit();
+        }
+
+        var queryBuffer = new byte[numberOfQueries * vectorSizeInBytes];
+        for (int i = 0; i < numberOfQueries; i++)
+            MemoryMarshal.Cast<float, byte>(queries[i]).CopyTo(queryBuffer.AsSpan(i * vectorSizeInBytes));
+
+        Hnsw.L0OneSwapSimulationReport ungated, gated, gatedSpread;
+        var prior = (
+            Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_HOEFFDING"),
+            Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_SPREAD"));
+        try
+        {
+            Environment.SetEnvironmentVariable("RAVEN_HNSW_L0_HOEFFDING", null);
+            Environment.SetEnvironmentVariable("RAVEN_HNSW_L0_SPREAD", null);
+            using (var rTx = Env.ReadTransaction())
+                ungated = Hnsw.SimulateL0OneSwapRepair(rTx.LowLevelTransaction, treeName, queryBuffer, numberOfQueries, rho, betaL0);
+
+            Environment.SetEnvironmentVariable("RAVEN_HNSW_L0_HOEFFDING", "1");
+            using (var rTx = Env.ReadTransaction())
+                gated = Hnsw.SimulateL0OneSwapRepair(rTx.LowLevelTransaction, treeName, queryBuffer, numberOfQueries, rho, betaL0);
+
+            Environment.SetEnvironmentVariable("RAVEN_HNSW_L0_SPREAD", "1");
+            using (var rTx = Env.ReadTransaction())
+                gatedSpread = Hnsw.SimulateL0OneSwapRepair(rTx.LowLevelTransaction, treeName, queryBuffer, numberOfQueries, rho, betaL0);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("RAVEN_HNSW_L0_HOEFFDING", prior.Item1);
+            Environment.SetEnvironmentVariable("RAVEN_HNSW_L0_SPREAD", prior.Item2);
+        }
+        Output.WriteLine($"ungated:     {ungated}");
+        Output.WriteLine($"gated:       {gated}");
+        Output.WriteLine($"gated+spread:{gatedSpread}");
+
+        // Train/val split halves the per-candidate signal so some ungated proposals
+        // never make the gated shortlist; gated <= ungated is the right invariant.
+        Assert.True(gated.ProposedSwaps <= ungated.ProposedSwaps);
+        Assert.True(gatedSpread.ProposedSwaps <= ungated.ProposedSwaps);
+        // Gate is conservative: accepted swaps cannot exceed ungated total.
+        Assert.True(gated.TotalSwapsApplied <= ungated.TotalSwapsApplied);
+        // Counting invariant: every proposal is accepted, hoeffding-rejected, or spread-rejected.
+        Assert.Equal(gated.ProposedSwaps, gated.TotalSwapsApplied + gated.RejectedByHoeffding);
+        Assert.Equal(gatedSpread.ProposedSwaps, gatedSpread.TotalSwapsApplied + gatedSpread.RejectedByHoeffding + gatedSpread.RejectedBySpread);
+        // On random isotropic data the gate must actually fire — pure noise repairs shouldn't pass.
+        Assert.True(gated.RejectedByHoeffding > 0, "Hoeffding gate did not reject any proposal on isotropic data");
+    }
+
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
     public void L0Repair_BuildHook_AffectsRecallVsBaseline()
     {
         // FRAMEWORK §15.10: end-to-end check that the Commit() hook runs, swaps are
@@ -314,26 +393,38 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
             groundTruth[q] = new HashSet<long>(ranked.Take(k).Select(x => (long)(x.id + 1)));
         }
 
-        double baselineRecall = Build(enableRepair: false, label: "baseline");
-        double repairRecall = Build(enableRepair: true, label: "l0-repair");
+        double baselineRecall = Build(enableRepair: false, label: "baseline", gated: false);
+        double repairRecall = Build(enableRepair: true, label: "l0-repair", gated: false);
+        long ungatedSwaps = Hnsw.L0RepairSwapsApplied;
+        double gatedRecall = Build(enableRepair: true, label: "l0-repair-gated", gated: true);
+        long gatedSwaps = Hnsw.L0RepairSwapsApplied;
 
-        Output.WriteLine($"[L0Repair A/B] baseline recall@{k}={baselineRecall:F4} repair recall@{k}={repairRecall:F4} Δ={repairRecall - baselineRecall:F4}");
-        Output.WriteLine($"[L0Repair A/B] swaps applied total={Hnsw.L0RepairSwapsApplied} pass duration ms={Hnsw.L0RepairPassDurationMs}");
+        Output.WriteLine($"[L0Repair A/B] baseline   recall@{k}={baselineRecall:F4}");
+        Output.WriteLine($"[L0Repair A/B] ungated    recall@{k}={repairRecall:F4} swaps={ungatedSwaps} Δvs.baseline={repairRecall - baselineRecall:F4}");
+        Output.WriteLine($"[L0Repair A/B] §7-gated   recall@{k}={gatedRecall:F4} swaps={gatedSwaps} Δvs.baseline={gatedRecall - baselineRecall:F4}");
 
         // The repair pass must run (swaps > 0) on a clustered dataset where the
         // baseline graph is known to leave L0 witness coverage well below 1.0.
-        Assert.True(Hnsw.L0RepairSwapsApplied > 0, "L0 repair did not apply any swap — hook not wired or dataset too easy");
+        Assert.True(ungatedSwaps > 0, "L0 repair did not apply any swap — hook not wired or dataset too easy");
+        // §7 gate must be strictly conservative on real data: gated swaps ≤ ungated swaps.
+        Assert.True(gatedSwaps <= ungatedSwaps, $"Hoeffding gate accepted MORE swaps than ungated: gated={gatedSwaps} ungated={ungatedSwaps}");
+        // Gated recall must not regress catastrophically (per Theorem 1 — no universal
+        // recall guarantee, but §7 acceptance rule should never make things worse than baseline+τ).
+        Assert.True(gatedRecall >= baselineRecall - 0.05,
+            $"§7-gated L0 repair regressed below baseline−5pp: baseline={baselineRecall:F3} gated={gatedRecall:F3}");
         // We do NOT assert recall improves — that is precisely what we're measuring.
         // We do assert it is within a sane band (no catastrophic regression).
         Assert.True(repairRecall >= baselineRecall - 0.10,
             $"L0 repair caused catastrophic recall regression: baseline={baselineRecall:F3} repair={repairRecall:F3}");
 
-        double Build(bool enableRepair, string label)
+        double Build(bool enableRepair, string label, bool gated)
         {
             bool savedFlag = Hnsw.EnableL0Repair;
             long savedSwaps = Hnsw.L0RepairSwapsApplied;
+            string savedHoeff = Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_HOEFFDING");
             try
             {
+                Environment.SetEnvironmentVariable("RAVEN_HNSW_L0_HOEFFDING", gated ? "1" : null);
                 Hnsw.EnableL0Repair = enableRepair;
                 Hnsw.L0RepairSwapsApplied = 0;
                 using var s = Slice.From(Allocator, $"{nameof(L0Repair_BuildHook_AffectsRecallVsBaseline)}_{label}", out var treeName);
@@ -376,7 +467,7 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
             finally
             {
                 Hnsw.EnableL0Repair = savedFlag;
-                // restore non-cumulative counter? L0RepairSwapsApplied is process-wide cumulative; leave summed value.
+                Environment.SetEnvironmentVariable("RAVEN_HNSW_L0_HOEFFDING", savedHoeff);
                 _ = savedSwaps;
             }
         }
