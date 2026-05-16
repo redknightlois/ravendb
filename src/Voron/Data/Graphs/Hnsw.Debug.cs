@@ -1254,6 +1254,211 @@ public unsafe partial class Hnsw
             return MeasureL0RepairFeasibility(llt, slice, queriesBlob, queryCount, rho, betaL0);
     }
 
+    /// <summary>
+    /// FRAMEWORK §6 + §15.5 / §15.10 L0 repair feasibility with 3-hop pool. Same as
+    /// <see cref="MeasureL0RepairFeasibility"/> but searches witnesses in the deeper
+    /// N_0(u) ∪ N²_0(u) ∪ N³_0(u) pool. Tracks both 2-hop and 3-hop counts in a single
+    /// pass so the deeper pool's effect on feasibility is directly comparable. The
+    /// 3-hop pool gave large η-gain on Sphere-1M (Up 4.4pp / L0 22.6pp); this
+    /// diagnostic answers whether those extra witnesses survive the §6 radial bound.
+    /// </summary>
+    public readonly record struct L0RepairFeasibilityDeepReport(
+        float Rho,
+        float BetaL0,
+        int QueriesSampled,
+        long L0Visits,
+        long L0Uncovered,
+        long L0Feasible2Hop,
+        long L0PoolWitness2Hop,
+        long L0Feasible3Hop,
+        long L0PoolWitness3Hop)
+    {
+        public double FractionUncovered           => L0Visits == 0 ? 0.0 : (double)L0Uncovered / L0Visits;
+        public double Feasible2HopFrac            => L0Uncovered == 0 ? 0.0 : (double)L0Feasible2Hop / L0Uncovered;
+        public double PoolHas2HopFrac             => L0Uncovered == 0 ? 0.0 : (double)L0PoolWitness2Hop / L0Uncovered;
+        public double Survival2Hop                => L0PoolWitness2Hop == 0 ? 0.0 : (double)L0Feasible2Hop / L0PoolWitness2Hop;
+        public double Feasible3HopFrac            => L0Uncovered == 0 ? 0.0 : (double)L0Feasible3Hop / L0Uncovered;
+        public double PoolHas3HopFrac             => L0Uncovered == 0 ? 0.0 : (double)L0PoolWitness3Hop / L0Uncovered;
+        public double Survival3Hop                => L0PoolWitness3Hop == 0 ? 0.0 : (double)L0Feasible3Hop / L0PoolWitness3Hop;
+        /// <summary>Headroom delivered by going to 3-hop over 2-hop, after the radial bound.</summary>
+        public double FeasibleDeepGain            => Feasible3HopFrac - Feasible2HopFrac;
+
+        public override string ToString() =>
+            $"L0RepairFeasibilityDeepReport(ρ={Rho:F2}, β0={BetaL0:F2}, Q={QueriesSampled}, " +
+            $"Visits={L0Visits}, Uncov={L0Uncovered} ({FractionUncovered:P1}), " +
+            $"2hop[poolHas={PoolHas2HopFrac:P1} feas={Feasible2HopFrac:P1} surv={Survival2Hop:P1}], " +
+            $"3hop[poolHas={PoolHas3HopFrac:P1} feas={Feasible3HopFrac:P1} surv={Survival3Hop:P1}], " +
+            $"deepGain={FeasibleDeepGain:P1})";
+    }
+
+    public static L0RepairFeasibilityDeepReport MeasureL0RepairFeasibilityDeep(
+        LowLevelTransaction llt,
+        Slice name,
+        ReadOnlySpan<byte> queriesBlob,
+        int queryCount,
+        float rho,
+        float betaL0)
+    {
+        if (rho <= 0f || rho >= 1f)
+            throw new ArgumentOutOfRangeException(nameof(rho), rho, "rho must be in (0, 1)");
+        if (betaL0 < 1f)
+            throw new ArgumentOutOfRangeException(nameof(betaL0), betaL0, "betaL0 must be >= 1");
+
+        var searchState = new SearchState(llt, name);
+        if (searchState.IsEmpty)
+            return new L0RepairFeasibilityDeepReport(rho, betaL0, 0, 0, 0, 0, 0, 0, 0);
+
+        int vectorSizeBytes = searchState.Options.VectorSizeBytes;
+        if (queriesBlob.Length != queryCount * vectorSizeBytes)
+            throw new ArgumentException(
+                $"queriesBlob length {queriesBlob.Length} does not match queryCount {queryCount} * vectorSizeBytes {vectorSizeBytes}");
+
+        long l0Visits = 0, l0Uncov = 0;
+        long l0Feas2 = 0, l0Pool2 = 0, l0Feas3 = 0, l0Pool3 = 0;
+
+        var poolHash = new HashSet<int>();
+        var twoHopFrontier = new List<int>(256);
+        var edgeIdx = new List<int>(32);
+
+        for (int q = 0; q < queryCount; q++)
+        {
+            var query = queriesBlob.Slice(q * vectorSizeBytes, vectorSizeBytes);
+
+            int currentIdx = searchState.GetNodeIndexById(EntryPointId);
+            float currentDist = searchState.Distance(query, -1, currentIdx);
+
+            for (int level = searchState.Options.MaxLevel; level >= 0; level--)
+            {
+                while (true)
+                {
+                    int u = currentIdx;
+                    ref var node = ref searchState.GetNodeByIndex(u);
+                    if (node.EdgesPerLevel.Count <= level)
+                        break;
+
+                    ref var edges = ref node.EdgesPerLevel[level];
+
+                    bool coveredCur = false;
+                    int bestEdgeIdx = -1;
+                    float bestDist = currentDist;
+                    float witnessCeiling = rho * currentDist;
+
+                    edgeIdx.Clear();
+                    for (int i = 0; i < edges.Count; i++)
+                    {
+                        int neighborIdx = searchState.GetNodeIndexById(edges[i]);
+                        edgeIdx.Add(neighborIdx);
+                        float d = searchState.Distance(query, -1, neighborIdx);
+                        if (d <= witnessCeiling)
+                            coveredCur = true;
+                        if (d < bestDist)
+                        {
+                            bestDist = d;
+                            bestEdgeIdx = neighborIdx;
+                        }
+                    }
+
+                    if (level == 0 && coveredCur == false)
+                    {
+                        l0Visits++;
+                        l0Uncov++;
+
+                        float maxEdgeDist = 0f;
+                        for (int i = 0; i < edgeIdx.Count; i++)
+                        {
+                            float duEdge = searchState.Distance(ReadOnlySpan<byte>.Empty, u, edgeIdx[i]);
+                            if (duEdge > maxEdgeDist) maxEdgeDist = duEdge;
+                        }
+                        float radialCeiling = betaL0 * maxEdgeDist;
+
+                        poolHash.Clear();
+                        twoHopFrontier.Clear();
+                        poolHash.Add(u);
+                        for (int i = 0; i < edgeIdx.Count; i++)
+                            poolHash.Add(edgeIdx[i]);
+
+                        bool pool2 = false, feas2 = false;
+                        // 2-hop pass — collect full 2-hop frontier so 3-hop pass has it.
+                        for (int i = 0; i < edgeIdx.Count; i++)
+                        {
+                            int v = edgeIdx[i];
+                            ref var vNode = ref searchState.GetNodeByIndex(v);
+                            if (vNode.EdgesPerLevel.Count <= level)
+                                continue;
+                            ref var vEdges = ref vNode.EdgesPerLevel[level];
+                            for (int j = 0; j < vEdges.Count; j++)
+                            {
+                                int w = searchState.GetNodeIndexById(vEdges[j]);
+                                if (poolHash.Add(w) == false)
+                                    continue;
+                                twoHopFrontier.Add(w);
+                                float dwq = searchState.Distance(query, -1, w);
+                                if (dwq > witnessCeiling)
+                                    continue;
+                                pool2 = true;
+                                if (feas2 == false)
+                                {
+                                    float duw = searchState.Distance(ReadOnlySpan<byte>.Empty, u, w);
+                                    if (duw <= radialCeiling)
+                                        feas2 = true;
+                                }
+                            }
+                        }
+                        if (pool2) l0Pool2++;
+                        if (feas2) l0Feas2++;
+
+                        // 3-hop pass: pool2/feas2 carry forward (3-hop ⊇ 2-hop).
+                        bool pool3 = pool2, feas3 = feas2;
+                        for (int i = 0; i < twoHopFrontier.Count; i++)
+                        {
+                            int w = twoHopFrontier[i];
+                            ref var wNode = ref searchState.GetNodeByIndex(w);
+                            if (wNode.EdgesPerLevel.Count <= level)
+                                continue;
+                            ref var wEdges = ref wNode.EdgesPerLevel[level];
+                            for (int k = 0; k < wEdges.Count; k++)
+                            {
+                                int x = searchState.GetNodeIndexById(wEdges[k]);
+                                if (poolHash.Add(x) == false)
+                                    continue;
+                                float dxq = searchState.Distance(query, -1, x);
+                                if (dxq > witnessCeiling)
+                                    continue;
+                                pool3 = true;
+                                if (feas3 == false)
+                                {
+                                    float dux = searchState.Distance(ReadOnlySpan<byte>.Empty, u, x);
+                                    if (dux <= radialCeiling)
+                                        feas3 = true;
+                                }
+                            }
+                        }
+                        if (pool3) l0Pool3++;
+                        if (feas3) l0Feas3++;
+                    }
+                    else if (level == 0)
+                    {
+                        l0Visits++;
+                    }
+
+                    if (bestEdgeIdx == -1)
+                        break;
+
+                    currentIdx = bestEdgeIdx;
+                    currentDist = bestDist;
+                }
+            }
+        }
+
+        return new L0RepairFeasibilityDeepReport(rho, betaL0, queryCount, l0Visits, l0Uncov, l0Feas2, l0Pool2, l0Feas3, l0Pool3);
+    }
+
+    public static L0RepairFeasibilityDeepReport MeasureL0RepairFeasibilityDeep(LowLevelTransaction llt, string name, ReadOnlySpan<byte> queriesBlob, int queryCount, float rho, float betaL0)
+    {
+        using (Slice.From(llt.Allocator, name, out var slice))
+            return MeasureL0RepairFeasibilityDeep(llt, slice, queriesBlob, queryCount, rho, betaL0);
+    }
+
     public static void RenderAndShow(LowLevelTransaction llt, string name, Span<byte> vector)
     {
         using (Slice.From(llt.Allocator, name, out var slice))

@@ -2050,21 +2050,21 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         // yield. Small g → repair cannot help, problem is candidate generation.
         // The enriched variant (§15.5) also folds in reverse-neighbours R_ℓ(u) and
         // tests whether incoming-edge candidates lift the ceiling further.
-        // FRAMEWORK §6 / §15.10 L0 repair feasibility: sweep β_0 ∈ {1.10, 1.25, 1.50, 2.00}
-        // to see how aggressively the radial bound culls otherwise-valid pool witnesses.
-        // BoundSurvival = feasible / poolHasWitness. If survival is low even at β_0=2.0,
-        // pool witnesses systematically live far from u and L0 repair is dangerous.
+        // FRAMEWORK §6 / §15.5 / §15.10 L0 repair feasibility: sweep β_0 ∈
+        // {1.10, 1.25, 1.50, 2.00} with both 2-hop and 3-hop pools. BoundSurvival
+        // = feasible / poolHasWitness; deepGain = feas3hop − feas2hop is the extra
+        // headroom the framework §15.5 deeper enrichment buys after the §6 cull.
         Output.WriteLine("");
-        Output.WriteLine("L0 repair feasibility sweep (framework §6 / §15.10, ρ=0.95):");
-        Output.WriteLine($"{"engine",12}  {"β0",6}  {"uncov%",8}  {"poolHas%",10}  {"feasible%",11}  {"survival%",11}");
+        Output.WriteLine("L0 repair feasibility sweep with pool-depth (framework §6 / §15.5 / §15.10, ρ=0.95):");
+        Output.WriteLine($"{"engine",12}  {"β0",6}  {"uncov%",8}  {"2h pool%",10}  {"2h feas%",10}  {"2h surv%",10}  {"3h pool%",10}  {"3h feas%",10}  {"3h surv%",10}  {"deepG%",10}");
         foreach (var beta in new[] { 1.10f, 1.25f, 1.50f, 2.00f })
         {
             using var slf = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_legacy", out var legacyNameF);
-            var fL = Hnsw.MeasureL0RepairFeasibility(rTx.LowLevelTransaction, legacyNameF, queryBuffer, numberOfQueries, 0.95f, beta);
+            var fL = Hnsw.MeasureL0RepairFeasibilityDeep(rTx.LowLevelTransaction, legacyNameF, queryBuffer, numberOfQueries, 0.95f, beta);
             using var saf = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_apollonius", out var apoNameF);
-            var fA = Hnsw.MeasureL0RepairFeasibility(rTx.LowLevelTransaction, apoNameF, queryBuffer, numberOfQueries, 0.95f, beta);
-            Output.WriteLine($"{"legacy",12}  {beta,6:F2}  {fL.FractionUncovered,8:P1}  {fL.FractionUncoveredPoolHas,10:P1}  {fL.FractionUncoveredFeasible,11:P1}  {fL.BoundSurvivalRatio,11:P1}");
-            Output.WriteLine($"{"apollonius",12}  {beta,6:F2}  {fA.FractionUncovered,8:P1}  {fA.FractionUncoveredPoolHas,10:P1}  {fA.FractionUncoveredFeasible,11:P1}  {fA.BoundSurvivalRatio,11:P1}");
+            var fA = Hnsw.MeasureL0RepairFeasibilityDeep(rTx.LowLevelTransaction, apoNameF, queryBuffer, numberOfQueries, 0.95f, beta);
+            Output.WriteLine($"{"legacy",12}  {beta,6:F2}  {fL.FractionUncovered,8:P1}  {fL.PoolHas2HopFrac,10:P1}  {fL.Feasible2HopFrac,10:P1}  {fL.Survival2Hop,10:P1}  {fL.PoolHas3HopFrac,10:P1}  {fL.Feasible3HopFrac,10:P1}  {fL.Survival3Hop,10:P1}  {fL.FeasibleDeepGain,+10:P1}");
+            Output.WriteLine($"{"apollonius",12}  {beta,6:F2}  {fA.FractionUncovered,8:P1}  {fA.PoolHas2HopFrac,10:P1}  {fA.Feasible2HopFrac,10:P1}  {fA.Survival2Hop,10:P1}  {fA.PoolHas3HopFrac,10:P1}  {fA.Feasible3HopFrac,10:P1}  {fA.Survival3Hop,10:P1}  {fA.FeasibleDeepGain,+10:P1}");
         }
 
         Output.WriteLine("");
