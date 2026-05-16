@@ -430,6 +430,169 @@ public unsafe partial class Hnsw
             return MeasureFrontierDescentCover(llt, slice, queriesBlob, queryCount, rho, beam, redundancy, maxSteps);
     }
 
+    /// <summary>
+    /// FRAMEWORK §15.1 / §4 candidate-pool ceiling diagnostic. Walks the greedy descent
+    /// path and at each visited (u, ℓ) measures both:
+    ///   η_cur(u, ℓ) : did any v ∈ N_ℓ(u) satisfy d(v, q) ≤ ρ · d(u, q)?
+    ///   η_pool(u, ℓ): did any v ∈ N_ℓ(u) ∪ N_ℓ(N_ℓ(u)) satisfy the same?
+    /// The gap g = η_pool − η_cur is the maximum coverage gain available from a one-swap
+    /// repair drawing candidates from the 2-hop pool. By Theorem §4 a small gap means
+    /// selector repair cannot help — the problem is candidate-pool generation, not edge
+    /// selection. Bucketed by L0 vs upper-layers (ℓ ≥ 1) because §11 shows upper-layer
+    /// repair is naturally bounded to ~N/(M−1) appearances and the framework §15 path
+    /// repairs ℓ ≥ 1 first.
+    /// </summary>
+    public readonly record struct PoolCeilingReport(
+        float Rho,
+        int QueriesSampled,
+        long L0Visits,
+        long L0CoveredCur,
+        long L0CoveredPool,
+        long UpperVisits,
+        long UpperCoveredCur,
+        long UpperCoveredPool)
+    {
+        public double EtaCurL0    => L0Visits == 0 ? 0.0 : (double)L0CoveredCur  / L0Visits;
+        public double EtaPoolL0   => L0Visits == 0 ? 0.0 : (double)L0CoveredPool / L0Visits;
+        public double GapL0       => EtaPoolL0 - EtaCurL0;
+        public double EtaCurUp    => UpperVisits == 0 ? 0.0 : (double)UpperCoveredCur  / UpperVisits;
+        public double EtaPoolUp   => UpperVisits == 0 ? 0.0 : (double)UpperCoveredPool / UpperVisits;
+        public double GapUpper    => EtaPoolUp - EtaCurUp;
+
+        public override string ToString() =>
+            $"PoolCeilingReport(ρ={Rho:F2}, Q={QueriesSampled}, " +
+            $"L0[visits={L0Visits} ηcur={EtaCurL0:F4} ηpool={EtaPoolL0:F4} g={GapL0:F4}], " +
+            $"Up[visits={UpperVisits} ηcur={EtaCurUp:F4} ηpool={EtaPoolUp:F4} g={GapUpper:F4}])";
+    }
+
+    public static PoolCeilingReport MeasurePoolCeiling(
+        LowLevelTransaction llt,
+        Slice name,
+        ReadOnlySpan<byte> queriesBlob,
+        int queryCount,
+        float rho)
+    {
+        if (rho <= 0f || rho >= 1f)
+            throw new ArgumentOutOfRangeException(nameof(rho), rho, "rho must be in (0, 1)");
+
+        var searchState = new SearchState(llt, name);
+        if (searchState.IsEmpty)
+            return new PoolCeilingReport(rho, 0, 0, 0, 0, 0, 0, 0);
+
+        int vectorSizeBytes = searchState.Options.VectorSizeBytes;
+        if (queriesBlob.Length != queryCount * vectorSizeBytes)
+            throw new ArgumentException(
+                $"queriesBlob length {queriesBlob.Length} does not match queryCount {queryCount} * vectorSizeBytes {vectorSizeBytes}");
+
+        long l0Visits = 0, l0Cur = 0, l0Pool = 0;
+        long upVisits = 0, upCur = 0, upPool = 0;
+
+        // Reusable scratch — 2-hop expansion grows roughly M² so cap defensively.
+        var poolHash = new HashSet<int>();
+
+        for (int q = 0; q < queryCount; q++)
+        {
+            var query = queriesBlob.Slice(q * vectorSizeBytes, vectorSizeBytes);
+
+            int currentIdx = searchState.GetNodeIndexById(EntryPointId);
+            float currentDist = searchState.Distance(query, -1, currentIdx);
+
+            for (int level = searchState.Options.MaxLevel; level >= 0; level--)
+            {
+                while (true)
+                {
+                    ref var node = ref searchState.GetNodeByIndex(currentIdx);
+                    if (node.EdgesPerLevel.Count <= level)
+                        break;
+
+                    ref var edges = ref node.EdgesPerLevel[level];
+
+                    bool coveredCur = false;
+                    bool coveredPool = false;
+                    int bestEdgeIdx = -1;
+                    float bestDist = currentDist;
+                    float witnessCeiling = rho * currentDist;
+
+                    // Pass 1: direct neighbors (η_cur). Track the descent move.
+                    for (int i = 0; i < edges.Count; i++)
+                    {
+                        int neighborIdx = searchState.GetNodeIndexById(edges[i]);
+                        float d = searchState.Distance(query, -1, neighborIdx);
+                        if (d <= witnessCeiling)
+                            coveredCur = true;
+                        if (d < bestDist)
+                        {
+                            bestDist = d;
+                            bestEdgeIdx = neighborIdx;
+                        }
+                    }
+
+                    // Pass 2: 2-hop pool (η_pool). Only run if cur did not already cover.
+                    // The 2-hop union ⊇ 1-hop so if cur covered then pool covers too.
+                    if (coveredCur)
+                    {
+                        coveredPool = true;
+                    }
+                    else
+                    {
+                        poolHash.Clear();
+                        poolHash.Add(currentIdx);
+                        for (int i = 0; i < edges.Count; i++)
+                            poolHash.Add(searchState.GetNodeIndexById(edges[i]));
+
+                        for (int i = 0; i < edges.Count && coveredPool == false; i++)
+                        {
+                            int v = searchState.GetNodeIndexById(edges[i]);
+                            ref var vNode = ref searchState.GetNodeByIndex(v);
+                            if (vNode.EdgesPerLevel.Count <= level)
+                                continue;
+                            ref var vEdges = ref vNode.EdgesPerLevel[level];
+                            for (int j = 0; j < vEdges.Count; j++)
+                            {
+                                int w = searchState.GetNodeIndexById(vEdges[j]);
+                                if (poolHash.Add(w) == false)
+                                    continue;
+                                float dw = searchState.Distance(query, -1, w);
+                                if (dw <= witnessCeiling)
+                                {
+                                    coveredPool = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (level == 0)
+                    {
+                        l0Visits++;
+                        if (coveredCur) l0Cur++;
+                        if (coveredPool) l0Pool++;
+                    }
+                    else
+                    {
+                        upVisits++;
+                        if (coveredCur) upCur++;
+                        if (coveredPool) upPool++;
+                    }
+
+                    if (bestEdgeIdx == -1)
+                        break;
+
+                    currentIdx = bestEdgeIdx;
+                    currentDist = bestDist;
+                }
+            }
+        }
+
+        return new PoolCeilingReport(rho, queryCount, l0Visits, l0Cur, l0Pool, upVisits, upCur, upPool);
+    }
+
+    public static PoolCeilingReport MeasurePoolCeiling(LowLevelTransaction llt, string name, ReadOnlySpan<byte> queriesBlob, int queryCount, float rho)
+    {
+        using (Slice.From(llt.Allocator, name, out var slice))
+            return MeasurePoolCeiling(llt, slice, queriesBlob, queryCount, rho);
+    }
+
     public static void RenderAndShow(LowLevelTransaction llt, string name, Span<byte> vector)
     {
         using (Slice.From(llt.Allocator, name, out var slice))

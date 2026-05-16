@@ -68,6 +68,58 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
     }
 
     [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void MeasurePoolCeiling_OnApolloniusSelector_ReportsValidEtaAndGap()
+    {
+        // FRAMEWORK §15.1: η_pool ≥ η_cur is a hard invariant (the 2-hop pool ⊇ direct
+        // neighbours), so gap ≥ 0. Counts must satisfy CoveredCur ≤ CoveredPool ≤ Visits.
+        const int vectorSize = 32;
+        const int vectorSizeInBytes = vectorSize * sizeof(float);
+        const int numberOfEntries = 1000;
+        const int numberOfQueries = 100;
+        const float rho = 0.85f;
+
+        var random = new Random(42);
+        var vectors = new float[numberOfEntries][];
+        for (int i = 0; i < numberOfEntries; i++)
+            vectors[i] = RandomUnitVector(random, vectorSize);
+        var queries = new float[numberOfQueries][];
+        for (int i = 0; i < numberOfQueries; i++)
+            queries[i] = RandomUnitVector(random, vectorSize);
+
+        using var _ = Slice.From(Allocator, nameof(MeasurePoolCeiling_OnApolloniusSelector_ReportsValidEtaAndGap), out var treeName);
+        using (var wTx = Env.WriteTransaction())
+        {
+            Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: 12, numberOfCandidates: 16, VectorEmbeddingType.Single);
+            using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
+            {
+                for (int i = 0; i < numberOfEntries; i++)
+                    registration.Register(i + 1, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                registration.Commit(CancellationToken.None);
+            }
+            wTx.Commit();
+        }
+
+        Hnsw.PoolCeilingReport report;
+        using (var rTx = Env.ReadTransaction())
+        {
+            var queryBuffer = new byte[numberOfQueries * vectorSizeInBytes];
+            for (int i = 0; i < numberOfQueries; i++)
+                MemoryMarshal.Cast<float, byte>(queries[i]).CopyTo(queryBuffer.AsSpan(i * vectorSizeInBytes));
+            report = Hnsw.MeasurePoolCeiling(rTx.LowLevelTransaction, treeName, queryBuffer, numberOfQueries, rho);
+        }
+
+        Output.WriteLine(report.ToString());
+        Assert.Equal(numberOfQueries, report.QueriesSampled);
+        Assert.True(report.L0Visits > 0);
+        Assert.True(report.L0CoveredCur <= report.L0CoveredPool);
+        Assert.True(report.L0CoveredPool <= report.L0Visits);
+        Assert.True(report.UpperCoveredCur <= report.UpperCoveredPool);
+        Assert.True(report.UpperCoveredPool <= report.UpperVisits);
+        Assert.InRange(report.GapL0, 0.0, 1.0);
+        Assert.InRange(report.GapUpper, 0.0, 1.0);
+    }
+
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
     public void MeasureDescentCover_OnDefaultHeuristic_ProducesPlausibleBaseline()
     {
         const int vectorSize = 32;
@@ -1832,6 +1884,24 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                 var fA = Hnsw.MeasureFrontierDescentCover(rTx.LowLevelTransaction, apoName, queryBuffer, numberOfQueries, rho, b);
                 Output.WriteLine($"{rho,6:F2}  {b,4}  {fL.FractionStepsUncovered,12:F4}  {fA.FractionStepsUncovered,12:F4}  {fA.FractionStepsUncovered - fL.FractionStepsUncovered,+8:F4}  {fL.MeanGammaWhenCovered,10:F2}  {fA.MeanGammaWhenCovered,10:F2}  {fL.MeanStepsPerQuery,10:F2}  {fA.MeanStepsPerQuery,10:F2}");
             }
+        }
+
+        // FRAMEWORK §15.1 / §4 pool-ceiling: for each visited (u, ℓ) on the greedy
+        // descent path, does the 2-hop pool N_ℓ(u) ∪ N_ℓ(N_ℓ(u)) cover q at λ=ρ²
+        // when the selected N_ℓ(u) does not? Gap g = η_pool − η_cur is the maximum
+        // possible improvement a one-swap repair drawing from the 2-hop pool could
+        // yield. Small g → repair cannot help, problem is candidate generation.
+        Output.WriteLine("");
+        Output.WriteLine("Pool ceiling η_pool vs η_cur (2-hop pool, framework §15.1):");
+        Output.WriteLine($"{"ρ",6}  {"engine",12}  {"L0 ηcur",10}  {"L0 ηpool",10}  {"L0 gap",10}  {"Up ηcur",10}  {"Up ηpool",10}  {"Up gap",10}");
+        foreach (var rho in rhoSweep)
+        {
+            using var slP = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_legacy", out var legacyNameP);
+            var pL = Hnsw.MeasurePoolCeiling(rTx.LowLevelTransaction, legacyNameP, queryBuffer, numberOfQueries, rho);
+            using var saP = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_apollonius", out var apoNameP);
+            var pA = Hnsw.MeasurePoolCeiling(rTx.LowLevelTransaction, apoNameP, queryBuffer, numberOfQueries, rho);
+            Output.WriteLine($"{rho,6:F2}  {"legacy",12}  {pL.EtaCurL0,10:F4}  {pL.EtaPoolL0,10:F4}  {pL.GapL0,+10:F4}  {pL.EtaCurUp,10:F4}  {pL.EtaPoolUp,10:F4}  {pL.GapUpper,+10:F4}");
+            Output.WriteLine($"{rho,6:F2}  {"apollonius",12}  {pA.EtaCurL0,10:F4}  {pA.EtaPoolL0,10:F4}  {pA.GapL0,+10:F4}  {pA.EtaCurUp,10:F4}  {pA.EtaPoolUp,10:F4}  {pA.GapUpper,+10:F4}");
         }
 
         // End-to-end retrieval recall@K. Ground truth is exact-search top-K on the
