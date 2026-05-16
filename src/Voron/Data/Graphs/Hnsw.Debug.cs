@@ -593,6 +593,274 @@ public unsafe partial class Hnsw
             return MeasurePoolCeiling(llt, slice, queriesBlob, queryCount, rho);
     }
 
+    /// <summary>
+    /// FRAMEWORK §15.5 enriched pool ceiling. Same as <see cref="MeasurePoolCeiling"/> but
+    /// extends the candidate pool with reverse-neighbours: for each visited (u, ℓ), the
+    /// enriched pool is N_ℓ(u) ∪ N_ℓ(N_ℓ(u)) ∪ R_ℓ(u) ∪ N_ℓ(R_ℓ(u)) where R_ℓ(u) =
+    /// {v : u ∈ N_ℓ(v)} (incoming edges). Reports η_pool (2-hop) and η_pool_rev
+    /// (2-hop with reverse-neighbours added). If η_pool_rev − η_pool clears the framework
+    /// threshold, §15.5 enrichment is the right lever; if not, deeper enrichment
+    /// (delete-bypass / recent-insertion-beams / promotion) is required.
+    /// Builds the reverse-edge index in one pass — O(N·M) time and space.
+    /// </summary>
+    public readonly record struct EnrichedPoolCeilingReport(
+        float Rho,
+        int QueriesSampled,
+        long L0Visits,
+        long L0CoveredCur,
+        long L0CoveredPool,
+        long L0CoveredEnriched,
+        long UpperVisits,
+        long UpperCoveredCur,
+        long UpperCoveredPool,
+        long UpperCoveredEnriched)
+    {
+        public double EtaCurL0     => L0Visits == 0 ? 0.0 : (double)L0CoveredCur      / L0Visits;
+        public double EtaPoolL0    => L0Visits == 0 ? 0.0 : (double)L0CoveredPool     / L0Visits;
+        public double EtaEnrL0     => L0Visits == 0 ? 0.0 : (double)L0CoveredEnriched / L0Visits;
+        public double GapL0        => EtaPoolL0 - EtaCurL0;
+        public double EnrGainL0    => EtaEnrL0  - EtaPoolL0;
+        public double EtaCurUp     => UpperVisits == 0 ? 0.0 : (double)UpperCoveredCur      / UpperVisits;
+        public double EtaPoolUp    => UpperVisits == 0 ? 0.0 : (double)UpperCoveredPool     / UpperVisits;
+        public double EtaEnrUp     => UpperVisits == 0 ? 0.0 : (double)UpperCoveredEnriched / UpperVisits;
+        public double GapUpper     => EtaPoolUp - EtaCurUp;
+        public double EnrGainUpper => EtaEnrUp  - EtaPoolUp;
+
+        public override string ToString() =>
+            $"EnrichedPoolCeilingReport(ρ={Rho:F2}, Q={QueriesSampled}, " +
+            $"L0[ηcur={EtaCurL0:F4} ηpool={EtaPoolL0:F4} ηenr={EtaEnrL0:F4} gap={GapL0:F4} enrGain={EnrGainL0:F4}], " +
+            $"Up[ηcur={EtaCurUp:F4} ηpool={EtaPoolUp:F4} ηenr={EtaEnrUp:F4} gap={GapUpper:F4} enrGain={EnrGainUpper:F4}])";
+    }
+
+    public static EnrichedPoolCeilingReport MeasureEnrichedPoolCeiling(
+        LowLevelTransaction llt,
+        Slice name,
+        ReadOnlySpan<byte> queriesBlob,
+        int queryCount,
+        float rho)
+    {
+        if (rho <= 0f || rho >= 1f)
+            throw new ArgumentOutOfRangeException(nameof(rho), rho, "rho must be in (0, 1)");
+
+        var searchState = new SearchState(llt, name);
+        if (searchState.IsEmpty)
+            return new EnrichedPoolCeilingReport(rho, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+
+        int vectorSizeBytes = searchState.Options.VectorSizeBytes;
+        if (queriesBlob.Length != queryCount * vectorSizeBytes)
+            throw new ArgumentException(
+                $"queriesBlob length {queriesBlob.Length} does not match queryCount {queryCount} * vectorSizeBytes {vectorSizeBytes}");
+
+        long nodeCount = searchState.Options.CountOfVectors;
+        int maxLevel = searchState.Options.MaxLevel;
+
+        // Build reverse-edge index: reverseByLevel[ℓ][nodeIdx] = list of source node-indices
+        // that point to nodeIdx at level ℓ. Single pass over all nodes; only allocate the
+        // list lazily on first reverse-edge to keep memory tight at upper levels.
+        var reverseByLevel = new Dictionary<int, List<int>>[maxLevel + 1];
+        for (int ℓ = 0; ℓ <= maxLevel; ℓ++)
+            reverseByLevel[ℓ] = new Dictionary<int, List<int>>();
+
+        // Snapshot edges before resolving indices: GetNodeIndexById may lazy-load a node,
+        // which reallocates SearchState._Nodes and invalidates any held ref. We can hold
+        // ref var src across pure reads of EdgesPerLevel structure, but the per-level
+        // edge resolution must operate on a copy.
+        var edgeSnapshot = new List<long>(32);
+        for (long id = 1; id <= nodeCount; id++)
+        {
+            int srcIdx = searchState.GetNodeIndexById(id);
+            int levels;
+            {
+                ref var src = ref searchState.GetNodeByIndex(srcIdx);
+                levels = Math.Min(src.EdgesPerLevel.Count, maxLevel + 1);
+            }
+            for (int ℓ = 0; ℓ < levels; ℓ++)
+            {
+                edgeSnapshot.Clear();
+                {
+                    ref var src2 = ref searchState.GetNodeByIndex(srcIdx);
+                    if (src2.EdgesPerLevel.Count <= ℓ)
+                        continue;
+                    ref var es = ref src2.EdgesPerLevel[ℓ];
+                    for (int i = 0; i < es.Count; i++)
+                        edgeSnapshot.Add(es[i]);
+                }
+                var dict = reverseByLevel[ℓ];
+                for (int i = 0; i < edgeSnapshot.Count; i++)
+                {
+                    int dstIdx = searchState.GetNodeIndexById(edgeSnapshot[i]);
+                    if (dict.TryGetValue(dstIdx, out var lst) == false)
+                    {
+                        lst = new List<int>(4);
+                        dict[dstIdx] = lst;
+                    }
+                    lst.Add(srcIdx);
+                }
+            }
+        }
+
+        long l0Visits = 0, l0Cur = 0, l0Pool = 0, l0Enr = 0;
+        long upVisits = 0, upCur = 0, upPool = 0, upEnr = 0;
+
+        var poolHash = new HashSet<int>();
+        var enrHash  = new HashSet<int>();
+
+        for (int q = 0; q < queryCount; q++)
+        {
+            var query = queriesBlob.Slice(q * vectorSizeBytes, vectorSizeBytes);
+
+            int currentIdx = searchState.GetNodeIndexById(EntryPointId);
+            float currentDist = searchState.Distance(query, -1, currentIdx);
+
+            for (int level = maxLevel; level >= 0; level--)
+            {
+                while (true)
+                {
+                    ref var node = ref searchState.GetNodeByIndex(currentIdx);
+                    if (node.EdgesPerLevel.Count <= level)
+                        break;
+
+                    ref var edges = ref node.EdgesPerLevel[level];
+
+                    bool coveredCur = false;
+                    bool coveredPool = false;
+                    bool coveredEnr = false;
+                    int bestEdgeIdx = -1;
+                    float bestDist = currentDist;
+                    float witnessCeiling = rho * currentDist;
+
+                    for (int i = 0; i < edges.Count; i++)
+                    {
+                        int neighborIdx = searchState.GetNodeIndexById(edges[i]);
+                        float d = searchState.Distance(query, -1, neighborIdx);
+                        if (d <= witnessCeiling)
+                            coveredCur = true;
+                        if (d < bestDist)
+                        {
+                            bestDist = d;
+                            bestEdgeIdx = neighborIdx;
+                        }
+                    }
+
+                    if (coveredCur)
+                    {
+                        coveredPool = true;
+                        coveredEnr = true;
+                    }
+                    else
+                    {
+                        // 2-hop forward pool first (matches MeasurePoolCeiling semantics).
+                        poolHash.Clear();
+                        poolHash.Add(currentIdx);
+                        for (int i = 0; i < edges.Count; i++)
+                            poolHash.Add(searchState.GetNodeIndexById(edges[i]));
+
+                        for (int i = 0; i < edges.Count && coveredPool == false; i++)
+                        {
+                            int v = searchState.GetNodeIndexById(edges[i]);
+                            ref var vNode = ref searchState.GetNodeByIndex(v);
+                            if (vNode.EdgesPerLevel.Count <= level)
+                                continue;
+                            ref var vEdges = ref vNode.EdgesPerLevel[level];
+                            for (int j = 0; j < vEdges.Count; j++)
+                            {
+                                int w = searchState.GetNodeIndexById(vEdges[j]);
+                                if (poolHash.Add(w) == false)
+                                    continue;
+                                float dw = searchState.Distance(query, -1, w);
+                                if (dw <= witnessCeiling)
+                                {
+                                    coveredPool = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Enriched pool: poolHash ∪ reverse-edges of currentIdx ∪
+                        // forward edges of those reverse-source nodes (one extra hop
+                        // through the incoming side). Re-uses poolHash as the
+                        // already-tested set.
+                        if (coveredPool)
+                        {
+                            coveredEnr = true;
+                        }
+                        else
+                        {
+                            enrHash.Clear();
+                            var revOfCur = reverseByLevel[level].TryGetValue(currentIdx, out var rc) ? rc : null;
+                            if (revOfCur != null)
+                            {
+                                for (int i = 0; i < revOfCur.Count && coveredEnr == false; i++)
+                                {
+                                    int r = revOfCur[i];
+                                    if (poolHash.Contains(r))
+                                        continue;
+                                    if (enrHash.Add(r) == false)
+                                        continue;
+                                    float dr = searchState.Distance(query, -1, r);
+                                    if (dr <= witnessCeiling)
+                                    {
+                                        coveredEnr = true;
+                                        break;
+                                    }
+                                    // One more hop through r's forward neighbours.
+                                    ref var rNode = ref searchState.GetNodeByIndex(r);
+                                    if (rNode.EdgesPerLevel.Count <= level)
+                                        continue;
+                                    ref var rEdges = ref rNode.EdgesPerLevel[level];
+                                    for (int j = 0; j < rEdges.Count; j++)
+                                    {
+                                        int w = searchState.GetNodeIndexById(rEdges[j]);
+                                        if (poolHash.Contains(w) || enrHash.Add(w) == false)
+                                            continue;
+                                        float dw = searchState.Distance(query, -1, w);
+                                        if (dw <= witnessCeiling)
+                                        {
+                                            coveredEnr = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (level == 0)
+                    {
+                        l0Visits++;
+                        if (coveredCur)  l0Cur++;
+                        if (coveredPool) l0Pool++;
+                        if (coveredEnr)  l0Enr++;
+                    }
+                    else
+                    {
+                        upVisits++;
+                        if (coveredCur)  upCur++;
+                        if (coveredPool) upPool++;
+                        if (coveredEnr)  upEnr++;
+                    }
+
+                    if (bestEdgeIdx == -1)
+                        break;
+
+                    currentIdx = bestEdgeIdx;
+                    currentDist = bestDist;
+                }
+            }
+        }
+
+        return new EnrichedPoolCeilingReport(
+            rho, queryCount,
+            l0Visits, l0Cur, l0Pool, l0Enr,
+            upVisits, upCur, upPool, upEnr);
+    }
+
+    public static EnrichedPoolCeilingReport MeasureEnrichedPoolCeiling(LowLevelTransaction llt, string name, ReadOnlySpan<byte> queriesBlob, int queryCount, float rho)
+    {
+        using (Slice.From(llt.Allocator, name, out var slice))
+            return MeasureEnrichedPoolCeiling(llt, slice, queriesBlob, queryCount, rho);
+    }
+
     public static void RenderAndShow(LowLevelTransaction llt, string name, Span<byte> vector)
     {
         using (Slice.From(llt.Allocator, name, out var slice))
