@@ -971,6 +971,12 @@ public unsafe partial class Hnsw
 
             InsertVectorsToGraph(ref byteBuffer, token);
 
+            // FRAMEWORK §17 deployment order: upper-layer (§15.3) repair runs BEFORE
+            // L0 (§15.10) so the L0 pass sees the corrected sparse skeleton. Per §11
+            // upper-layer work is bounded by N/(M-1), so the cost is naturally small.
+            if (Hnsw.EnableUpperLayerRepair)
+                ApplyUpperLayerOneSwapRepairPass(token);
+
             // FRAMEWORK §15.10 L0 one-swap repair pass. Mutates EdgesPerLevel[0] of
             // visited nodes in-memory before the PersistNode loop writes them out.
             // Off by default (Theorem 1: construction signals cannot guarantee recall;

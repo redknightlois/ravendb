@@ -70,6 +70,30 @@ public partial class Hnsw
     internal static long L0RepairSwapsApplied;
     internal static long L0RepairPassDurationMs;
 
+    /// <summary>
+    /// FRAMEWORK §15.3 — upper-layer (ℓ ≥ 1) one-swap repair. Sparse by §11
+    /// (E|V_ℓ| = N/(M-1) ≈ 3% for M=32), so the cost is naturally bounded.
+    /// Run BEFORE L0 per §17 order. Env: RAVEN_HNSW_UP_REPAIR=1.
+    /// </summary>
+    internal static bool EnableUpperLayerRepair =
+        Environment.GetEnvironmentVariable("RAVEN_HNSW_UP_REPAIR") is { } _ulv &&
+        (_ulv == "1" || string.Equals(_ulv, "true", StringComparison.OrdinalIgnoreCase));
+    internal static float UpperLayerRepairBeta =
+        float.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_UP_BETA"), out var _ub) && _ub >= 1f ? _ub : 2.0f;
+    internal static int UpperLayerRepairQueryCount =
+        int.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_UP_Q"), out var _uq) && _uq > 0 ? _uq : 1000;
+    internal static long UpperLayerRepairSwapsApplied;
+    internal static long UpperLayerRepairPassDurationMs;
+
+    /// <summary>
+    /// FRAMEWORK §15.1 pool-ceiling production guard. When enabled, the repair pass
+    /// first measures η_pool − η_cur; if the gap is below sqrt(2 log(1/δ)/n) + g_min
+    /// the repair is skipped (no headroom). Env: RAVEN_HNSW_L0_GATE_POOL=1.
+    /// </summary>
+    internal static bool EnablePoolCeilingGuard =
+        Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_GATE_POOL") is { } _pgv &&
+        (_pgv == "1" || string.Equals(_pgv, "true", StringComparison.OrdinalIgnoreCase));
+
     // Unit-normalize all index vectors at registration time when the similarity is
     // cosine-singles. Turns the cosine kernel into a pure `1 - <a,b>` (no magnitude
     // recomputation, no division). Process-wide opt-in via RAVEN_HNSW_UNIT_NORMALIZE=1.
@@ -436,6 +460,26 @@ public partial class Hnsw
 
             var queriesBlob = queryBuffer.AsSpan(0, qActual * vectorSizeBytes);
 
+            // §15.1 production pool-ceiling guard: only proceed when there is provable
+            // headroom in the candidate pool. A dry run with applyMutations=false reports
+            // η_pre and η_post upper bound; if Δη ≤ sqrt(2 log(1/δ)/qActual) + g_min the
+            // selector cannot fix what the pool doesn't contain — skip the mutation pass.
+            if (Hnsw.EnablePoolCeilingGuard)
+            {
+                var dryRun = SimulateL0OneSwapRepair(
+                    _searchState.Llt, _searchState.Tree.Name, queriesBlob, qActual,
+                    rho: Hnsw.L0RepairRho, betaL0: Hnsw.L0RepairBeta,
+                    applyMutations: false, reuseSearchState: _searchState);
+                const double delta = 0.01, gMin = 0.005;
+                double threshold = Math.Sqrt(2.0 * Math.Log(1.0 / delta) / Math.Max(1, qActual)) + gMin;
+                if (dryRun.EtaGain <= threshold)
+                {
+                    sw.Stop();
+                    Hnsw.L0RepairPassDurationMs += sw.ElapsedMilliseconds;
+                    return; // §15.1 NO: no headroom, skip repair
+                }
+            }
+
             var report = SimulateL0OneSwapRepair(
                 _searchState.Llt, _searchState.Tree.Name, queriesBlob, qActual,
                 rho: Hnsw.L0RepairRho, betaL0: Hnsw.L0RepairBeta,
@@ -444,6 +488,57 @@ public partial class Hnsw
 
             sw.Stop();
             Hnsw.L0RepairPassDurationMs += sw.ElapsedMilliseconds;
+        }
+
+        // FRAMEWORK §15.3 upper-layer one-swap repair. Iterates levels 1..MaxLevel and
+        // for each runs SimulateUpperLayerOneSwapRepair (r=2 protected, β=2.0 default).
+        // Per §11 the work bound is N/(M-1) ≈ 3% so this is cheap even at scale.
+        // Per §17 must run BEFORE L0 repair so L0 sees a corrected upper-layer skeleton.
+        private void ApplyUpperLayerOneSwapRepairPass(CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+
+            var nodes = _searchState.Nodes;
+            if (nodes.Length < 2) return;
+            int maxLevel = _searchState.Options.MaxLevel;
+            if (maxLevel < 1) return;
+            int vectorSizeBytes = _searchState.Options.VectorSizeBytes;
+
+            int qWant = Math.Min(Hnsw.UpperLayerRepairQueryCount, nodes.Length);
+            int seed = unchecked((int)0xB7011017) ^ (int)Hnsw.UpperLayerRepairSwapsApplied;
+            var rng = new Random(seed);
+            var picked = new HashSet<int>(qWant);
+            while (picked.Count < qWant)
+                picked.Add(rng.Next(nodes.Length));
+
+            var queryBuffer = new byte[qWant * vectorSizeBytes];
+            int qIdx = 0;
+            foreach (var nIdx in picked)
+            {
+                ref var n = ref _searchState.Nodes[nIdx];
+                if (n.NodeId == 0) continue;
+                var vec = n.GetVector(_searchState);
+                vec.Slice(0, vectorSizeBytes).CopyTo(queryBuffer.AsSpan(qIdx * vectorSizeBytes));
+                qIdx++;
+            }
+            int qActual = qIdx;
+            if (qActual == 0)
+                return;
+            var queriesBlob = queryBuffer.AsSpan(0, qActual * vectorSizeBytes);
+
+            for (int level = 1; level <= maxLevel; level++)
+            {
+                token.ThrowIfCancellationRequested();
+                var report = SimulateUpperLayerOneSwapRepair(
+                    _searchState.Llt, _searchState.Tree.Name, queriesBlob, qActual,
+                    level: level, rho: Hnsw.L0RepairRho, betaL: Hnsw.UpperLayerRepairBeta,
+                    applyMutations: true, reuseSearchState: _searchState);
+                Hnsw.UpperLayerRepairSwapsApplied += report.TotalSwapsApplied;
+            }
+
+            sw.Stop();
+            Hnsw.UpperLayerRepairPassDurationMs += sw.ElapsedMilliseconds;
         }
 
         private class NodePlacement(Registration parent, NodePlacementRunner runner)
