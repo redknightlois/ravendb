@@ -120,6 +120,59 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
     }
 
     [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void MeasureDeepPoolCeiling_OnApolloniusSelector_ReportsValid3HopChain()
+    {
+        // FRAMEWORK §15.5: 3-hop pool ⊇ 2-hop pool ⊇ direct neighbours, so monotonic:
+        // cur ≤ pool ≤ deep ≤ visits.
+        const int vectorSize = 32;
+        const int vectorSizeInBytes = vectorSize * sizeof(float);
+        const int numberOfEntries = 1000;
+        const int numberOfQueries = 100;
+        const float rho = 0.85f;
+
+        var random = new Random(42);
+        var vectors = new float[numberOfEntries][];
+        for (int i = 0; i < numberOfEntries; i++)
+            vectors[i] = RandomUnitVector(random, vectorSize);
+        var queries = new float[numberOfQueries][];
+        for (int i = 0; i < numberOfQueries; i++)
+            queries[i] = RandomUnitVector(random, vectorSize);
+
+        using var _ = Slice.From(Allocator, nameof(MeasureDeepPoolCeiling_OnApolloniusSelector_ReportsValid3HopChain), out var treeName);
+        using (var wTx = Env.WriteTransaction())
+        {
+            Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: 12, numberOfCandidates: 16, VectorEmbeddingType.Single);
+            using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
+            {
+                for (int i = 0; i < numberOfEntries; i++)
+                    registration.Register(i + 1, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                registration.Commit(CancellationToken.None);
+            }
+            wTx.Commit();
+        }
+
+        Hnsw.DeepPoolCeilingReport report;
+        using (var rTx = Env.ReadTransaction())
+        {
+            var queryBuffer = new byte[numberOfQueries * vectorSizeInBytes];
+            for (int i = 0; i < numberOfQueries; i++)
+                MemoryMarshal.Cast<float, byte>(queries[i]).CopyTo(queryBuffer.AsSpan(i * vectorSizeInBytes));
+            report = Hnsw.MeasureDeepPoolCeiling(rTx.LowLevelTransaction, treeName, queryBuffer, numberOfQueries, rho);
+        }
+
+        Output.WriteLine(report.ToString());
+        Assert.Equal(numberOfQueries, report.QueriesSampled);
+        Assert.True(report.L0CoveredCur <= report.L0CoveredPool);
+        Assert.True(report.L0CoveredPool <= report.L0CoveredDeep);
+        Assert.True(report.L0CoveredDeep <= report.L0Visits);
+        Assert.True(report.UpperCoveredCur <= report.UpperCoveredPool);
+        Assert.True(report.UpperCoveredPool <= report.UpperCoveredDeep);
+        Assert.True(report.UpperCoveredDeep <= report.UpperVisits);
+        Assert.InRange(report.DeepGainL0, 0.0, 1.0);
+        Assert.InRange(report.DeepGainUp, 0.0, 1.0);
+    }
+
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
     public void MeasureEnrichedPoolCeiling_OnApolloniusSelector_ReportsValidEnrichmentChain()
     {
         // FRAMEWORK §15.5: enriched pool ⊇ 2-hop pool ⊇ direct neighbours, so all three
@@ -1947,6 +2000,19 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         // yield. Small g → repair cannot help, problem is candidate generation.
         // The enriched variant (§15.5) also folds in reverse-neighbours R_ℓ(u) and
         // tests whether incoming-edge candidates lift the ceiling further.
+        Output.WriteLine("");
+        Output.WriteLine("Deep pool ceiling η_3hop vs η_pool (3-hop forward, framework §15.5):");
+        Output.WriteLine($"{"ρ",6}  {"engine",12}  {"L0 ηcur",10}  {"L0 ηpool",10}  {"L0 η3hop",10}  {"L0 3hopG",10}  {"Up ηcur",10}  {"Up ηpool",10}  {"Up η3hop",10}  {"Up 3hopG",10}");
+        foreach (var rho in rhoSweep)
+        {
+            using var sld = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_legacy", out var legacyNameD);
+            var dL = Hnsw.MeasureDeepPoolCeiling(rTx.LowLevelTransaction, legacyNameD, queryBuffer, numberOfQueries, rho);
+            using var sad = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_apollonius", out var apoNameD);
+            var dA = Hnsw.MeasureDeepPoolCeiling(rTx.LowLevelTransaction, apoNameD, queryBuffer, numberOfQueries, rho);
+            Output.WriteLine($"{rho,6:F2}  {"legacy",12}  {dL.EtaCurL0,10:F4}  {dL.EtaPoolL0,10:F4}  {dL.EtaDeepL0,10:F4}  {dL.DeepGainL0,+10:F4}  {dL.EtaCurUp,10:F4}  {dL.EtaPoolUp,10:F4}  {dL.EtaDeepUp,10:F4}  {dL.DeepGainUp,+10:F4}");
+            Output.WriteLine($"{rho,6:F2}  {"apollonius",12}  {dA.EtaCurL0,10:F4}  {dA.EtaPoolL0,10:F4}  {dA.EtaDeepL0,10:F4}  {dA.DeepGainL0,+10:F4}  {dA.EtaCurUp,10:F4}  {dA.EtaPoolUp,10:F4}  {dA.EtaDeepUp,10:F4}  {dA.DeepGainUp,+10:F4}");
+        }
+
         Output.WriteLine("");
         Output.WriteLine("Pool ceiling η_pool/η_enr vs η_cur (2-hop + reverse, framework §15.1 / §15.5):");
         Output.WriteLine($"{"ρ",6}  {"engine",12}  {"L0 ηcur",10}  {"L0 ηpool",10}  {"L0 ηenr",10}  {"L0 gap",10}  {"L0 enrG",10}  {"Up ηcur",10}  {"Up ηpool",10}  {"Up ηenr",10}  {"Up gap",10}  {"Up enrG",10}");

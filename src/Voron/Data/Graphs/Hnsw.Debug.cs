@@ -861,6 +861,217 @@ public unsafe partial class Hnsw
             return MeasureEnrichedPoolCeiling(llt, slice, queriesBlob, queryCount, rho);
     }
 
+    /// <summary>
+    /// FRAMEWORK §15.5 / §4 deep-pool ceiling. Same as <see cref="MeasurePoolCeiling"/> but
+    /// also reports the 3-hop forward pool ceiling η_3hop ⊇ η_pool (2-hop). The 3-hop
+    /// gain (η_3hop − η_pool) tells us whether deeper static graph expansion brings new
+    /// witnesses, complementing the reverse-neighbour measurement in
+    /// <see cref="MeasureEnrichedPoolCeiling"/>. If neither 3-hop nor reverse helps,
+    /// the pool is structurally saturated and any further improvement requires
+    /// q-conditioned candidates (recent-insertion beams §15.2, delete-bypass §15.4)
+    /// or fresh promotion (§15.8).
+    /// </summary>
+    public readonly record struct DeepPoolCeilingReport(
+        float Rho,
+        int QueriesSampled,
+        long L0Visits,
+        long L0CoveredCur,
+        long L0CoveredPool,
+        long L0CoveredDeep,
+        long UpperVisits,
+        long UpperCoveredCur,
+        long UpperCoveredPool,
+        long UpperCoveredDeep)
+    {
+        public double EtaCurL0    => L0Visits == 0 ? 0.0 : (double)L0CoveredCur  / L0Visits;
+        public double EtaPoolL0   => L0Visits == 0 ? 0.0 : (double)L0CoveredPool / L0Visits;
+        public double EtaDeepL0   => L0Visits == 0 ? 0.0 : (double)L0CoveredDeep / L0Visits;
+        public double GapL0       => EtaPoolL0 - EtaCurL0;
+        public double DeepGainL0  => EtaDeepL0 - EtaPoolL0;
+        public double EtaCurUp    => UpperVisits == 0 ? 0.0 : (double)UpperCoveredCur  / UpperVisits;
+        public double EtaPoolUp   => UpperVisits == 0 ? 0.0 : (double)UpperCoveredPool / UpperVisits;
+        public double EtaDeepUp   => UpperVisits == 0 ? 0.0 : (double)UpperCoveredDeep / UpperVisits;
+        public double GapUpper    => EtaPoolUp - EtaCurUp;
+        public double DeepGainUp  => EtaDeepUp - EtaPoolUp;
+
+        public override string ToString() =>
+            $"DeepPoolCeilingReport(ρ={Rho:F2}, Q={QueriesSampled}, " +
+            $"L0[ηcur={EtaCurL0:F4} ηpool={EtaPoolL0:F4} η3hop={EtaDeepL0:F4} gap={GapL0:F4} 3hopG={DeepGainL0:F4}], " +
+            $"Up[ηcur={EtaCurUp:F4} ηpool={EtaPoolUp:F4} η3hop={EtaDeepUp:F4} gap={GapUpper:F4} 3hopG={DeepGainUp:F4}])";
+    }
+
+    public static DeepPoolCeilingReport MeasureDeepPoolCeiling(
+        LowLevelTransaction llt,
+        Slice name,
+        ReadOnlySpan<byte> queriesBlob,
+        int queryCount,
+        float rho)
+    {
+        if (rho <= 0f || rho >= 1f)
+            throw new ArgumentOutOfRangeException(nameof(rho), rho, "rho must be in (0, 1)");
+
+        var searchState = new SearchState(llt, name);
+        if (searchState.IsEmpty)
+            return new DeepPoolCeilingReport(rho, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+
+        int vectorSizeBytes = searchState.Options.VectorSizeBytes;
+        if (queriesBlob.Length != queryCount * vectorSizeBytes)
+            throw new ArgumentException(
+                $"queriesBlob length {queriesBlob.Length} does not match queryCount {queryCount} * vectorSizeBytes {vectorSizeBytes}");
+
+        long l0Visits = 0, l0Cur = 0, l0Pool = 0, l0Deep = 0;
+        long upVisits = 0, upCur = 0, upPool = 0, upDeep = 0;
+
+        var poolHash = new HashSet<int>();
+        // Track the 2-hop boundary (the w nodes added during 2-hop expansion) so 3-hop
+        // can expand only the newly-added frontier.
+        var twoHopFrontier = new List<int>(256);
+
+        for (int q = 0; q < queryCount; q++)
+        {
+            var query = queriesBlob.Slice(q * vectorSizeBytes, vectorSizeBytes);
+
+            int currentIdx = searchState.GetNodeIndexById(EntryPointId);
+            float currentDist = searchState.Distance(query, -1, currentIdx);
+
+            for (int level = searchState.Options.MaxLevel; level >= 0; level--)
+            {
+                while (true)
+                {
+                    ref var node = ref searchState.GetNodeByIndex(currentIdx);
+                    if (node.EdgesPerLevel.Count <= level)
+                        break;
+
+                    ref var edges = ref node.EdgesPerLevel[level];
+
+                    bool coveredCur = false;
+                    bool coveredPool = false;
+                    bool coveredDeep = false;
+                    int bestEdgeIdx = -1;
+                    float bestDist = currentDist;
+                    float witnessCeiling = rho * currentDist;
+
+                    for (int i = 0; i < edges.Count; i++)
+                    {
+                        int neighborIdx = searchState.GetNodeIndexById(edges[i]);
+                        float d = searchState.Distance(query, -1, neighborIdx);
+                        if (d <= witnessCeiling)
+                            coveredCur = true;
+                        if (d < bestDist)
+                        {
+                            bestDist = d;
+                            bestEdgeIdx = neighborIdx;
+                        }
+                    }
+
+                    if (coveredCur)
+                    {
+                        coveredPool = true;
+                        coveredDeep = true;
+                    }
+                    else
+                    {
+                        poolHash.Clear();
+                        twoHopFrontier.Clear();
+                        poolHash.Add(currentIdx);
+                        for (int i = 0; i < edges.Count; i++)
+                            poolHash.Add(searchState.GetNodeIndexById(edges[i]));
+
+                        // 2-hop forward expansion.
+                        for (int i = 0; i < edges.Count && coveredPool == false; i++)
+                        {
+                            int v = searchState.GetNodeIndexById(edges[i]);
+                            ref var vNode = ref searchState.GetNodeByIndex(v);
+                            if (vNode.EdgesPerLevel.Count <= level)
+                                continue;
+                            ref var vEdges = ref vNode.EdgesPerLevel[level];
+                            for (int j = 0; j < vEdges.Count; j++)
+                            {
+                                int w = searchState.GetNodeIndexById(vEdges[j]);
+                                if (poolHash.Add(w) == false)
+                                    continue;
+                                twoHopFrontier.Add(w);
+                                float dw = searchState.Distance(query, -1, w);
+                                if (dw <= witnessCeiling)
+                                {
+                                    coveredPool = true;
+                                    break;
+                                }
+                            }
+                        }
+                        // If 2-hop didn't terminate covered, finish building the frontier
+                        // (the loop above may have broken early). For correctness with
+                        // 3-hop, we need the full 2-hop frontier set even on early hit;
+                        // but on early hit coveredDeep follows coveredPool so skip.
+
+                        if (coveredPool)
+                        {
+                            coveredDeep = true;
+                        }
+                        else
+                        {
+                            // 3-hop forward: expand each member of twoHopFrontier once.
+                            // poolHash already contains 1-hop + 2-hop, so additions here
+                            // are strictly new (3-hop-only) candidates.
+                            for (int i = 0; i < twoHopFrontier.Count && coveredDeep == false; i++)
+                            {
+                                int w = twoHopFrontier[i];
+                                ref var wNode = ref searchState.GetNodeByIndex(w);
+                                if (wNode.EdgesPerLevel.Count <= level)
+                                    continue;
+                                ref var wEdges = ref wNode.EdgesPerLevel[level];
+                                for (int k = 0; k < wEdges.Count; k++)
+                                {
+                                    int x = searchState.GetNodeIndexById(wEdges[k]);
+                                    if (poolHash.Add(x) == false)
+                                        continue;
+                                    float dx = searchState.Distance(query, -1, x);
+                                    if (dx <= witnessCeiling)
+                                    {
+                                        coveredDeep = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (level == 0)
+                    {
+                        l0Visits++;
+                        if (coveredCur)  l0Cur++;
+                        if (coveredPool) l0Pool++;
+                        if (coveredDeep) l0Deep++;
+                    }
+                    else
+                    {
+                        upVisits++;
+                        if (coveredCur)  upCur++;
+                        if (coveredPool) upPool++;
+                        if (coveredDeep) upDeep++;
+                    }
+
+                    if (bestEdgeIdx == -1)
+                        break;
+
+                    currentIdx = bestEdgeIdx;
+                    currentDist = bestDist;
+                }
+            }
+        }
+
+        return new DeepPoolCeilingReport(
+            rho, queryCount,
+            l0Visits, l0Cur, l0Pool, l0Deep,
+            upVisits, upCur, upPool, upDeep);
+    }
+
+    public static DeepPoolCeilingReport MeasureDeepPoolCeiling(LowLevelTransaction llt, string name, ReadOnlySpan<byte> queriesBlob, int queryCount, float rho)
+    {
+        using (Slice.From(llt.Allocator, name, out var slice))
+            return MeasureDeepPoolCeiling(llt, slice, queriesBlob, queryCount, rho);
+    }
+
     public static void RenderAndShow(LowLevelTransaction llt, string name, Span<byte> vector)
     {
         using (Slice.From(llt.Allocator, name, out var slice))
