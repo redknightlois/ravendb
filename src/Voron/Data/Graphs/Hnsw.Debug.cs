@@ -1542,6 +1542,11 @@ public unsafe partial class Hnsw
         // Pass 1: collect (u, q, d, covered) tuples for L0 visits only.
 
         var l0NodeVisits = new Dictionary<int, List<(int qIdx, float dUQ, bool covered)>>();
+        // §3 reservoir sampling Algorithm R: per-node count of total samples seen
+        // (independent of capacity). When seen > cap, replacement probability is
+        // cap/seen and a uniformly-random slot in [0, cap) is overwritten.
+        var l0NodeSeen = new Dictionary<int, int>();
+        var reservoirRng = reservoirCapPerNode > 0 ? new Random(0x5e7e_4011) : null;
 
         long l0Visits = 0;
         long l0UncoveredPre = 0;
@@ -1595,13 +1600,19 @@ public unsafe partial class Hnsw
                         if (reservoirCapPerNode <= 0 || lst.Count < reservoirCapPerNode)
                         {
                             lst.Add((q, currentDist, coveredCur));
+                            if (reservoirCapPerNode > 0)
+                                l0NodeSeen[u] = lst.Count;
                         }
                         else
                         {
-                            // Replace random slot with prob cap/(seen+1). seen is approximated by
-                            // q-index (deterministic and monotone within this descent walk).
-                            int slot = q % reservoirCapPerNode;
-                            lst[slot] = (q, currentDist, coveredCur);
+                            // Algorithm R: with the k-th excess sample (k >= cap), replace a
+                            // uniformly-random slot with probability cap/(seen+1). seen is the
+                            // per-node sample count tracked in l0NodeSeen, not the global q index.
+                            int seen = l0NodeSeen[u] + 1;
+                            l0NodeSeen[u] = seen;
+                            int draw = reservoirRng.Next(seen);
+                            if (draw < reservoirCapPerNode)
+                                lst[draw] = (q, currentDist, coveredCur);
                         }
                     }
 
