@@ -24,7 +24,16 @@ public partial class Hnsw
             public ExactSearcher(SearchState searchState, Memory<byte> vector, bool hasFilterMatch, int numberOfCandidates, ContextBoundNativeList<long>? nodesToScan)
             {
                 _searchState = searchState;
-                _vector = vector;
+                if (UnitNormalizeIndex && searchState.Options.SimilarityMethod == SimilarityMethod.CosineSimilaritySingles)
+                {
+                    var normalized = new byte[vector.Length];
+                    NormalizeToUnit(vector.Span, normalized);
+                    _vector = normalized;
+                }
+                else
+                {
+                    _vector = vector;
+                }
                 _hasFilterMatch = hasFilterMatch;
                 PortableExceptions.ThrowIf<NotSupportedException>(_searchState.Options.CountOfVectors >= int.MaxValue && hasFilterMatch, $"Cannot have more than {int.MaxValue} vectors and filter match");
                 

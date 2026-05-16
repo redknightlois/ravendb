@@ -188,7 +188,7 @@ public unsafe partial class Hnsw
             Options = Unsafe.Read<Options>(options);
             SimilarityCalc = Options.SimilarityMethod switch
             {
-                SimilarityMethod.CosineSimilaritySingles => &CosineDistanceSingles,
+                SimilarityMethod.CosineSimilaritySingles => UnitNormalizeIndex ? &CosineDistanceSinglesUnitNormalized : &CosineDistanceSingles,
                 SimilarityMethod.CosineSimilarityI8 => &CosineDistanceI8,
                 SimilarityMethod.HammingDistance => &HammingDistance,
                 _ => throw new ArgumentOutOfRangeException(nameof(Options.SimilarityMethod), Options.SimilarityMethod, null)
@@ -830,6 +830,19 @@ public unsafe partial class Hnsw
                 vector.Length != _searchState.Options.VectorSizeBytes,
                 $"Vector size {vector.Length} does not match expected size: {_searchState.Options.VectorSizeBytes}");
 
+            // Unit-normalize cosine-singles inputs into a scratch buffer so the stored
+            // vector has |v| = 1. Pure-dot cosine kernel then works without per-call
+            // magnitude recomputation. Hash + storage use the normalized form so dedup
+            // is on the unit-direction (same direction → same hash, regardless of
+            // input magnitude).
+            ByteString normalizedBuffer = default;
+            if (UnitNormalizeIndex && _searchState.Options.SimilarityMethod == SimilarityMethod.CosineSimilaritySingles)
+            {
+                _searchState.Llt.Allocator.Allocate(vector.Length, out normalizedBuffer);
+                NormalizeToUnit(vector, normalizedBuffer.ToSpan());
+                vector = normalizedBuffer.ToReadOnlySpan();
+            }
+
             var hashBuffer = ComputeHashFor(vector);
             ref (ByteString Hash, int NodeIndex, NativeList<long> PostingList) postingList = ref CollectionsMarshal.GetValueRefOrAddDefault(_vectorHashCache, hashBuffer, out var exists);
             if (exists)
@@ -838,6 +851,8 @@ public unsafe partial class Hnsw
                 ref var l = ref postingList.PostingList;
                 l.Add(_searchState.Llt.Allocator, entryId);
                 _searchState.Llt.Allocator.Release(ref hashBuffer);
+                if (normalizedBuffer.HasValue)
+                    _searchState.Llt.Allocator.Release(ref normalizedBuffer);
                 return postingList.Hash;
             }
 
@@ -849,6 +864,9 @@ public unsafe partial class Hnsw
                 vectorId = (long)vectorEntryId;
                 _vectorsByHash.Add(vectorHash, vectorId);
             }
+
+            if (normalizedBuffer.HasValue)
+                _searchState.Llt.Allocator.Release(ref normalizedBuffer);
 
             if (_nodesByVectorId.TryGetValue(vectorId, out var nodeId))
             {
@@ -1152,40 +1170,58 @@ public unsafe partial class Hnsw
         return new Registration(llt, name, random);
     }
     
+    // Normalize the caller's query bytes when the index is stored unit-normalized.
+    // Returns either a fresh normalized copy or the original Memory if the flag is
+    // off / similarity isn't cosine-singles. Done once per public entry so all the
+    // downstream Distance() calls see |q| = 1, matching the stored-vector invariant.
+    private static Memory<byte> NormalizeQueryForUnitIndex(SearchState searchState, Memory<byte> vector)
+    {
+        if (UnitNormalizeIndex == false)
+            return vector;
+        if (searchState.Options.SimilarityMethod != SimilarityMethod.CosineSimilaritySingles)
+            return vector;
+        var normalized = new byte[vector.Length];
+        NormalizeToUnit(vector.Span, normalized);
+        return normalized;
+    }
+
     public static VectorSearchRetriever ExactNearest(LowLevelTransaction llt, Slice name, int numberOfCandidates, Memory<byte> vector, float minimumSimilarity, bool hasFilterMatch, ContextBoundNativeList<long>? nodesToScan = null)
     {
         var searchState = new SearchState(llt, name);
+        vector = NormalizeQueryForUnitIndex(searchState, vector);
         var results = searchState.ExactSearch(vector, hasFilterMatch, numberOfCandidates, nodesToScan);
         return new VectorSearchRetriever(searchState,  results, vector, minimumSimilarity);
     }
 
     public static VectorSearchRetriever ApproximateFilteredNearest<TEnumerator>(LowLevelTransaction llt, Slice name, int numberOfCandidates, Memory<byte> vector, float minimumSimilarity, TEnumerator nodesToProbe)
-     where TEnumerator : IEnumerator<long> 
+     where TEnumerator : IEnumerator<long>
     {
         var searchState = new SearchState(llt, name);
+        vector = NormalizeQueryForUnitIndex(searchState, vector);
         var startingPointsIndexes = new ContextBoundNativeList<int>(llt.Allocator);
         var candidates = new ContextBoundNativeList<int>(llt.Allocator);
         candidates.EnsureCapacityFor(searchState.Options.MaxLevel + 1);
 
         if (searchState.Options.CountOfVectors == 0)
             return new VectorSearchRetriever(searchState, searchState.EmptySearch(), vector, minimumSimilarity);
-        
+
         searchState.SearchFilteredNearest(ref startingPointsIndexes, nodesToProbe, numberOfCandidates, 16);
         candidates.Clear();
         var nearestEdgesSearch = searchState.NearestSearch(startingPointsIndexes, vector, 0, numberOfCandidates, candidates,
             SearchState.NearestEdgesFlags.StartingPointAsEdge | SearchState.NearestEdgesFlags.FilterNodesWithEmptyPostingLists);
         return new VectorSearchRetriever(searchState, nearestEdgesSearch, vector, minimumSimilarity);
     }
-    
+
     public static VectorSearchRetriever ApproximateNearest(LowLevelTransaction llt, Slice name, int numberOfCandidates, Memory<byte> vector, float minimumSimilarity, bool hasFilterMatch = false)
     {
         var searchState = new SearchState(llt, name);
+        vector = NormalizeQueryForUnitIndex(searchState, vector);
         var nearestNodesByLevel = new ContextBoundNativeList<int>(llt.Allocator);
         nearestNodesByLevel.EnsureCapacityFor(searchState.Options.MaxLevel + 1);
 
         if (searchState.Options.CountOfVectors == 0)
             return new VectorSearchRetriever(searchState, searchState.EmptySearch(), vector, minimumSimilarity);
-        
+
         searchState.SearchNearestAcrossLevels(vector.Span, -1, searchState.Options.MaxLevel, ref nearestNodesByLevel);
         var nearest = nearestNodesByLevel[0];
         nearestNodesByLevel.Clear();

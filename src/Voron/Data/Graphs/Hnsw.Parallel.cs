@@ -28,6 +28,15 @@ public partial class Hnsw
     /// </summary>
     internal static bool UseLegacyHeuristic = ReadLegacyHeuristicEnv();
 
+    // Unit-normalize all index vectors at registration time when the similarity is
+    // cosine-singles. Turns the cosine kernel into a pure `1 - <a,b>` (no magnitude
+    // recomputation, no division). Process-wide opt-in via RAVEN_HNSW_UNIT_NORMALIZE=1.
+    // Both Register() and search query entry points normalize incoming vectors when
+    // this is on, so dot products are valid cosine similarities directly.
+    internal static bool UnitNormalizeIndex =
+        Environment.GetEnvironmentVariable("RAVEN_HNSW_UNIT_NORMALIZE") is { } _un &&
+        (_un == "1" || string.Equals(_un, "true", StringComparison.OrdinalIgnoreCase));
+
     // Diagnostic counters for DoWorkApolloniusCover wall breakdown. Accumulated as
     // Stopwatch ticks, summed across all parallel cover calls in a process. Tests
     // read these to compute fractions; nothing in the hot path touches them when

@@ -40,7 +40,18 @@ public partial class Hnsw
                 bool hasFilterMatch)
             {
                 _searchState = searchState;
-                _vector = vector;
+                // Match the index-side invariant: when vectors are stored unit-normalized,
+                // queries must be unit-normalized too so dot products are valid cosine values.
+                if (UnitNormalizeIndex && searchState.Options.SimilarityMethod == SimilarityMethod.CosineSimilaritySingles)
+                {
+                    var normalized = new byte[vector.Length];
+                    NormalizeToUnit(vector.Span, normalized);
+                    _vector = normalized;
+                }
+                else
+                {
+                    _vector = vector;
+                }
                 _level = level;
                 NumberOfCandidates = numberOfCandidates;
 

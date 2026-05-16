@@ -26,6 +26,36 @@ public partial class Hnsw
         return Functions.CosineDistance(aSingles, bSingles);
     }
 
+    // Assumes both inputs are unit-normalized (|a| = |b| = 1). Then
+    //   cosine_distance(a, b) = 1 - <a, b> / (|a||b|) = 1 - <a, b>.
+    // Skipping the per-call magnitude recomputation removes 2 self-dots and a divide
+    // versus CosineDistanceSingles. Used when Hnsw.UnitNormalizeIndex is on; both
+    // Register() and search-query entry points enforce the |x|=1 invariant.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static float CosineDistanceSinglesUnitNormalized(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b)
+    {
+        var aSingles = MemoryMarshal.Cast<byte, float>(a);
+        var bSingles = MemoryMarshal.Cast<byte, float>(b);
+        return 1f - TensorPrimitives.Dot<float>(aSingles, bSingles);
+    }
+
+    // Normalize a float-vector encoded as bytes to unit L2 length, writing the result
+    // into `dst` (which must be the same length as `src`). No-op when |src| ≈ 0.
+    internal static void NormalizeToUnit(ReadOnlySpan<byte> src, Span<byte> dst)
+    {
+        Debug.Assert(src.Length == dst.Length, "src/dst length mismatch");
+        var s = MemoryMarshal.Cast<byte, float>(src);
+        var d = MemoryMarshal.Cast<byte, float>(dst);
+        float sqMag = TensorPrimitives.Dot<float>(s, s);
+        if (sqMag <= float.Epsilon)
+        {
+            src.CopyTo(dst);
+            return;
+        }
+        float inv = 1f / MathF.Sqrt(sqMag);
+        TensorPrimitives.Multiply(s, inv, d);
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static float CosineDistanceI8(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b)
     {
