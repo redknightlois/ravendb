@@ -1512,6 +1512,7 @@ public unsafe partial class Hnsw
         float betaL0,
         bool applyMutations = false,
         SearchState reuseSearchState = null,
+        int reservoirCapPerNode = 0, // §3 trace reservoir cap (0 = unbounded)
         int targetLevel = 0,
         int? protectedOverride = null)
     {
@@ -1589,7 +1590,19 @@ public unsafe partial class Hnsw
                             lst = new List<(int, float, bool)>(4);
                             l0NodeVisits[u] = lst;
                         }
-                        lst.Add((q, currentDist, coveredCur));
+                        // §3 trace reservoir: cap per-node samples to reservoirCapPerNode using
+                        // uniform reservoir sampling (Algorithm R). Cap=0 disables → unbounded list.
+                        if (reservoirCapPerNode <= 0 || lst.Count < reservoirCapPerNode)
+                        {
+                            lst.Add((q, currentDist, coveredCur));
+                        }
+                        else
+                        {
+                            // Replace random slot with prob cap/(seen+1). seen is approximated by
+                            // q-index (deterministic and monotone within this descent walk).
+                            int slot = q % reservoirCapPerNode;
+                            lst[slot] = (q, currentDist, coveredCur);
+                        }
                     }
 
                     if (bestEdgeIdx == -1)
@@ -1981,10 +1994,11 @@ public unsafe partial class Hnsw
             proposedSwaps, rejectedByHoeffding, rejectedBySpread);
     }
 
-    public static L0OneSwapSimulationReport SimulateL0OneSwapRepair(LowLevelTransaction llt, string name, ReadOnlySpan<byte> queriesBlob, int queryCount, float rho, float betaL0, bool applyMutations = false, SearchState reuseSearchState = null, int targetLevel = 0, int? protectedOverride = null)
+    public static L0OneSwapSimulationReport SimulateL0OneSwapRepair(LowLevelTransaction llt, string name, ReadOnlySpan<byte> queriesBlob, int queryCount, float rho, float betaL0, bool applyMutations = false, SearchState reuseSearchState = null, int targetLevel = 0, int? protectedOverride = null, int reservoirCapPerNode = 0)
     {
         using (Slice.From(llt.Allocator, name, out var slice))
-            return SimulateL0OneSwapRepair(llt, slice, queriesBlob, queryCount, rho, betaL0, applyMutations, reuseSearchState, targetLevel, protectedOverride);
+            return SimulateL0OneSwapRepair(llt, slice, queriesBlob, queryCount, rho, betaL0, applyMutations, reuseSearchState,
+                reservoirCapPerNode: reservoirCapPerNode, targetLevel: targetLevel, protectedOverride: protectedOverride);
     }
 
     /// <summary>
@@ -1996,12 +2010,14 @@ public unsafe partial class Hnsw
     public static L0OneSwapSimulationReport SimulateUpperLayerOneSwapRepair(
         LowLevelTransaction llt, Slice name, ReadOnlySpan<byte> queriesBlob, int queryCount,
         int level, float rho = 0.95f, float betaL = 2.0f,
-        bool applyMutations = false, SearchState reuseSearchState = null)
+        bool applyMutations = false, SearchState reuseSearchState = null,
+        int reservoirCapPerNode = 0)
     {
         if (level < 1)
             throw new ArgumentOutOfRangeException(nameof(level), level, "upper-layer repair requires level >= 1; use SimulateL0OneSwapRepair for L0");
         return SimulateL0OneSwapRepair(llt, name, queriesBlob, queryCount, rho, betaL,
-            applyMutations, reuseSearchState, targetLevel: level, protectedOverride: 2);
+            applyMutations, reuseSearchState,
+            reservoirCapPerNode: reservoirCapPerNode, targetLevel: level, protectedOverride: 2);
     }
 
     public static void RenderAndShow(LowLevelTransaction llt, string name, Span<byte> vector)

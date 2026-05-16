@@ -94,6 +94,16 @@ public partial class Hnsw
         Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_GATE_POOL") is { } _pgv &&
         (_pgv == "1" || string.Equals(_pgv, "true", StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>
+    /// FRAMEWORK §3 per-node trace reservoir cap. When > 0, the simulator caps each
+    /// node's accumulated visits at this size, replacing earlier samples uniformly
+    /// (reservoir sampling). Keeps memory O(N × cap) instead of O(Q × visits) so the
+    /// gate can scale to 10M+. Env: RAVEN_HNSW_L0_RESERVOIR (default 0 = unbounded).
+    /// Recommended: 100 (50 train + 50 val per node) when Q is large.
+    /// </summary>
+    internal static int L0ReservoirCapPerNode =
+        int.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_RESERVOIR"), out var _rc) && _rc > 0 ? _rc : 0;
+
     // Unit-normalize all index vectors at registration time when the similarity is
     // cosine-singles. Turns the cosine kernel into a pure `1 - <a,b>` (no magnitude
     // recomputation, no division). Process-wide opt-in via RAVEN_HNSW_UNIT_NORMALIZE=1.
@@ -469,7 +479,8 @@ public partial class Hnsw
                 var dryRun = SimulateL0OneSwapRepair(
                     _searchState.Llt, _searchState.Tree.Name, queriesBlob, qActual,
                     rho: Hnsw.L0RepairRho, betaL0: Hnsw.L0RepairBeta,
-                    applyMutations: false, reuseSearchState: _searchState);
+                    applyMutations: false, reuseSearchState: _searchState,
+                    reservoirCapPerNode: Hnsw.L0ReservoirCapPerNode);
                 const double delta = 0.01, gMin = 0.005;
                 double threshold = Math.Sqrt(2.0 * Math.Log(1.0 / delta) / Math.Max(1, qActual)) + gMin;
                 if (dryRun.EtaGain <= threshold)
@@ -483,7 +494,8 @@ public partial class Hnsw
             var report = SimulateL0OneSwapRepair(
                 _searchState.Llt, _searchState.Tree.Name, queriesBlob, qActual,
                 rho: Hnsw.L0RepairRho, betaL0: Hnsw.L0RepairBeta,
-                applyMutations: true, reuseSearchState: _searchState);
+                applyMutations: true, reuseSearchState: _searchState,
+                reservoirCapPerNode: Hnsw.L0ReservoirCapPerNode);
             Hnsw.L0RepairSwapsApplied += report.TotalSwapsApplied;
 
             sw.Stop();
@@ -533,7 +545,8 @@ public partial class Hnsw
                 var report = SimulateUpperLayerOneSwapRepair(
                     _searchState.Llt, _searchState.Tree.Name, queriesBlob, qActual,
                     level: level, rho: Hnsw.L0RepairRho, betaL: Hnsw.UpperLayerRepairBeta,
-                    applyMutations: true, reuseSearchState: _searchState);
+                    applyMutations: true, reuseSearchState: _searchState,
+                    reservoirCapPerNode: Hnsw.L0ReservoirCapPerNode);
                 Hnsw.UpperLayerRepairSwapsApplied += report.TotalSwapsApplied;
             }
 
