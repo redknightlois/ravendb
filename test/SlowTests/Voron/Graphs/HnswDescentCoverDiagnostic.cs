@@ -120,6 +120,56 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
     }
 
     [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void MeasureL0RepairFeasibility_OnApolloniusSelector_ReportsValidCounts()
+    {
+        // FRAMEWORK §6 / §15.10: feasible ⊆ poolHasWitness ⊆ uncovered ⊆ visits.
+        const int vectorSize = 32;
+        const int vectorSizeInBytes = vectorSize * sizeof(float);
+        const int numberOfEntries = 1000;
+        const int numberOfQueries = 100;
+        const float rho = 0.85f;
+        const float betaL0 = 1.50f;
+
+        var random = new Random(42);
+        var vectors = new float[numberOfEntries][];
+        for (int i = 0; i < numberOfEntries; i++)
+            vectors[i] = RandomUnitVector(random, vectorSize);
+        var queries = new float[numberOfQueries][];
+        for (int i = 0; i < numberOfQueries; i++)
+            queries[i] = RandomUnitVector(random, vectorSize);
+
+        using var _ = Slice.From(Allocator, nameof(MeasureL0RepairFeasibility_OnApolloniusSelector_ReportsValidCounts), out var treeName);
+        using (var wTx = Env.WriteTransaction())
+        {
+            Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: 12, numberOfCandidates: 16, VectorEmbeddingType.Single);
+            using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
+            {
+                for (int i = 0; i < numberOfEntries; i++)
+                    registration.Register(i + 1, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                registration.Commit(CancellationToken.None);
+            }
+            wTx.Commit();
+        }
+
+        Hnsw.L0RepairFeasibilityReport report;
+        using (var rTx = Env.ReadTransaction())
+        {
+            var queryBuffer = new byte[numberOfQueries * vectorSizeInBytes];
+            for (int i = 0; i < numberOfQueries; i++)
+                MemoryMarshal.Cast<float, byte>(queries[i]).CopyTo(queryBuffer.AsSpan(i * vectorSizeInBytes));
+            report = Hnsw.MeasureL0RepairFeasibility(rTx.LowLevelTransaction, treeName, queryBuffer, numberOfQueries, rho, betaL0);
+        }
+
+        Output.WriteLine(report.ToString());
+        Assert.Equal(numberOfQueries, report.QueriesSampled);
+        Assert.True(report.L0Visits > 0);
+        Assert.True(report.L0UncoveredWithFeasibleCandidate <= report.L0UncoveredWithPoolWitness);
+        Assert.True(report.L0UncoveredWithPoolWitness <= report.L0Uncovered);
+        Assert.True(report.L0Uncovered <= report.L0Visits);
+        Assert.InRange(report.BoundSurvivalRatio, 0.0, 1.0);
+    }
+
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
     public void MeasureDeepPoolCeiling_OnApolloniusSelector_ReportsValid3HopChain()
     {
         // FRAMEWORK §15.5: 3-hop pool ⊇ 2-hop pool ⊇ direct neighbours, so monotonic:
@@ -2000,6 +2050,23 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         // yield. Small g → repair cannot help, problem is candidate generation.
         // The enriched variant (§15.5) also folds in reverse-neighbours R_ℓ(u) and
         // tests whether incoming-edge candidates lift the ceiling further.
+        // FRAMEWORK §6 / §15.10 L0 repair feasibility: sweep β_0 ∈ {1.10, 1.25, 1.50, 2.00}
+        // to see how aggressively the radial bound culls otherwise-valid pool witnesses.
+        // BoundSurvival = feasible / poolHasWitness. If survival is low even at β_0=2.0,
+        // pool witnesses systematically live far from u and L0 repair is dangerous.
+        Output.WriteLine("");
+        Output.WriteLine("L0 repair feasibility sweep (framework §6 / §15.10, ρ=0.95):");
+        Output.WriteLine($"{"engine",12}  {"β0",6}  {"uncov%",8}  {"poolHas%",10}  {"feasible%",11}  {"survival%",11}");
+        foreach (var beta in new[] { 1.10f, 1.25f, 1.50f, 2.00f })
+        {
+            using var slf = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_legacy", out var legacyNameF);
+            var fL = Hnsw.MeasureL0RepairFeasibility(rTx.LowLevelTransaction, legacyNameF, queryBuffer, numberOfQueries, 0.95f, beta);
+            using var saf = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_apollonius", out var apoNameF);
+            var fA = Hnsw.MeasureL0RepairFeasibility(rTx.LowLevelTransaction, apoNameF, queryBuffer, numberOfQueries, 0.95f, beta);
+            Output.WriteLine($"{"legacy",12}  {beta,6:F2}  {fL.FractionUncovered,8:P1}  {fL.FractionUncoveredPoolHas,10:P1}  {fL.FractionUncoveredFeasible,11:P1}  {fL.BoundSurvivalRatio,11:P1}");
+            Output.WriteLine($"{"apollonius",12}  {beta,6:F2}  {fA.FractionUncovered,8:P1}  {fA.FractionUncoveredPoolHas,10:P1}  {fA.FractionUncoveredFeasible,11:P1}  {fA.BoundSurvivalRatio,11:P1}");
+        }
+
         Output.WriteLine("");
         Output.WriteLine("Deep pool ceiling η_3hop vs η_pool (3-hop forward, framework §15.5):");
         Output.WriteLine($"{"ρ",6}  {"engine",12}  {"L0 ηcur",10}  {"L0 ηpool",10}  {"L0 η3hop",10}  {"L0 3hopG",10}  {"Up ηcur",10}  {"Up ηpool",10}  {"Up η3hop",10}  {"Up 3hopG",10}");

@@ -1072,6 +1072,188 @@ public unsafe partial class Hnsw
             return MeasureDeepPoolCeiling(llt, slice, queriesBlob, queryCount, rho);
     }
 
+    /// <summary>
+    /// FRAMEWORK §6 / §15.10 L0 repair feasibility diagnostic. Quantifies how many
+    /// uncovered L0 visits could be repaired by a one-swap that respects the §6
+    /// distance-inflation bound `D(u, v) ≤ β_0 · max_{s ∈ N_0(u)} D(u, s)`.
+    /// For each uncovered L0 (u, q) pair (η_cur fails), scans the 2-hop pool for
+    /// v such that:
+    ///   1. D(v, q) ≤ ρ · D(u, q)   (would be a ρ-witness, recall lever)
+    ///   2. v ∉ N_0(u)              (not already an edge)
+    ///   3. D(u, v) ≤ β_0 · max_{s ∈ N_0(u)} D(u, s)  (radial inflation bound)
+    /// Reports the fraction of uncovered visits with ≥1 feasible candidate. If this
+    /// fraction is small under tight β_0 (1.05–1.25), the distance bound itself is
+    /// blocking repair and §15.10 cannot help without recall-tradeoff (looser β).
+    /// </summary>
+    public readonly record struct L0RepairFeasibilityReport(
+        float Rho,
+        float BetaL0,
+        int QueriesSampled,
+        long L0Visits,
+        long L0Uncovered,
+        long L0UncoveredWithFeasibleCandidate,
+        long L0UncoveredWithPoolWitness)
+    {
+        public double FractionUncovered          => L0Visits == 0 ? 0.0 : (double)L0Uncovered / L0Visits;
+        public double FractionUncoveredFeasible  => L0Uncovered == 0 ? 0.0 : (double)L0UncoveredWithFeasibleCandidate / L0Uncovered;
+        public double FractionUncoveredPoolHas   => L0Uncovered == 0 ? 0.0 : (double)L0UncoveredWithPoolWitness / L0Uncovered;
+        /// <summary>How much of the pool-available headroom survives the §6 distance bound.</summary>
+        public double BoundSurvivalRatio         => L0UncoveredWithPoolWitness == 0 ? 0.0 : (double)L0UncoveredWithFeasibleCandidate / L0UncoveredWithPoolWitness;
+
+        public override string ToString() =>
+            $"L0RepairFeasibilityReport(ρ={Rho:F2}, β0={BetaL0:F2}, Q={QueriesSampled}, " +
+            $"L0Visits={L0Visits}, Uncovered={L0Uncovered} ({FractionUncovered:P1}), " +
+            $"PoolHasWitness={FractionUncoveredPoolHas:P1}, Feasible={FractionUncoveredFeasible:P1}, " +
+            $"BoundSurvival={BoundSurvivalRatio:P1})";
+    }
+
+    public static L0RepairFeasibilityReport MeasureL0RepairFeasibility(
+        LowLevelTransaction llt,
+        Slice name,
+        ReadOnlySpan<byte> queriesBlob,
+        int queryCount,
+        float rho,
+        float betaL0)
+    {
+        if (rho <= 0f || rho >= 1f)
+            throw new ArgumentOutOfRangeException(nameof(rho), rho, "rho must be in (0, 1)");
+        if (betaL0 < 1f)
+            throw new ArgumentOutOfRangeException(nameof(betaL0), betaL0, "betaL0 must be >= 1");
+
+        var searchState = new SearchState(llt, name);
+        if (searchState.IsEmpty)
+            return new L0RepairFeasibilityReport(rho, betaL0, 0, 0, 0, 0, 0);
+
+        int vectorSizeBytes = searchState.Options.VectorSizeBytes;
+        if (queriesBlob.Length != queryCount * vectorSizeBytes)
+            throw new ArgumentException(
+                $"queriesBlob length {queriesBlob.Length} does not match queryCount {queryCount} * vectorSizeBytes {vectorSizeBytes}");
+
+        long l0Visits = 0, l0Uncovered = 0, l0Feasible = 0, l0PoolWitness = 0;
+
+        var poolHash = new HashSet<int>();
+        var edgeIdx = new List<int>(32);
+
+        for (int q = 0; q < queryCount; q++)
+        {
+            var query = queriesBlob.Slice(q * vectorSizeBytes, vectorSizeBytes);
+
+            int currentIdx = searchState.GetNodeIndexById(EntryPointId);
+            float currentDist = searchState.Distance(query, -1, currentIdx);
+
+            for (int level = searchState.Options.MaxLevel; level >= 0; level--)
+            {
+                while (true)
+                {
+                    int u = currentIdx;
+                    ref var node = ref searchState.GetNodeByIndex(u);
+                    if (node.EdgesPerLevel.Count <= level)
+                        break;
+
+                    ref var edges = ref node.EdgesPerLevel[level];
+
+                    bool coveredCur = false;
+                    int bestEdgeIdx = -1;
+                    float bestDist = currentDist;
+                    float witnessCeiling = rho * currentDist;
+
+                    // Pass 1: direct neighbors. Snapshot edge indices for later use.
+                    edgeIdx.Clear();
+                    float maxEdgeDist = 0f;
+                    for (int i = 0; i < edges.Count; i++)
+                    {
+                        int neighborIdx = searchState.GetNodeIndexById(edges[i]);
+                        edgeIdx.Add(neighborIdx);
+                        float d = searchState.Distance(query, -1, neighborIdx);
+                        if (d <= witnessCeiling)
+                            coveredCur = true;
+                        if (d < bestDist)
+                        {
+                            bestDist = d;
+                            bestEdgeIdx = neighborIdx;
+                        }
+                    }
+
+                    // Feasibility check only at L0 and only on uncovered visits.
+                    if (level == 0)
+                    {
+                        l0Visits++;
+                        if (coveredCur)
+                        {
+                            // Already covered, skip feasibility analysis.
+                        }
+                        else
+                        {
+                            l0Uncovered++;
+
+                            // Compute max edge distance D(u, s) for the radial bound.
+                            maxEdgeDist = 0f;
+                            for (int i = 0; i < edgeIdx.Count; i++)
+                            {
+                                float duEdge = searchState.Distance(ReadOnlySpan<byte>.Empty, u, edgeIdx[i]);
+                                if (duEdge > maxEdgeDist)
+                                    maxEdgeDist = duEdge;
+                            }
+                            float radialCeiling = betaL0 * maxEdgeDist;
+
+                            // Walk 2-hop pool looking for: (witness for q) AND (radial bound).
+                            poolHash.Clear();
+                            poolHash.Add(u);
+                            for (int i = 0; i < edgeIdx.Count; i++)
+                                poolHash.Add(edgeIdx[i]);
+
+                            bool poolHasWitness = false;
+                            bool feasibleFound = false;
+                            for (int i = 0; i < edgeIdx.Count; i++)
+                            {
+                                int v = edgeIdx[i];
+                                ref var vNode = ref searchState.GetNodeByIndex(v);
+                                if (vNode.EdgesPerLevel.Count <= level)
+                                    continue;
+                                ref var vEdges = ref vNode.EdgesPerLevel[level];
+                                for (int j = 0; j < vEdges.Count; j++)
+                                {
+                                    int w = searchState.GetNodeIndexById(vEdges[j]);
+                                    if (poolHash.Add(w) == false)
+                                        continue;
+                                    float dwq = searchState.Distance(query, -1, w);
+                                    if (dwq > witnessCeiling)
+                                        continue;
+                                    poolHasWitness = true;
+                                    // Witness in pool — does it also satisfy the radial bound?
+                                    float duw = searchState.Distance(ReadOnlySpan<byte>.Empty, u, w);
+                                    if (duw <= radialCeiling)
+                                    {
+                                        feasibleFound = true;
+                                        break;
+                                    }
+                                }
+                                if (feasibleFound)
+                                    break;
+                            }
+                            if (poolHasWitness) l0PoolWitness++;
+                            if (feasibleFound)  l0Feasible++;
+                        }
+                    }
+
+                    if (bestEdgeIdx == -1)
+                        break;
+
+                    currentIdx = bestEdgeIdx;
+                    currentDist = bestDist;
+                }
+            }
+        }
+
+        return new L0RepairFeasibilityReport(rho, betaL0, queryCount, l0Visits, l0Uncovered, l0Feasible, l0PoolWitness);
+    }
+
+    public static L0RepairFeasibilityReport MeasureL0RepairFeasibility(LowLevelTransaction llt, string name, ReadOnlySpan<byte> queriesBlob, int queryCount, float rho, float betaL0)
+    {
+        using (Slice.From(llt.Allocator, name, out var slice))
+            return MeasureL0RepairFeasibility(llt, slice, queriesBlob, queryCount, rho, betaL0);
+    }
+
     public static void RenderAndShow(LowLevelTransaction llt, string name, Span<byte> vector)
     {
         using (Slice.From(llt.Allocator, name, out var slice))
