@@ -358,6 +358,12 @@ public unsafe partial class Hnsw
             return SimilarityCalc(src.ToSpan(), dst.ToSpan());
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public float Distance(ReadOnlySpan<byte> srcSpan, UnmanagedSpan dst)
+        {
+            return SimilarityCalc(srcSpan, dst.ToSpan());
+        }
+
         public float Distance(ReadOnlySpan<byte> vector, int fromIdx, int toIdx)
         {
             if (vector.IsEmpty)

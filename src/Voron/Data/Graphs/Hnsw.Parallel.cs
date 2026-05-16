@@ -360,6 +360,11 @@ public partial class Hnsw
             // greedy loop — sibling workers may grow _nodes concurrently.
             private readonly List<long> _indexVectorIds = [];
             private long _currentVectorId;
+            // Distance from `_src` to each candidate in `_vectors`, captured when the
+            // beam search drained `_nearestEdgesQ`. Lets DoWorkApolloniusCover skip the
+            // O(N) per-candidate distance-to-source recompute on new-node insertions.
+            // Empty list = caller didn't precompute; cover falls back to recomputing.
+            internal readonly List<float> _precomputedDistToSrc = [];
             private readonly PriorityQueue<int, float> _candidatesQ = new();
             private readonly PriorityQueue<int, float> _nearestEdgesQ = new();
             private ulong[] _visitedBitmap = [];
@@ -522,17 +527,25 @@ public partial class Hnsw
 
                         _candidatesQ.Clear();
                         _candidates.Clear();
-                        while (_nearestEdgesQ.TryDequeue(out var edgeId, out _))
+                        // Capture distances alongside ids so DoWorkApolloniusCover can reuse
+                        // them as `distToSrc` instead of recomputing N exact cosines.
+                        _precomputedDistToSrc.Clear();
+                        while (_nearestEdgesQ.TryDequeue(out var edgeId, out var negDist))
                         {
                             _candidates.Add(edgeId);
+                            _precomputedDistToSrc.Add(-negDist);
                         }
                         _candidates.Reverse();
+                        _precomputedDistToSrc.Reverse();
 
                         if (_candidates.Count > _searchState.Options.NumberOfEdges)
                         {
                             _indexes.Clear();
                             _vectors.Clear();
                             _indexVectorIds.Clear();
+                            // The parallel _precomputedDistToSrc[] matches _candidates[] index-by-index,
+                            // and _indexes is filled from _candidates in the same order, so the
+                            // alignment carries through directly into DoWorkApolloniusCover.
                             foreach (var candidate in _candidates)
                             {
                                 ref var cn = ref _searchState.GetNodeByIndex(candidate);
@@ -546,6 +559,12 @@ public partial class Hnsw
                             // previous preloading step and are operating purely in memory
                             _filterEdgesWorker.Reset(insertedVector, -1, level);
                             yield return _filterEdgesWorker;
+                        }
+                        else
+                        {
+                            // No cover invocation in this path; clear so the reverse-edge
+                            // filter call below doesn't accidentally consume stale distances.
+                            _precomputedDistToSrc.Clear();
                         }
                     }
 
@@ -581,6 +600,11 @@ public partial class Hnsw
                         _requiresEdgeFiltering.Add(edgeIdx);
                     }
 
+                    // Reverse-edge filtering operates against a different `vector` reference
+                    // than the new-node insertion, so the precomputed distances captured from
+                    // _nearestEdgesQ above do NOT apply here. Clear them so the cover
+                    // falls back to recomputing distToSrc against the correct source.
+                    _precomputedDistToSrc.Clear();
                     foreach (var edgeIdx in _requiresEdgeFiltering)
                     {
                         UnmanagedSpan vector;
@@ -674,7 +698,7 @@ public partial class Hnsw
                     if (Hnsw.UseLegacyHeuristic)
                         DoWorkLegacyRobustPrune(searchState, candidates, vectors, indexes, N);
                     else
-                        DoWorkApolloniusCover(searchState, candidates, vectors, indexes, N, runner.GlobalQuerySample, runner.NodeMagnitudes, runner.QuDotCache, runner.QuDotStride, indexVectorIds, currentVectorId);
+                        DoWorkApolloniusCover(searchState, candidates, vectors, indexes, N, runner.GlobalQuerySample, runner.NodeMagnitudes, runner.QuDotCache, runner.QuDotStride, indexVectorIds, currentVectorId, Owner._precomputedDistToSrc);
                 }
 
                 // True Apollonius cover faithful to Theorems 1, 7, 8, 9.
@@ -783,7 +807,7 @@ public partial class Hnsw
                 // λ_code hyperparameter — see Registration._envApolloLambda. Selector uses
                 // δ(v,q) ≤ λ_code · δ(u,q); chordal ρ_metric = √λ_code (FRAMEWORK §15).
 
-                private void DoWorkApolloniusCover(SearchState searchState, List<int> candidates, List<UnmanagedSpan> vectors, List<int> indexes, int N, UnmanagedSpan[] Qu, float[] nodeMagnitudes, float[] quDotCache, int quDotStride, List<long> indexVectorIds, long currentVectorId)
+                private void DoWorkApolloniusCover(SearchState searchState, List<int> candidates, List<UnmanagedSpan> vectors, List<int> indexes, int N, UnmanagedSpan[] Qu, float[] nodeMagnitudes, float[] quDotCache, int quDotStride, List<long> indexVectorIds, long currentVectorId, List<float> precomputedDistToSrc)
                 {
                     int M = searchState.Options.NumberOfEdges;
                     int Qm = Qu.Length;
@@ -792,12 +816,21 @@ public partial class Hnsw
                     long t0Total = prof ? Stopwatch.GetTimestamp() : 0;
                     long tStep = t0Total;
 
+                    // Witness gating: in dist-greedy mode (the default) all Q_u machinery —
+                    // thresholds, query magnitudes, cutoffs, JL projections, QuDotCache lookups —
+                    // produces values the greedy selection never reads. We compute them only
+                    // when the cover-gain greedy actually needs the witness bitmask.
+                    bool needWitness = _envGreedyByDist == false;
+
                     // λ · δ(u, q_k) thresholds for each q in Q_u. In the chordal metric this
                     // corresponds to a ρ_metric = √λ Apollonius cell; the inequality test
                     // and chosen candidates are identical, only the metric label changes.
                     Span<float> threshold = stackalloc float[64];
-                    for (int k = 0; k < Qm; k++)
-                        threshold[k] = _envApolloLambda * searchState.Distance(_src, Qu[k]);
+                    if (needWitness)
+                    {
+                        for (int k = 0; k < Qm; k++)
+                            threshold[k] = _envApolloLambda * searchState.Distance(_src, Qu[k]);
+                    }
 
                     // Witness bitmask per candidate. Bit k set iff candidate i covers q_k.
                     Span<ulong> witness = stackalloc ulong[N <= 1024 ? N : 0];
@@ -823,11 +856,20 @@ public partial class Hnsw
                         magVHeap = new float[N];
                         magV = magVHeap;
                     }
-                    // Witness only matters when the cover-gain greedy will consult it.
-                    // Under dist-greedy defaults the cover bits drive nothing, so we skip
-                    // the Qm·N inner dots and leave witness[i] = 0. magV is still required
-                    // by PassesAngularSpread, so its one-dot-per-i fill stays.
-                    bool needWitness = _envGreedyByDist == false;
+                    // distToSrc alloc hoisted above the witness loop so the dist-greedy
+                    // fast-cosine path can fuse `<v_i, src>` into the same i-loop that fills
+                    // magV[i] — saves N redundant `ToSpan + Cast` calls per cover and improves
+                    // L1 locality on vectors[i]. distToSrcFilled tracks whether the fused
+                    // loop populated it so the dedicated distToSrc loop below can skip work.
+                    Span<float> distToSrc = stackalloc float[N <= 1024 ? N : 0];
+                    float[] distToSrcHeap = null;
+                    if (distToSrc.Length == 0)
+                    {
+                        distToSrcHeap = new float[N];
+                        distToSrc = distToSrcHeap;
+                    }
+                    bool distToSrcFilled = false;
+                    // (needWitness declared above so the threshold loop can be gated.)
                     if (fastCosine)
                     {
                         // Cache q_k float byte spans + magnitudes + cutoffs.
@@ -842,16 +884,22 @@ public partial class Hnsw
                         unsafe
                         {
                             int dDim = 0;
-                            for (int k = 0; k < Qm; k++)
+                            // qMag/cutoff/qPtr/qLen are only read by the needWitness branch of the
+                            // per-candidate loop. In the default dist-greedy path the witness is
+                            // skipped entirely, so the Qm sqrt+dot+cutoff computation is dead work.
+                            if (needWitness)
                             {
-                                var qbytes = Qu[k].ToSpan();
-                                qPtr[k] = (IntPtr)Unsafe.AsPointer(ref MemoryMarshal.GetReference(qbytes));
-                                qLen[k] = qbytes.Length / sizeof(float);
-                                dDim = qLen[k];
-                                var qf = MemoryMarshal.Cast<byte, float>(qbytes);
-                                float magQ = MathF.Sqrt(TensorPrimitives.Dot<float>(qf, qf));
-                                qMag[k] = magQ;
-                                cutoff[k] = (1f - threshold[k]) * magQ;
+                                for (int k = 0; k < Qm; k++)
+                                {
+                                    var qbytes = Qu[k].ToSpan();
+                                    qPtr[k] = (IntPtr)Unsafe.AsPointer(ref MemoryMarshal.GetReference(qbytes));
+                                    qLen[k] = qbytes.Length / sizeof(float);
+                                    dDim = qLen[k];
+                                    var qf = MemoryMarshal.Cast<byte, float>(qbytes);
+                                    float magQ = MathF.Sqrt(TensorPrimitives.Dot<float>(qf, qf));
+                                    qMag[k] = magQ;
+                                    cutoff[k] = (1f - threshold[k]) * magQ;
+                                }
                             }
 
                             // JL witness sketch (§17). Project candidates and queries into
@@ -881,6 +929,21 @@ public partial class Hnsw
                             }
 
                             int magCacheLen = nodeMagnitudes?.Length ?? 0;
+                            // Reuse path: when the beam search already produced exact distances
+                            // for each candidate, skip the per-candidate <v_i, src> entirely.
+                            bool reuseBeamDists = needWitness == false
+                                && precomputedDistToSrc != null
+                                && precomputedDistToSrc.Count == N;
+                            // Fuse <v_i, src> into the magV loop in the default dist-greedy
+                            // path so we don't iterate vectors[] twice. Hoist srcF/magSrc once.
+                            ReadOnlySpan<float> srcFFused = default;
+                            float magSrcFused = 0f;
+                            bool fuseDistToSrc = needWitness == false && reuseBeamDists == false;
+                            if (fuseDistToSrc)
+                            {
+                                srcFFused = MemoryMarshal.Cast<byte, float>(_src.ToSpan());
+                                magSrcFused = MathF.Sqrt(TensorPrimitives.Dot<float>(srcFFused, srcFFused));
+                            }
                             for (int i = 0; i < N; i++)
                             {
                                 var vbytes = vectors[i].ToSpan();
@@ -905,6 +968,16 @@ public partial class Hnsw
                                     // inner loop entirely. magV[i] was filled above and is
                                     // what PassesAngularSpread needs.
                                     witness[i] = 0;
+                                    if (reuseBeamDists)
+                                    {
+                                        distToSrc[i] = precomputedDistToSrc[i];
+                                    }
+                                    else
+                                    {
+                                        // Fuse distToSrc so we don't reload vf in a second pass.
+                                        float dotSrc = TensorPrimitives.Dot<float>(srcFFused, vf);
+                                        distToSrc[i] = 1f - dotSrc / (magSrcFused * mv);
+                                    }
                                     continue;
                                 }
                                 if (useJl)
@@ -973,6 +1046,8 @@ public partial class Hnsw
                                 }
                                 witness[i] = bits;
                             }
+                            if (fuseDistToSrc || reuseBeamDists)
+                                distToSrcFilled = true;
                         }
                     }
                     else if (needWitness)
@@ -1007,29 +1082,27 @@ public partial class Hnsw
                     // Distance-to-source cache. Computed BEFORE kCapture so the priority-queue
                     // population reuses these distances instead of recomputing them — saves N
                     // redundant CosineDistance calls per cover invocation. distToSrc is also
-                    // used by the spread test during greedy and M-fill.
-                    Span<float> distToSrc = stackalloc float[N <= 1024 ? N : 0];
-                    float[] distToSrcHeap = null;
-                    if (distToSrc.Length == 0)
+                    // used by the spread test during greedy and M-fill. When the magV loop
+                    // already filled distToSrc (fastCosine && !needWitness path), skip the
+                    // recompute.
+                    if (distToSrcFilled == false)
                     {
-                        distToSrcHeap = new float[N];
-                        distToSrc = distToSrcHeap;
-                    }
-                    if (fastCosine)
-                    {
-                        var srcF = MemoryMarshal.Cast<byte, float>(_src.ToSpan());
-                        float magSrc = MathF.Sqrt(TensorPrimitives.Dot<float>(srcF, srcF));
-                        for (int i = 0; i < N; i++)
+                        if (fastCosine)
                         {
-                            var vf = MemoryMarshal.Cast<byte, float>(vectors[i].ToSpan());
-                            float dot = TensorPrimitives.Dot<float>(srcF, vf);
-                            distToSrc[i] = 1f - dot / (magSrc * magV[i]);
+                            var srcF = MemoryMarshal.Cast<byte, float>(_src.ToSpan());
+                            float magSrc = MathF.Sqrt(TensorPrimitives.Dot<float>(srcF, srcF));
+                            for (int i = 0; i < N; i++)
+                            {
+                                var vf = MemoryMarshal.Cast<byte, float>(vectors[i].ToSpan());
+                                float dot = TensorPrimitives.Dot<float>(srcF, vf);
+                                distToSrc[i] = 1f - dot / (magSrc * magV[i]);
+                            }
                         }
-                    }
-                    else
-                    {
-                        for (int i = 0; i < N; i++)
-                            distToSrc[i] = searchState.Distance(_src, vectors[i]);
+                        else
+                        {
+                            for (int i = 0; i < N; i++)
+                                distToSrc[i] = searchState.Distance(_src, vectors[i]);
+                        }
                     }
                     if (prof)
                     {
@@ -1401,14 +1474,50 @@ public partial class Hnsw
                     var nearestEdgesQ = Owner._nearestEdgesQ;
                     var candidatesQ = Owner._candidatesQ;
                     var lowerBound  = LowerBound;
-                    
+
                     int numberOfCandidates = searchState.Options.NumberOfCandidates;
+                    var vectorSpan = _vector.ToSpan();
+
+                    // Cached-norm cosine fast path: cosine distance = 1 - <a,b> / (|a||b|).
+                    // Compute |vector| once, look up |v_i| from runner.NodeMagnitudes, then
+                    // each candidate distance is 1 dot + 2 muls + 1 sub — versus the generic
+                    // CosineDistanceSingles path which internally re-derives both magnitudes.
+                    bool fastCosine = searchState.Options.SimilarityMethod == SimilarityMethod.CosineSimilaritySingles;
+                    ReadOnlySpan<float> srcF = default;
+                    float magSrc = 0f;
+                    float[] nodeMagnitudes = null;
+                    int magCacheLen = 0;
+                    if (fastCosine)
+                    {
+                        srcF = MemoryMarshal.Cast<byte, float>(vectorSpan);
+                        magSrc = MathF.Sqrt(TensorPrimitives.Dot<float>(srcF, srcF));
+                        nodeMagnitudes = runner.NodeMagnitudes;
+                        magCacheLen = nodeMagnitudes?.Length ?? 0;
+                    }
+
                     for (int i = 0; i < indexes.Count; i++)
                     {
                         var nextIndex = indexes[i];
-                        Debug.Assert(searchState.Nodes[nextIndex].EdgesPerLevel.Count > Level); 
-                   
-                        float nextDist = -searchState.Distance(_vector, vectors[i]);
+                        Debug.Assert(searchState.Nodes[nextIndex].EdgesPerLevel.Count > Level);
+
+                        float nextDist;
+                        if (fastCosine)
+                        {
+                            var vf = MemoryMarshal.Cast<byte, float>(vectors[i].ToSpan());
+                            float mv = (uint)nextIndex < (uint)magCacheLen ? nodeMagnitudes[nextIndex] : 0f;
+                            if (mv == 0f)
+                            {
+                                mv = MathF.Sqrt(TensorPrimitives.Dot<float>(vf, vf));
+                                if ((uint)nextIndex < (uint)magCacheLen)
+                                    nodeMagnitudes[nextIndex] = mv;
+                            }
+                            float dot = TensorPrimitives.Dot<float>(srcF, vf);
+                            nextDist = -(1f - dot / (magSrc * mv));
+                        }
+                        else
+                        {
+                            nextDist = -searchState.Distance(vectorSpan, vectors[i]);
+                        }
                         if (nearestEdgesQ.Count < numberOfCandidates)
                         {
                             candidatesQ.Enqueue(nextIndex, -nextDist);
@@ -1450,11 +1559,43 @@ public partial class Hnsw
                     var indexes = Owner._indexes;
                     var vectors = Owner._vectors;
                     var searchState = Owner._searchState;
-                    
+                    var fromSpan = _from.ToSpan();
+
+                    // Cached-norm cosine fast path (see ProcessEdgesWorker for details).
+                    bool fastCosine = searchState.Options.SimilarityMethod == SimilarityMethod.CosineSimilaritySingles;
+                    ReadOnlySpan<float> fromF = default;
+                    float magFrom = 0f;
+                    float[] nodeMagnitudes = null;
+                    int magCacheLen = 0;
+                    if (fastCosine)
+                    {
+                        fromF = MemoryMarshal.Cast<byte, float>(fromSpan);
+                        magFrom = MathF.Sqrt(TensorPrimitives.Dot<float>(fromF, fromF));
+                        nodeMagnitudes = runner.NodeMagnitudes;
+                        magCacheLen = nodeMagnitudes?.Length ?? 0;
+                    }
+
                     for (var i = 0; i < indexes.Count; i++)
                     {
                         var edgeIdx = indexes[i];
-                        var curDist = searchState.Distance(_from, vectors[i]);
+                        float curDist;
+                        if (fastCosine)
+                        {
+                            var vf = MemoryMarshal.Cast<byte, float>(vectors[i].ToSpan());
+                            float mv = (uint)edgeIdx < (uint)magCacheLen ? nodeMagnitudes[edgeIdx] : 0f;
+                            if (mv == 0f)
+                            {
+                                mv = MathF.Sqrt(TensorPrimitives.Dot<float>(vf, vf));
+                                if ((uint)edgeIdx < (uint)magCacheLen)
+                                    nodeMagnitudes[edgeIdx] = mv;
+                            }
+                            float dot = TensorPrimitives.Dot<float>(fromF, vf);
+                            curDist = 1f - dot / (magFrom * mv);
+                        }
+                        else
+                        {
+                            curDist = searchState.Distance(fromSpan, vectors[i]);
+                        }
                         if (curDist >= Distance || double.IsNaN(curDist))
                             continue;
                         Distance = curDist;
@@ -1671,16 +1812,29 @@ public partial class Hnsw
                 int cacheCapacity = _searchState.CreatedNodes + lazyHeadroom;
                 NodeMagnitudes = new float[cacheCapacity];
 
-                GlobalQuerySample = BuildGlobalQuerySample(_searchState, desired: 32);
-                QuDotStride = GlobalQuerySample.Length;
-                if (QuDotStride > 0)
+                // The Q_u sample + per-node dot cache only matter for the cover-greedy witness
+                // bitmask. In dist-greedy mode (the default) or legacy α-prune, none of it is
+                // read. At 10 M nodes the dot cache alone is ~1.28 GB (10M × 32 floats × 4 B).
+                bool quUnused = _envGreedyByDist || Hnsw.UseLegacyHeuristic;
+                if (quUnused)
                 {
-                    QuDotCache = new float[(long)cacheCapacity * QuDotStride];
-                    Array.Fill(QuDotCache, float.NaN);
+                    GlobalQuerySample = [];
+                    QuDotStride = 0;
+                    QuDotCache = Array.Empty<float>();
                 }
                 else
                 {
-                    QuDotCache = Array.Empty<float>();
+                    GlobalQuerySample = BuildGlobalQuerySample(_searchState, desired: 32);
+                    QuDotStride = GlobalQuerySample.Length;
+                    if (QuDotStride > 0)
+                    {
+                        QuDotCache = new float[(long)cacheCapacity * QuDotStride];
+                        Array.Fill(QuDotCache, float.NaN);
+                    }
+                    else
+                    {
+                        QuDotCache = Array.Empty<float>();
+                    }
                 }
 
                 for (int i = 0; i < activeTasksCount; i++)
@@ -1842,7 +1996,7 @@ public partial class Hnsw
             // The batch's Execute runs each WorkItem sequentially on a single worker thread, so the
             // ordering invariants the LLT-side drain depends on (in-flight LinkedList membership,
             // _completed counter) are unchanged — only the dispatch granularity shifts.
-            internal const int WorkItemBatchSize = 4;
+            internal const int WorkItemBatchSize = 8;
             private WorkItemBatch _pendingBatch;
             // Pool of batches recycled between LLT (rents on dispatch) and workers
             // (returns after Execute). Replaces ~7.5 M Gen0 allocations per build with
