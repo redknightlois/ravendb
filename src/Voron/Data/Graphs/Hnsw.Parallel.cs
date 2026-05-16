@@ -28,6 +28,48 @@ public partial class Hnsw
     /// </summary>
     internal static bool UseLegacyHeuristic = ReadLegacyHeuristicEnv();
 
+    /// <summary>
+    /// FRAMEWORK §15.10 — enable post-build L0 one-swap repair pass.
+    /// When true (and the apollonius selector is active), <see cref="Registration.Commit"/>
+    /// samples ~200 query vectors from the dataset, runs <see cref="SimulateL0OneSwapRepair"/>
+    /// with mutations applied to the in-flight SearchState, and the subsequent
+    /// PersistNode loop writes the mutated edges to Voron.
+    /// Toggled via RAVEN_HNSW_L0_REPAIR=1. Default off — Theorem 1 (no construction-time
+    /// guarantee on recall) means production use must layer a held-out canary on top.
+    /// </summary>
+    internal static bool EnableL0Repair =
+        Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_REPAIR") is { } _l0r &&
+        (_l0r == "1" || string.Equals(_l0r, "true", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// FRAMEWORK §6 radial bound for L0 repair. β₀ ∈ [1, ∞); 1.10 is conservative,
+    /// 1.50 maximizes feasibility per Sphere-1M diagnostic. Toggle via RAVEN_HNSW_L0_BETA.
+    /// </summary>
+    internal static float L0RepairBeta =
+        float.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_BETA"), out var _b) && _b >= 1f ? _b : 1.10f;
+
+    /// <summary>
+    /// Query sample size for the L0 repair pass. Toggle via RAVEN_HNSW_L0_Q.
+    /// </summary>
+    internal static int L0RepairQueryCount =
+        int.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_Q"), out var _q) && _q > 0 ? _q : 200;
+
+    /// <summary>
+    /// ρ for the L0 repair pass (λ = ρ² witness ceiling). Toggle via RAVEN_HNSW_L0_RHO.
+    /// </summary>
+    internal static float L0RepairRho =
+        float.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_RHO"), out var _r) && _r > 0f && _r < 1f ? _r : 0.95f;
+
+    /// <summary>
+    /// Number of L0 repair passes to run (single-pass is default). Multiple passes
+    /// re-sample queries and may catch additional regressions. Toggle via RAVEN_HNSW_L0_PASSES.
+    /// </summary>
+    internal static int L0RepairPasses =
+        int.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_PASSES"), out var _p) && _p > 0 ? _p : 1;
+
+    internal static long L0RepairSwapsApplied;
+    internal static long L0RepairPassDurationMs;
+
     // Unit-normalize all index vectors at registration time when the similarity is
     // cosine-singles. Turns the cosine kernel into a pure `1 - <a,b>` (no magnitude
     // recomputation, no division). Process-wide opt-in via RAVEN_HNSW_UNIT_NORMALIZE=1.
@@ -354,6 +396,54 @@ public partial class Hnsw
             int maxTasks = Math.Min(numberOfBatches, MaxConcurrentBatches);
             NodePlacementRunner runner = new(this, maxTasks, token);
             runner.Run();
+        }
+
+        // FRAMEWORK §15.10 — sample queries from the dataset, run the simulator with
+        // applyMutations=true on the in-flight SearchState. The PersistNode loop in
+        // Commit() writes the mutated EdgesPerLevel[0] back to Voron.
+        // Theorem 1 reminder: η-gain is NOT a recall guarantee. Production rollout must
+        // wrap this in a held-out canary that reverts if recall regresses.
+        private void ApplyL0OneSwapRepairPass(CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+
+            var nodes = _searchState.Nodes;
+            if (nodes.Length < 2) return;
+            int vectorSizeBytes = _searchState.Options.VectorSizeBytes;
+
+            // Sample query vectors from existing nodes (without replacement).
+            int qWant = Math.Min(Hnsw.L0RepairQueryCount, nodes.Length);
+            int seed = unchecked((int)0xA9011017) ^ (int)Hnsw.L0RepairSwapsApplied;
+            var rng = new Random(seed);
+            var picked = new HashSet<int>(qWant);
+            while (picked.Count < qWant)
+                picked.Add(rng.Next(nodes.Length));
+
+            var queryBuffer = new byte[qWant * vectorSizeBytes];
+            int qIdx = 0;
+            foreach (var nIdx in picked)
+            {
+                ref var n = ref _searchState.Nodes[nIdx];
+                if (n.NodeId == 0) continue; // unallocated slot — skip
+                var vec = n.GetVector(_searchState);
+                vec.Slice(0, vectorSizeBytes).CopyTo(queryBuffer.AsSpan(qIdx * vectorSizeBytes));
+                qIdx++;
+            }
+            int qActual = qIdx;
+            if (qActual == 0)
+                return;
+
+            var queriesBlob = queryBuffer.AsSpan(0, qActual * vectorSizeBytes);
+
+            var report = SimulateL0OneSwapRepair(
+                _searchState.Llt, _searchState.Tree.Name, queriesBlob, qActual,
+                rho: Hnsw.L0RepairRho, betaL0: Hnsw.L0RepairBeta,
+                applyMutations: true, reuseSearchState: _searchState);
+            Hnsw.L0RepairSwapsApplied += report.TotalSwapsApplied;
+
+            sw.Stop();
+            Hnsw.L0RepairPassDurationMs += sw.ElapsedMilliseconds;
         }
 
         private class NodePlacement(Registration parent, NodePlacementRunner runner)

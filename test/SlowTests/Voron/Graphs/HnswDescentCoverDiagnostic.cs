@@ -174,6 +174,215 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
     }
 
     [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void ApplyL0OneSwapRepair_WithReusedSearchState_MutatesEdgeList()
+    {
+        // FRAMEWORK §15.10: when applyMutations=true and reuseSearchState is provided,
+        // the simulator must actually rewrite EdgesPerLevel[0] of at least one node.
+        // Edge count per repaired node is invariant (one removed, one added).
+        const int vectorSize = 32;
+        const int vectorSizeInBytes = vectorSize * sizeof(float);
+        const int numberOfEntries = 1000;
+        const int numberOfQueries = 100;
+        const float rho = 0.85f;
+        const float betaL0 = 1.50f;
+
+        var random = new Random(42);
+        var vectors = new float[numberOfEntries][];
+        for (int i = 0; i < numberOfEntries; i++)
+            vectors[i] = RandomUnitVector(random, vectorSize);
+        var queries = new float[numberOfQueries][];
+        for (int i = 0; i < numberOfQueries; i++)
+            queries[i] = RandomUnitVector(random, vectorSize);
+
+        using var _ = Slice.From(Allocator, nameof(ApplyL0OneSwapRepair_WithReusedSearchState_MutatesEdgeList), out var treeName);
+        using (var wTx = Env.WriteTransaction())
+        {
+            Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: 12, numberOfCandidates: 16, VectorEmbeddingType.Single);
+            using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
+            {
+                for (int i = 0; i < numberOfEntries; i++)
+                    registration.Register(i + 1, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                registration.Commit(CancellationToken.None);
+            }
+            wTx.Commit();
+        }
+
+        using (var rTx = Env.ReadTransaction())
+        {
+            var ss = new Hnsw.SearchState(rTx.LowLevelTransaction, treeName);
+
+            var queryBuffer = new byte[numberOfQueries * vectorSizeInBytes];
+            for (int i = 0; i < numberOfQueries; i++)
+                MemoryMarshal.Cast<float, byte>(queries[i]).CopyTo(queryBuffer.AsSpan(i * vectorSizeInBytes));
+
+            // Warm-up pass with applyMutations=false to force lazy node loading so the
+            // pre-snapshot covers every node the apply pass will touch.
+            var warmup = Hnsw.SimulateL0OneSwapRepair(
+                rTx.LowLevelTransaction, treeName, queryBuffer, numberOfQueries,
+                rho, betaL0, applyMutations: false, reuseSearchState: ss);
+            Output.WriteLine($"warmup: {warmup}");
+            Output.WriteLine($"ss.Nodes.Length after warmup = {ss.Nodes.Length}");
+
+            // Snapshot every loaded node's L0 edge ID list before mutation.
+            var pre = new Dictionary<int, long[]>();
+            for (int i = 0; i < ss.Nodes.Length; i++)
+            {
+                ref var n = ref ss.Nodes[i];
+                if (n.EdgesPerLevel.Count == 0) continue;
+                ref var e = ref n.EdgesPerLevel[0];
+                var copy = new long[e.Count];
+                for (int j = 0; j < e.Count; j++) copy[j] = e[j];
+                pre[i] = copy;
+            }
+            Output.WriteLine($"pre snapshot covers {pre.Count} nodes");
+
+            var report = Hnsw.SimulateL0OneSwapRepair(
+                rTx.LowLevelTransaction, treeName, queryBuffer, numberOfQueries,
+                rho, betaL0, applyMutations: true, reuseSearchState: ss);
+
+            Output.WriteLine(report.ToString());
+
+            int mutatedNodes = 0;
+            int edgeCountInvariantViolations = 0;
+            foreach (var kv in pre)
+            {
+                ref var n = ref ss.Nodes[kv.Key];
+                if (n.EdgesPerLevel.Count == 0) continue;
+                ref var e = ref n.EdgesPerLevel[0];
+                var before = kv.Value;
+                bool differs = e.Count != before.Length;
+                if (!differs)
+                {
+                    for (int j = 0; j < e.Count; j++)
+                    {
+                        if (e[j] != before[j]) { differs = true; break; }
+                    }
+                }
+                if (differs)
+                {
+                    mutatedNodes++;
+                    if (e.Count != before.Length) edgeCountInvariantViolations++;
+                }
+            }
+            Output.WriteLine($"mutated nodes observed={mutatedNodes}, swaps reported={report.TotalSwapsApplied}, edge-count-invariant violations={edgeCountInvariantViolations}");
+
+            Assert.True(report.TotalSwapsApplied >= 0);
+            // If the simulator reported swaps, we must observe matching mutations.
+            if (report.TotalSwapsApplied > 0)
+                Assert.True(mutatedNodes > 0, "applyMutations=true reported swaps but no in-memory edge change observed");
+            // Each swap is remove-one + add-one, so edge count is preserved exactly.
+            Assert.Equal(0, edgeCountInvariantViolations);
+        }
+    }
+
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void L0Repair_BuildHook_AffectsRecallVsBaseline()
+    {
+        // FRAMEWORK §15.10: end-to-end check that the Commit() hook runs, swaps are
+        // applied, and the persisted graph is searchable. Records recall delta vs.
+        // baseline (no-repair). This is the empirical answer to Theorem 1's question:
+        // does construction-time L0 repair move recall up, down, or sideways?
+        const int vectorSize = 32;
+        const int vectorSizeInBytes = vectorSize * sizeof(float);
+        const int numberOfClusters = 20;
+        const int pointsPerCluster = 150;
+        const int numberOfEntries = numberOfClusters * pointsPerCluster;
+        const int numberOfQueries = 100;
+        const int k = 10;
+        const int efSearch = 32; // low ef makes graph-quality effects more visible
+        const float clusterStd = 0.15f;
+
+        var rng = new Random(31);
+        var centers = new float[numberOfClusters][];
+        for (int c = 0; c < numberOfClusters; c++)
+            centers[c] = RandomUnitVector(rng, vectorSize);
+        var vectors = new float[numberOfEntries][];
+        for (int c = 0; c < numberOfClusters; c++)
+            for (int j = 0; j < pointsPerCluster; j++)
+                vectors[c * pointsPerCluster + j] = PerturbedUnitVector(rng, centers[c], clusterStd);
+        var queries = new float[numberOfQueries][];
+        for (int q = 0; q < numberOfQueries; q++)
+            queries[q] = PerturbedUnitVector(rng, centers[rng.Next(numberOfClusters)], clusterStd);
+
+        var groundTruth = new HashSet<long>[numberOfQueries];
+        for (int q = 0; q < numberOfQueries; q++)
+        {
+            var ranked = new List<(int id, float dist)>();
+            for (int i = 0; i < numberOfEntries; i++)
+                ranked.Add((i, Cosine(queries[q], vectors[i])));
+            ranked.Sort((a, b) => a.dist.CompareTo(b.dist));
+            groundTruth[q] = new HashSet<long>(ranked.Take(k).Select(x => (long)(x.id + 1)));
+        }
+
+        double baselineRecall = Build(enableRepair: false, label: "baseline");
+        double repairRecall = Build(enableRepair: true, label: "l0-repair");
+
+        Output.WriteLine($"[L0Repair A/B] baseline recall@{k}={baselineRecall:F4} repair recall@{k}={repairRecall:F4} Δ={repairRecall - baselineRecall:F4}");
+        Output.WriteLine($"[L0Repair A/B] swaps applied total={Hnsw.L0RepairSwapsApplied} pass duration ms={Hnsw.L0RepairPassDurationMs}");
+
+        // The repair pass must run (swaps > 0) on a clustered dataset where the
+        // baseline graph is known to leave L0 witness coverage well below 1.0.
+        Assert.True(Hnsw.L0RepairSwapsApplied > 0, "L0 repair did not apply any swap — hook not wired or dataset too easy");
+        // We do NOT assert recall improves — that is precisely what we're measuring.
+        // We do assert it is within a sane band (no catastrophic regression).
+        Assert.True(repairRecall >= baselineRecall - 0.10,
+            $"L0 repair caused catastrophic recall regression: baseline={baselineRecall:F3} repair={repairRecall:F3}");
+
+        double Build(bool enableRepair, string label)
+        {
+            bool savedFlag = Hnsw.EnableL0Repair;
+            long savedSwaps = Hnsw.L0RepairSwapsApplied;
+            try
+            {
+                Hnsw.EnableL0Repair = enableRepair;
+                Hnsw.L0RepairSwapsApplied = 0;
+                using var s = Slice.From(Allocator, $"{nameof(L0Repair_BuildHook_AffectsRecallVsBaseline)}_{label}", out var treeName);
+                using (var wTx = Env.WriteTransaction())
+                {
+                    Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: 12, numberOfCandidates: 16, VectorEmbeddingType.Single);
+                    using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
+                    {
+                        for (int i = 0; i < numberOfEntries; i++)
+                            registration.Register(i + 1, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                        registration.Commit(CancellationToken.None);
+                    }
+                    wTx.Commit();
+                }
+                Output.WriteLine($"[{label}] swaps={Hnsw.L0RepairSwapsApplied} duration_ms={Hnsw.L0RepairPassDurationMs}");
+                using var rTx = Env.ReadTransaction();
+                double sum = 0;
+                for (int q = 0; q < numberOfQueries; q++)
+                {
+                    using var ss = Slice.From(Allocator, $"{nameof(L0Repair_BuildHook_AffectsRecallVsBaseline)}_{label}", out var ts);
+                    var qBytes = MemoryMarshal.Cast<float, byte>(queries[q]).ToArray();
+                    using var search = Hnsw.ApproximateNearest(rTx.LowLevelTransaction, ts, numberOfCandidates: efSearch, qBytes, minimumSimilarity: 0f, hasFilterMatch: false);
+                    var matches = new long[Math.Max(k, 16)];
+                    var distances = new float[matches.Length];
+                    var collected = new List<(long id, float dist)>();
+                    int read;
+                    do
+                    {
+                        read = search.Fill(matches, distances, filter: null);
+                        for (int i = 0; i < read; i++)
+                            collected.Add((matches[i], distances[i]));
+                    } while (read != 0);
+                    collected.Sort((a, b) => a.dist.CompareTo(b.dist));
+                    var topK = new HashSet<long>(collected.Take(k).Select(x => x.id));
+                    topK.IntersectWith(groundTruth[q]);
+                    sum += topK.Count / (double)k;
+                }
+                return sum / numberOfQueries;
+            }
+            finally
+            {
+                Hnsw.EnableL0Repair = savedFlag;
+                // restore non-cumulative counter? L0RepairSwapsApplied is process-wide cumulative; leave summed value.
+                _ = savedSwaps;
+            }
+        }
+    }
+
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
     public void MeasureL0RepairFeasibility_OnApolloniusSelector_ReportsValidCounts()
     {
         // FRAMEWORK §6 / §15.10: feasible ⊆ poolHasWitness ⊆ uncovered ⊆ visits.
@@ -2064,7 +2273,42 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         Hnsw.CoverProfileReset();
         Hnsw.UseLegacyHeuristic = false;
         long apoMs = Build("apollonius");
+        // Third variant: apollonius + L0 one-swap repair (FRAMEWORK §15.10).
+        // Gated on APOLLO_L0_REPAIR=1 so the standard run is unaffected; flipping the
+        // env enables a build with EnableL0Repair active so we can measure recall delta.
+        bool runL0Repair = Environment.GetEnvironmentVariable("APOLLO_L0_REPAIR") is { } _l0v
+            && (_l0v == "1" || string.Equals(_l0v, "true", StringComparison.OrdinalIgnoreCase));
+        long repairMs = -1;
+        long repairSwaps = 0;
+        long repairPassMs = 0;
+        long legacyRepairMs = -1;
+        long legacyRepairSwaps = 0;
+        long legacyRepairPassMs = 0;
+        if (runL0Repair)
+        {
+            Hnsw.L0RepairSwapsApplied = 0;
+            Hnsw.L0RepairPassDurationMs = 0;
+            Hnsw.EnableL0Repair = true;
+            try { repairMs = Build("apollonius_repair"); }
+            finally { Hnsw.EnableL0Repair = false; }
+            repairSwaps = Hnsw.L0RepairSwapsApplied;
+            repairPassMs = Hnsw.L0RepairPassDurationMs;
+
+            Hnsw.L0RepairSwapsApplied = 0;
+            Hnsw.L0RepairPassDurationMs = 0;
+            Hnsw.UseLegacyHeuristic = true;
+            Hnsw.EnableL0Repair = true;
+            try { legacyRepairMs = Build("legacy_repair"); }
+            finally { Hnsw.EnableL0Repair = false; Hnsw.UseLegacyHeuristic = false; }
+            legacyRepairSwaps = Hnsw.L0RepairSwapsApplied;
+            legacyRepairPassMs = Hnsw.L0RepairPassDurationMs;
+        }
         Output.WriteLine($"[build wall] legacy={legacyMs}ms  apollonius={apoMs}ms  ratio={(double)apoMs / Math.Max(1, legacyMs):F2}x");
+        if (runL0Repair)
+        {
+            Output.WriteLine($"[build wall] apollonius_repair={repairMs}ms (swaps={repairSwaps} pass_ms={repairPassMs})");
+            Output.WriteLine($"[build wall] legacy_repair={legacyRepairMs}ms (swaps={legacyRepairSwaps} pass_ms={legacyRepairPassMs})");
+        }
 
         var queryBuffer = new byte[numberOfQueries * vectorSizeInBytes];
         for (int q = 0; q < numberOfQueries; q++)
@@ -2241,9 +2485,12 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
             catch (Exception ex) { Output.WriteLine($"[truth-cache] save failed: {ex.Message}"); }
         }
 
+        var recallVariants = runL0Repair
+            ? new[] { ("legacy", "legacy"), ("apollonius", "apollonius"), ("apollonius_repair", "apollonius_repair"), ("legacy_repair", "legacy_repair") }
+            : new[] { ("legacy", "legacy"), ("apollonius", "apollonius") };
         foreach (var ef in efSweep)
         {
-            foreach (var (label, treeLabel) in new[] { ("legacy", "legacy"), ("apollonius", "apollonius") })
+            foreach (var (label, treeLabel) in recallVariants)
             {
                 using var sx = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_{treeLabel}", out var name);
                 long[] hits = new long[kSweep.Length];

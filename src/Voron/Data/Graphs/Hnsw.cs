@@ -971,6 +971,18 @@ public unsafe partial class Hnsw
 
             InsertVectorsToGraph(ref byteBuffer, token);
 
+            // FRAMEWORK §15.10 L0 one-swap repair pass. Mutates EdgesPerLevel[0] of
+            // visited nodes in-memory before the PersistNode loop writes them out.
+            // Off by default (Theorem 1: construction signals cannot guarantee recall;
+            // any production rollout must layer a held-out recall canary on top).
+            // Repair operates on EdgesPerLevel[0] post-build; selector-agnostic. Works
+            // on legacy α-prune graphs too.
+            if (Hnsw.EnableL0Repair)
+            {
+                for (int pass = 0; pass < Hnsw.L0RepairPasses; pass++)
+                    ApplyL0OneSwapRepairPass(token);
+            }
+
             nodes = _searchState.Nodes;
             for (int i = 0; i < nodes.Length; i++)
             {

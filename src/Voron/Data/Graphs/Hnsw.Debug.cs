@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -1504,14 +1505,19 @@ public unsafe partial class Hnsw
         ReadOnlySpan<byte> queriesBlob,
         int queryCount,
         float rho,
-        float betaL0)
+        float betaL0,
+        bool applyMutations = false,
+        SearchState reuseSearchState = null)
     {
         if (rho <= 0f || rho >= 1f)
             throw new ArgumentOutOfRangeException(nameof(rho), rho, "rho must be in (0, 1)");
         if (betaL0 < 1f)
             throw new ArgumentOutOfRangeException(nameof(betaL0), betaL0, "betaL0 must be >= 1");
 
-        var searchState = new SearchState(llt, name);
+        // When reuseSearchState is provided (production path), mutations land on the caller's
+        // SearchState so a subsequent PersistNode pass writes them to Voron. When null, a local
+        // SearchState is created and mutations are discarded on return — measurement-only mode.
+        var searchState = reuseSearchState ?? new SearchState(llt, name);
         if (searchState.IsEmpty)
             return new L0OneSwapSimulationReport(rho, betaL0, 0, 0, 0, 0, 0, 0, 0, 0);
 
@@ -1713,15 +1719,17 @@ public unsafe partial class Hnsw
             {
                 nodesRepaired++;
                 totalSwaps++;
-                // Subtract this node's covered-by-swap from post-uncovered count.
-                // Note: we don't account for which edge s is swapped out. The framework
-                // §5 protected prefix r=M/2 means we swap out one of the farther M/2
-                // edges. Coverage by swap is independent of which s is removed UNLESS
-                // s was itself a witness for some other query. Track that here:
                 int regressionFromRemoval = 0;
-                // Find the worst (farthest) non-protected edge index to swap out.
-                int worstS = -1; float worstDist = -1f;
-                int protectedCount = Math.Max(1, uEdgeIdx.Count / 2);
+                int worstS = -1;
+                // Protected prefix: framework §5 default is M/2. Override via
+                // RAVEN_HNSW_L0_PROTECT=N to test stricter protection (e.g., M-2)
+                // which leaves fewer eviction candidates and preserves more original
+                // edges, trading repair magnitude for less low-ef recall risk.
+                int protectedCount;
+                if (int.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_PROTECT"), out var pEnv) && pEnv > 0)
+                    protectedCount = Math.Min(uEdgeIdx.Count - 1, pEnv);
+                else
+                    protectedCount = Math.Max(1, uEdgeIdx.Count / 2);
                 // Sort edges by distance ascending so first half is protected.
                 var edgeDists = new (int idx, float dus)[uEdgeIdx.Count];
                 for (int i = 0; i < uEdgeIdx.Count; i++)
@@ -1729,12 +1737,57 @@ public unsafe partial class Hnsw
                     edgeDists[i] = (uEdgeIdx[i], searchState.Distance(ReadOnlySpan<byte>.Empty, u, uEdgeIdx[i]));
                 }
                 Array.Sort(edgeDists, (a, b) => a.dus.CompareTo(b.dus));
-                for (int i = protectedCount; i < edgeDists.Length; i++)
+
+                if (Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_EVICT") == "lci")
                 {
-                    if (edgeDists[i].dus > worstDist)
+                    // LEAST-COVERAGE-IMPACT eviction: among the non-protected suffix, pick the
+                    // candidate s whose removal loses the FEWEST currently-covered queries
+                    // (treating bestV as a substitute witness). Falls back to farthest-non-
+                    // protected when no s is a unique witness on the sample.
+                    int minLoss = int.MaxValue;
+                    for (int ei = protectedCount; ei < edgeDists.Length; ei++)
                     {
-                        worstDist = edgeDists[i].dus;
-                        worstS = edgeDists[i].idx;
+                        int cand = edgeDists[ei].idx;
+                        int loss = 0;
+                        for (int vi = 0; vi < visits.Count; vi++)
+                        {
+                            if (!visits[vi].covered) continue;
+                            var qbuf = queriesBlob.Slice(visits[vi].qIdx * vectorSizeBytes, vectorSizeBytes);
+                            float dCand = searchState.Distance(qbuf, -1, cand);
+                            if (dCand > rho * visits[vi].dUQ) continue;
+                            // cand is a witness; check whether ANY other current edge or bestV covers q.
+                            bool otherWitness = false;
+                            float dVQ = searchState.Distance(qbuf, -1, bestV);
+                            if (dVQ <= rho * visits[vi].dUQ) otherWitness = true;
+                            if (!otherWitness)
+                            {
+                                for (int j = 0; j < uEdgeIdx.Count; j++)
+                                {
+                                    if (uEdgeIdx[j] == cand) continue;
+                                    float dOther = searchState.Distance(qbuf, -1, uEdgeIdx[j]);
+                                    if (dOther <= rho * visits[vi].dUQ) { otherWitness = true; break; }
+                                }
+                            }
+                            if (!otherWitness) loss++;
+                        }
+                        if (loss < minLoss || (loss == minLoss && (worstS == -1 || edgeDists[ei].dus > searchState.Distance(ReadOnlySpan<byte>.Empty, u, worstS))))
+                        {
+                            minLoss = loss;
+                            worstS = cand;
+                        }
+                    }
+                }
+                else
+                {
+                    // Default: farthest-non-protected (the original §5 prescription).
+                    float worstDist = -1f;
+                    for (int i = protectedCount; i < edgeDists.Length; i++)
+                    {
+                        if (edgeDists[i].dus > worstDist)
+                        {
+                            worstDist = edgeDists[i].dus;
+                            worstS = edgeDists[i].idx;
+                        }
                     }
                 }
                 // If worstS was a sole witness for any covered query, removing it un-covers.
@@ -1773,14 +1826,35 @@ public unsafe partial class Hnsw
                 // Net change in uncovered for this node:
                 //   −bestCov (newly covered) + regressionFromRemoval (newly uncovered)
                 int netChange = -bestCov + regressionFromRemoval;
-                // Post-uncovered for this node = uncoveredCount + netChange.
-                // But we accumulate over all nodes — track delta only.
-                // For nodes NOT in the dictionary, uncovered is fixed at their original.
-                // We'll compute post total by summing per-node post-counts.
-                // Easier: compute total per node here.
                 int postForThisNode = uncoveredCount + netChange;
                 if (postForThisNode < 0) postForThisNode = 0; // defensive
                 l0UncoveredPost += postForThisNode;
+
+                // In-memory mutation: remove worstS's NodeId from u's L0 edges, append bestV's.
+                // Voron persistence happens later in Commit() via PersistNode; if applyMutations
+                // is true and the caller does not persist (typical for tests), the mutation is
+                // discarded on tx dispose. Per framework Theorem 1, the caller MUST gate this
+                // on held-out recall measurement before any persist.
+                if (applyMutations && worstS != -1)
+                {
+                    long worstSNodeId = searchState.GetNodeByIndex(worstS).NodeId;
+                    long bestVNodeId = searchState.GetNodeByIndex(bestV).NodeId;
+                    // re-fetch u's ref AFTER any reallocation triggered by the two calls above
+                    ref var uNodeMut = ref searchState.GetNodeByIndex(u);
+                    ref var uEdgesMut = ref uNodeMut.EdgesPerLevel[0];
+                    int origCount = uEdgesMut.Count;
+                    var snapshot = ArrayPool<long>.Shared.Rent(origCount);
+                    for (int i = 0; i < origCount; i++) snapshot[i] = uEdgesMut[i];
+                    uEdgesMut.ResetAndEnsureCapacity(searchState.Llt.Allocator, origCount);
+                    bool removed = false;
+                    for (int i = 0; i < origCount; i++)
+                    {
+                        if (!removed && snapshot[i] == worstSNodeId) { removed = true; continue; }
+                        uEdgesMut.AddUnsafe(snapshot[i]);
+                    }
+                    uEdgesMut.AddUnsafe(bestVNodeId);
+                    ArrayPool<long>.Shared.Return(snapshot);
+                }
             }
             else
             {
@@ -1794,10 +1868,10 @@ public unsafe partial class Hnsw
             nodesVisitedAtL0, nodesWithUncovered, nodesRepaired, totalSwaps);
     }
 
-    public static L0OneSwapSimulationReport SimulateL0OneSwapRepair(LowLevelTransaction llt, string name, ReadOnlySpan<byte> queriesBlob, int queryCount, float rho, float betaL0)
+    public static L0OneSwapSimulationReport SimulateL0OneSwapRepair(LowLevelTransaction llt, string name, ReadOnlySpan<byte> queriesBlob, int queryCount, float rho, float betaL0, bool applyMutations = false, SearchState reuseSearchState = null)
     {
         using (Slice.From(llt.Allocator, name, out var slice))
-            return SimulateL0OneSwapRepair(llt, slice, queriesBlob, queryCount, rho, betaL0);
+            return SimulateL0OneSwapRepair(llt, slice, queriesBlob, queryCount, rho, betaL0, applyMutations, reuseSearchState);
     }
 
     public static void RenderAndShow(LowLevelTransaction llt, string name, Span<byte> vector)
