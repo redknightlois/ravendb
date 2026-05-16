@@ -1743,12 +1743,31 @@ public unsafe partial class Hnsw
             // Pick v* with max coverage. If gain > 0, apply the swap.
             int bestV = -1;
             int bestCov = 0;
+            // §15.7 margin / log-ratio tie-break: among candidates with the SAME first-witness
+            // coverage count (the §15.2 K=1 objective), prefer the one with the lowest mean
+            // log R_v(u, q) over uncovered queries — i.e. the candidate that comes closest
+            // overall, not just the one that crosses the λ threshold. Framework explicitly
+            // warns this must be SECONDARY (binary coverage stays primary) to avoid the
+            // §15.2 K=2 mistake. Enable via RAVEN_HNSW_L0_MARGIN=1.
+            bool useMargin = Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_MARGIN") == "1";
+            double bestLogR = double.MaxValue;
             foreach (var pair in bestVCoverage)
             {
                 if (pair.Value > bestCov)
                 {
                     bestCov = pair.Value;
                     bestV = pair.Key;
+                    if (useMargin)
+                        bestLogR = ComputeMeanLogR(searchState, queriesBlob, vectorSizeBytes, visits, pair.Key, useHoeffding);
+                }
+                else if (useMargin && pair.Value == bestCov)
+                {
+                    double logR = ComputeMeanLogR(searchState, queriesBlob, vectorSizeBytes, visits, pair.Key, useHoeffding);
+                    if (logR < bestLogR)
+                    {
+                        bestLogR = logR;
+                        bestV = pair.Key;
+                    }
                 }
             }
 
@@ -2007,6 +2026,28 @@ public unsafe partial class Hnsw
     /// (typical 2.0), λ=0.9025. Per §11 upper-layer work is bounded by N/(M-1), so cost is
     /// inherently small. Recommend running BEFORE L0 repair per §17 deployment order.
     /// </summary>
+    // §15.7 helper: mean log R_v(u, q) over u's train-set visits. Lower is better
+    // (candidate consistently closer to q). Used only as a tie-break among candidates
+    // with equal binary-coverage count, never as the primary objective.
+    private static double ComputeMeanLogR(
+        SearchState ss, ReadOnlySpan<byte> queriesBlob, int vectorSizeBytes,
+        List<(int qIdx, float dUQ, bool covered)> visits, int candIdx, bool trainOnly)
+    {
+        double sum = 0;
+        int m = 0;
+        for (int i = 0; i < visits.Count; i++)
+        {
+            if (trainOnly && (i & 1) != 0) continue;
+            if (visits[i].dUQ <= 0f) continue;
+            var qbuf = queriesBlob.Slice(visits[i].qIdx * vectorSizeBytes, vectorSizeBytes);
+            float d = ss.Distance(qbuf, -1, candIdx);
+            double r = Math.Max(1e-9, d / visits[i].dUQ);
+            sum += Math.Log(r);
+            m++;
+        }
+        return m == 0 ? 0 : sum / m;
+    }
+
     public static L0OneSwapSimulationReport SimulateUpperLayerOneSwapRepair(
         LowLevelTransaction llt, Slice name, ReadOnlySpan<byte> queriesBlob, int queryCount,
         int level, float rho = 0.95f, float betaL = 2.0f,
