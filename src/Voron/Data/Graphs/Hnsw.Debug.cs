@@ -1511,8 +1511,13 @@ public unsafe partial class Hnsw
         float rho,
         float betaL0,
         bool applyMutations = false,
-        SearchState reuseSearchState = null)
+        SearchState reuseSearchState = null,
+        int targetLevel = 0,
+        int? protectedOverride = null)
     {
+        // FRAMEWORK §15.3 upper-layer path: pass targetLevel >= 1 and protectedOverride = 2
+        // (per §15.3 r=2 default for upper layers). Caller should use β_ℓ ∈ [1.5, 3] instead
+        // of L0's β_0 ∈ [1.05, 1.25]. All §6 / §5.3 / §7 guarantees carry over unchanged.
         if (rho <= 0f || rho >= 1f)
             throw new ArgumentOutOfRangeException(nameof(rho), rho, "rho must be in (0, 1)");
         if (betaL0 < 1f)
@@ -1575,7 +1580,7 @@ public unsafe partial class Hnsw
                         }
                     }
 
-                    if (level == 0)
+                    if (level == targetLevel)
                     {
                         l0Visits++;
                         if (coveredCur == false) l0UncoveredPre++;
@@ -1644,9 +1649,9 @@ public unsafe partial class Hnsw
             poolHash.Add(u);
 
             ref var uNode = ref searchState.GetNodeByIndex(u);
-            if (uNode.EdgesPerLevel.Count == 0)
+            if (uNode.EdgesPerLevel.Count <= targetLevel)
                 continue;
-            ref var uEdges = ref uNode.EdgesPerLevel[0];
+            ref var uEdges = ref uNode.EdgesPerLevel[targetLevel];
             float maxEdgeDist = 0f;
             var uEdgeIdx = new List<int>(uEdges.Count);
             for (int i = 0; i < uEdges.Count; i++)
@@ -1667,9 +1672,9 @@ public unsafe partial class Hnsw
             {
                 int v = uEdgeIdx[i];
                 ref var vNode = ref searchState.GetNodeByIndex(v);
-                if (vNode.EdgesPerLevel.Count == 0)
+                if (vNode.EdgesPerLevel.Count <= targetLevel)
                     continue;
-                ref var vEdges = ref vNode.EdgesPerLevel[0];
+                ref var vEdges = ref vNode.EdgesPerLevel[targetLevel];
                 for (int j = 0; j < vEdges.Count; j++)
                 {
                     int w = searchState.GetNodeIndexById(vEdges[j]);
@@ -1697,9 +1702,9 @@ public unsafe partial class Hnsw
             {
                 int w = twoHopFrontier[i];
                 ref var wNode = ref searchState.GetNodeByIndex(w);
-                if (wNode.EdgesPerLevel.Count == 0)
+                if (wNode.EdgesPerLevel.Count <= targetLevel)
                     continue;
-                ref var wEdges = ref wNode.EdgesPerLevel[0];
+                ref var wEdges = ref wNode.EdgesPerLevel[targetLevel];
                 for (int k = 0; k < wEdges.Count; k++)
                 {
                     int x = searchState.GetNodeIndexById(wEdges[k]);
@@ -1745,7 +1750,9 @@ public unsafe partial class Hnsw
                 // which leaves fewer eviction candidates and preserves more original
                 // edges, trading repair magnitude for less low-ef recall risk.
                 int protectedCount;
-                if (int.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_PROTECT"), out var pEnv) && pEnv > 0)
+                if (protectedOverride is { } pOv && pOv > 0)
+                    protectedCount = Math.Min(uEdgeIdx.Count - 1, pOv);
+                else if (int.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_PROTECT"), out var pEnv) && pEnv > 0)
                     protectedCount = Math.Min(uEdgeIdx.Count - 1, pEnv);
                 else
                     protectedCount = Math.Max(1, uEdgeIdx.Count / 2);
@@ -1946,7 +1953,7 @@ public unsafe partial class Hnsw
                     long bestVNodeId = searchState.GetNodeByIndex(bestV).NodeId;
                     // re-fetch u's ref AFTER any reallocation triggered by the two calls above
                     ref var uNodeMut = ref searchState.GetNodeByIndex(u);
-                    ref var uEdgesMut = ref uNodeMut.EdgesPerLevel[0];
+                    ref var uEdgesMut = ref uNodeMut.EdgesPerLevel[targetLevel];
                     int origCount = uEdgesMut.Count;
                     var snapshot = ArrayPool<long>.Shared.Rent(origCount);
                     for (int i = 0; i < origCount; i++) snapshot[i] = uEdgesMut[i];
@@ -1974,10 +1981,27 @@ public unsafe partial class Hnsw
             proposedSwaps, rejectedByHoeffding, rejectedBySpread);
     }
 
-    public static L0OneSwapSimulationReport SimulateL0OneSwapRepair(LowLevelTransaction llt, string name, ReadOnlySpan<byte> queriesBlob, int queryCount, float rho, float betaL0, bool applyMutations = false, SearchState reuseSearchState = null)
+    public static L0OneSwapSimulationReport SimulateL0OneSwapRepair(LowLevelTransaction llt, string name, ReadOnlySpan<byte> queriesBlob, int queryCount, float rho, float betaL0, bool applyMutations = false, SearchState reuseSearchState = null, int targetLevel = 0, int? protectedOverride = null)
     {
         using (Slice.From(llt.Allocator, name, out var slice))
-            return SimulateL0OneSwapRepair(llt, slice, queriesBlob, queryCount, rho, betaL0, applyMutations, reuseSearchState);
+            return SimulateL0OneSwapRepair(llt, slice, queriesBlob, queryCount, rho, betaL0, applyMutations, reuseSearchState, targetLevel, protectedOverride);
+    }
+
+    /// <summary>
+    /// FRAMEWORK §15.3 upper-layer one-swap repair. Thin wrapper around the unified
+    /// simulator with framework-prescribed defaults for ℓ ≥ 1: r=2 protected, β_ℓ ∈ [1.5, 3]
+    /// (typical 2.0), λ=0.9025. Per §11 upper-layer work is bounded by N/(M-1), so cost is
+    /// inherently small. Recommend running BEFORE L0 repair per §17 deployment order.
+    /// </summary>
+    public static L0OneSwapSimulationReport SimulateUpperLayerOneSwapRepair(
+        LowLevelTransaction llt, Slice name, ReadOnlySpan<byte> queriesBlob, int queryCount,
+        int level, float rho = 0.95f, float betaL = 2.0f,
+        bool applyMutations = false, SearchState reuseSearchState = null)
+    {
+        if (level < 1)
+            throw new ArgumentOutOfRangeException(nameof(level), level, "upper-layer repair requires level >= 1; use SimulateL0OneSwapRepair for L0");
+        return SimulateL0OneSwapRepair(llt, name, queriesBlob, queryCount, rho, betaL,
+            applyMutations, reuseSearchState, targetLevel: level, protectedOverride: 2);
     }
 
     public static void RenderAndShow(LowLevelTransaction llt, string name, Span<byte> vector)

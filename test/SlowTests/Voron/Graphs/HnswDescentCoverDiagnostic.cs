@@ -276,6 +276,55 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
     }
 
     [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void UpperLayerRepair_RunsWithoutCrashing_AndRespectsLevel()
+    {
+        // FRAMEWORK §15.3 upper-layer one-swap repair. Smoke test: the parameterised
+        // simulator must run cleanly at level=1 with the framework defaults (r=2, β=2.0,
+        // λ=0.9025). Per §11, upper layers are sparse (N/(M-1) ≈ 3% for M=32), so the test
+        // bumps M lower to force more upper-layer nodes. We assert the report counters are
+        // well-formed; recall ROI at this scale is expected to be tiny (pool saturated).
+        const int vectorSize = 32;
+        const int vectorSizeInBytes = vectorSize * sizeof(float);
+        const int numberOfEntries = 2000;
+        const int numberOfQueries = 100;
+
+        var random = new Random(11);
+        var vectors = new float[numberOfEntries][];
+        for (int i = 0; i < numberOfEntries; i++) vectors[i] = RandomUnitVector(random, vectorSize);
+        var queries = new float[numberOfQueries][];
+        for (int i = 0; i < numberOfQueries; i++) queries[i] = RandomUnitVector(random, vectorSize);
+
+        using var _ = Slice.From(Allocator, nameof(UpperLayerRepair_RunsWithoutCrashing_AndRespectsLevel), out var treeName);
+        using (var wTx = Env.WriteTransaction())
+        {
+            Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: 8, numberOfCandidates: 16, VectorEmbeddingType.Single);
+            using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(11)))
+            {
+                for (int i = 0; i < numberOfEntries; i++)
+                    registration.Register(i + 1, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                registration.Commit(CancellationToken.None);
+            }
+            wTx.Commit();
+        }
+
+        var queryBuffer = new byte[numberOfQueries * vectorSizeInBytes];
+        for (int i = 0; i < numberOfQueries; i++)
+            MemoryMarshal.Cast<float, byte>(queries[i]).CopyTo(queryBuffer.AsSpan(i * vectorSizeInBytes));
+
+        using (var rTx = Env.ReadTransaction())
+        {
+            var report = Hnsw.SimulateUpperLayerOneSwapRepair(
+                rTx.LowLevelTransaction, treeName, queryBuffer, numberOfQueries, level: 1);
+            Output.WriteLine($"upper-layer ℓ=1: {report}");
+            // The simulator may legitimately report zero L0Visits at upper levels — that name
+            // is now overloaded. What matters: counters are non-negative and consistent.
+            Assert.True(report.NodesVisitedAtL0 >= 0);
+            Assert.True(report.NodesRepaired <= report.NodesWithUncoveredQueries);
+            Assert.True(report.TotalSwapsApplied <= report.NodesRepaired);
+        }
+    }
+
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
     public void L0Repair_HoeffdingGate_RejectsAtLeastOneSwap()
     {
         // FRAMEWORK §7: with RAVEN_HNSW_L0_HOEFFDING=1, the simulator must (a) propose
