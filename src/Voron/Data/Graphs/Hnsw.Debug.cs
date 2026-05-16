@@ -1459,6 +1459,347 @@ public unsafe partial class Hnsw
             return MeasureL0RepairFeasibilityDeep(llt, slice, queriesBlob, queryCount, rho, betaL0);
     }
 
+    /// <summary>
+    /// FRAMEWORK §15.10 L0 one-swap repair SIMULATION (no graph mutation). For each
+    /// L0 node u visited during the descent walk, pick the single best 3-hop pool
+    /// candidate v* (satisfying §6 radial bound) that maximizes coverage gain over
+    /// queries visiting u. Reports pre vs post η at L0 assuming the swap is applied
+    /// to N(u). Each u gets at most one swap (max-coverage one-swap constraint).
+    ///
+    /// Coverage gain per (u, v): number of queries q ∈ Q_u for which the existing
+    /// N(u) fails to cover q at λ=ρ² but v would (D(v, q) ≤ ρ · D(u, q)).
+    /// Best v* maximizes that count per u. Greedy max-coverage on uncovered queries.
+    ///
+    /// This is an UPPER BOUND on real repair-pass gain because path divergence
+    /// after edge mutation may visit different (u, q) pairs. Useful to bound the
+    /// realistic recall improvement before investing in mutation infrastructure.
+    /// </summary>
+    public readonly record struct L0OneSwapSimulationReport(
+        float Rho,
+        float BetaL0,
+        int QueriesSampled,
+        long L0Visits,
+        long L0UncoveredPre,
+        long L0UncoveredPost,
+        long NodesVisitedAtL0,
+        long NodesWithUncoveredQueries,
+        long NodesRepaired,
+        long TotalSwapsApplied)
+    {
+        public double EtaPre  => L0Visits == 0 ? 0.0 : 1.0 - (double)L0UncoveredPre  / L0Visits;
+        public double EtaPost => L0Visits == 0 ? 0.0 : 1.0 - (double)L0UncoveredPost / L0Visits;
+        public double EtaGain => EtaPost - EtaPre;
+        public double NodeRepairRate => NodesWithUncoveredQueries == 0 ? 0.0 : (double)NodesRepaired / NodesWithUncoveredQueries;
+
+        public override string ToString() =>
+            $"L0OneSwapSimulationReport(ρ={Rho:F2}, β0={BetaL0:F2}, Q={QueriesSampled}, " +
+            $"Visits={L0Visits}, η_pre={EtaPre:F4}, η_post={EtaPost:F4}, Δη={EtaGain:F4}, " +
+            $"nodes={NodesVisitedAtL0}, uncoveredNodes={NodesWithUncoveredQueries}, " +
+            $"repaired={NodesRepaired} ({NodeRepairRate:P1}), swaps={TotalSwapsApplied})";
+    }
+
+    public static L0OneSwapSimulationReport SimulateL0OneSwapRepair(
+        LowLevelTransaction llt,
+        Slice name,
+        ReadOnlySpan<byte> queriesBlob,
+        int queryCount,
+        float rho,
+        float betaL0)
+    {
+        if (rho <= 0f || rho >= 1f)
+            throw new ArgumentOutOfRangeException(nameof(rho), rho, "rho must be in (0, 1)");
+        if (betaL0 < 1f)
+            throw new ArgumentOutOfRangeException(nameof(betaL0), betaL0, "betaL0 must be >= 1");
+
+        var searchState = new SearchState(llt, name);
+        if (searchState.IsEmpty)
+            return new L0OneSwapSimulationReport(rho, betaL0, 0, 0, 0, 0, 0, 0, 0, 0);
+
+        int vectorSizeBytes = searchState.Options.VectorSizeBytes;
+        if (queriesBlob.Length != queryCount * vectorSizeBytes)
+            throw new ArgumentException(
+                $"queriesBlob length {queriesBlob.Length} does not match queryCount {queryCount} * vectorSizeBytes {vectorSizeBytes}");
+
+        // Per-node bookkeeping at L0:
+        //   visitsAtNode[u]    = list of (q_idx, currentDist, currentlyCovered)
+        // Build by walking each query's descent path. Two-pass to keep memory bounded.
+        // Pass 1: collect (u, q, d, covered) tuples for L0 visits only.
+
+        var l0NodeVisits = new Dictionary<int, List<(int qIdx, float dUQ, bool covered)>>();
+
+        long l0Visits = 0;
+        long l0UncoveredPre = 0;
+
+        for (int q = 0; q < queryCount; q++)
+        {
+            var query = queriesBlob.Slice(q * vectorSizeBytes, vectorSizeBytes);
+            int currentIdx = searchState.GetNodeIndexById(EntryPointId);
+            float currentDist = searchState.Distance(query, -1, currentIdx);
+
+            for (int level = searchState.Options.MaxLevel; level >= 0; level--)
+            {
+                while (true)
+                {
+                    int u = currentIdx;
+                    ref var node = ref searchState.GetNodeByIndex(u);
+                    if (node.EdgesPerLevel.Count <= level)
+                        break;
+
+                    ref var edges = ref node.EdgesPerLevel[level];
+
+                    bool coveredCur = false;
+                    int bestEdgeIdx = -1;
+                    float bestDist = currentDist;
+                    float witnessCeiling = rho * currentDist;
+
+                    for (int i = 0; i < edges.Count; i++)
+                    {
+                        int neighborIdx = searchState.GetNodeIndexById(edges[i]);
+                        float d = searchState.Distance(query, -1, neighborIdx);
+                        if (d <= witnessCeiling)
+                            coveredCur = true;
+                        if (d < bestDist)
+                        {
+                            bestDist = d;
+                            bestEdgeIdx = neighborIdx;
+                        }
+                    }
+
+                    if (level == 0)
+                    {
+                        l0Visits++;
+                        if (coveredCur == false) l0UncoveredPre++;
+                        if (l0NodeVisits.TryGetValue(u, out var lst) == false)
+                        {
+                            lst = new List<(int, float, bool)>(4);
+                            l0NodeVisits[u] = lst;
+                        }
+                        lst.Add((q, currentDist, coveredCur));
+                    }
+
+                    if (bestEdgeIdx == -1)
+                        break;
+
+                    currentIdx = bestEdgeIdx;
+                    currentDist = bestDist;
+                }
+            }
+        }
+
+        // Pass 2: for each L0 node with ≥1 uncovered visit, find best one-swap v*.
+        // v* maximizes |{(q, dUQ, cov=false) ∈ visits : D(v, q) ≤ rho · dUQ AND
+        //   D(u, v) ≤ betaL0 · max_{s ∈ N_0(u)} D(u, s)}|.
+        // Search v in N_0(u) ∪ N²_0(u) ∪ N³_0(u).
+
+        long nodesVisitedAtL0 = l0NodeVisits.Count;
+        long nodesWithUncovered = 0;
+        long nodesRepaired = 0;
+        long totalSwaps = 0;
+        long l0UncoveredPost = 0;
+
+        var poolHash = new HashSet<int>();
+        var twoHopFrontier = new List<int>(256);
+        var bestVCoverage = new Dictionary<int, int>(); // vIdx → count of uncovered queries it covers
+
+        foreach (var kv in l0NodeVisits)
+        {
+            int u = kv.Key;
+            var visits = kv.Value;
+
+            // Count current uncovered for this node.
+            int uncoveredCount = 0;
+            for (int i = 0; i < visits.Count; i++)
+                if (visits[i].covered == false) uncoveredCount++;
+            if (uncoveredCount == 0)
+                continue;
+            nodesWithUncovered++;
+
+            // Collect edge indices and radial ceiling.
+            poolHash.Clear();
+            twoHopFrontier.Clear();
+            bestVCoverage.Clear();
+            poolHash.Add(u);
+
+            ref var uNode = ref searchState.GetNodeByIndex(u);
+            if (uNode.EdgesPerLevel.Count == 0)
+                continue;
+            ref var uEdges = ref uNode.EdgesPerLevel[0];
+            float maxEdgeDist = 0f;
+            var uEdgeIdx = new List<int>(uEdges.Count);
+            for (int i = 0; i < uEdges.Count; i++)
+            {
+                int sIdx = searchState.GetNodeIndexById(uEdges[i]);
+                uEdgeIdx.Add(sIdx);
+                poolHash.Add(sIdx);
+                float dus = searchState.Distance(ReadOnlySpan<byte>.Empty, u, sIdx);
+                if (dus > maxEdgeDist) maxEdgeDist = dus;
+            }
+            float radialCeiling = betaL0 * maxEdgeDist;
+
+            // 2-hop expansion — collect candidates into the frontier and score inline
+            // (no local function because ReadOnlySpan<byte> can't be captured).
+            // A swap REMOVES s ∈ N(u) and ADDS v ∉ N(u), so existing edges are not
+            // candidates and we skip them via the poolHash membership check.
+            for (int i = 0; i < uEdgeIdx.Count; i++)
+            {
+                int v = uEdgeIdx[i];
+                ref var vNode = ref searchState.GetNodeByIndex(v);
+                if (vNode.EdgesPerLevel.Count == 0)
+                    continue;
+                ref var vEdges = ref vNode.EdgesPerLevel[0];
+                for (int j = 0; j < vEdges.Count; j++)
+                {
+                    int w = searchState.GetNodeIndexById(vEdges[j]);
+                    if (poolHash.Add(w) == false) continue;
+                    twoHopFrontier.Add(w);
+                    if (w == u) continue;
+                    float duw = searchState.Distance(ReadOnlySpan<byte>.Empty, u, w);
+                    if (duw > radialCeiling) continue;
+                    int covCount = 0;
+                    for (int vi = 0; vi < visits.Count; vi++)
+                    {
+                        if (visits[vi].covered) continue;
+                        var query = queriesBlob.Slice(visits[vi].qIdx * vectorSizeBytes, vectorSizeBytes);
+                        float dvq = searchState.Distance(query, -1, w);
+                        if (dvq <= rho * visits[vi].dUQ)
+                            covCount++;
+                    }
+                    if (covCount > 0)
+                        bestVCoverage[w] = covCount;
+                }
+            }
+            // 3-hop expansion:
+            for (int i = 0; i < twoHopFrontier.Count; i++)
+            {
+                int w = twoHopFrontier[i];
+                ref var wNode = ref searchState.GetNodeByIndex(w);
+                if (wNode.EdgesPerLevel.Count == 0)
+                    continue;
+                ref var wEdges = ref wNode.EdgesPerLevel[0];
+                for (int k = 0; k < wEdges.Count; k++)
+                {
+                    int x = searchState.GetNodeIndexById(wEdges[k]);
+                    if (poolHash.Add(x) == false) continue;
+                    if (x == u) continue;
+                    float dux = searchState.Distance(ReadOnlySpan<byte>.Empty, u, x);
+                    if (dux > radialCeiling) continue;
+                    int covCount = 0;
+                    for (int vi = 0; vi < visits.Count; vi++)
+                    {
+                        if (visits[vi].covered) continue;
+                        var query = queriesBlob.Slice(visits[vi].qIdx * vectorSizeBytes, vectorSizeBytes);
+                        float dxq = searchState.Distance(query, -1, x);
+                        if (dxq <= rho * visits[vi].dUQ)
+                            covCount++;
+                    }
+                    if (covCount > 0)
+                        bestVCoverage[x] = covCount;
+                }
+            }
+
+            // Pick v* with max coverage. If gain > 0, apply the swap.
+            int bestV = -1;
+            int bestCov = 0;
+            foreach (var pair in bestVCoverage)
+            {
+                if (pair.Value > bestCov)
+                {
+                    bestCov = pair.Value;
+                    bestV = pair.Key;
+                }
+            }
+
+            if (bestV != -1 && bestCov > 0)
+            {
+                nodesRepaired++;
+                totalSwaps++;
+                // Subtract this node's covered-by-swap from post-uncovered count.
+                // Note: we don't account for which edge s is swapped out. The framework
+                // §5 protected prefix r=M/2 means we swap out one of the farther M/2
+                // edges. Coverage by swap is independent of which s is removed UNLESS
+                // s was itself a witness for some other query. Track that here:
+                int regressionFromRemoval = 0;
+                // Find the worst (farthest) non-protected edge index to swap out.
+                int worstS = -1; float worstDist = -1f;
+                int protectedCount = Math.Max(1, uEdgeIdx.Count / 2);
+                // Sort edges by distance ascending so first half is protected.
+                var edgeDists = new (int idx, float dus)[uEdgeIdx.Count];
+                for (int i = 0; i < uEdgeIdx.Count; i++)
+                {
+                    edgeDists[i] = (uEdgeIdx[i], searchState.Distance(ReadOnlySpan<byte>.Empty, u, uEdgeIdx[i]));
+                }
+                Array.Sort(edgeDists, (a, b) => a.dus.CompareTo(b.dus));
+                for (int i = protectedCount; i < edgeDists.Length; i++)
+                {
+                    if (edgeDists[i].dus > worstDist)
+                    {
+                        worstDist = edgeDists[i].dus;
+                        worstS = edgeDists[i].idx;
+                    }
+                }
+                // If worstS was a sole witness for any covered query, removing it un-covers.
+                // Check covered visits to see if worstS was their witness.
+                if (worstS != -1)
+                {
+                    for (int i = 0; i < visits.Count; i++)
+                    {
+                        if (visits[i].covered == false) continue;
+                        var query = queriesBlob.Slice(visits[i].qIdx * vectorSizeBytes, vectorSizeBytes);
+                        float dWorstQ = searchState.Distance(query, -1, worstS);
+                        if (dWorstQ <= rho * visits[i].dUQ)
+                        {
+                            // worstS is a witness. Was it the SOLE witness? Check if any
+                            // other edge covers q.
+                            bool otherWitness = false;
+                            for (int j = 0; j < uEdgeIdx.Count; j++)
+                            {
+                                if (uEdgeIdx[j] == worstS) continue;
+                                float dOther = searchState.Distance(query, -1, uEdgeIdx[j]);
+                                if (dOther <= rho * visits[i].dUQ)
+                                {
+                                    otherWitness = true;
+                                    break;
+                                }
+                            }
+                            // Also v (added) may cover q.
+                            float dVQ = searchState.Distance(query, -1, bestV);
+                            if (dVQ <= rho * visits[i].dUQ) otherWitness = true;
+                            if (otherWitness == false)
+                                regressionFromRemoval++;
+                        }
+                    }
+                }
+
+                // Net change in uncovered for this node:
+                //   −bestCov (newly covered) + regressionFromRemoval (newly uncovered)
+                int netChange = -bestCov + regressionFromRemoval;
+                // Post-uncovered for this node = uncoveredCount + netChange.
+                // But we accumulate over all nodes — track delta only.
+                // For nodes NOT in the dictionary, uncovered is fixed at their original.
+                // We'll compute post total by summing per-node post-counts.
+                // Easier: compute total per node here.
+                int postForThisNode = uncoveredCount + netChange;
+                if (postForThisNode < 0) postForThisNode = 0; // defensive
+                l0UncoveredPost += postForThisNode;
+            }
+            else
+            {
+                // No swap applied — uncovered count unchanged.
+                l0UncoveredPost += uncoveredCount;
+            }
+        }
+
+        return new L0OneSwapSimulationReport(
+            rho, betaL0, queryCount, l0Visits, l0UncoveredPre, l0UncoveredPost,
+            nodesVisitedAtL0, nodesWithUncovered, nodesRepaired, totalSwaps);
+    }
+
+    public static L0OneSwapSimulationReport SimulateL0OneSwapRepair(LowLevelTransaction llt, string name, ReadOnlySpan<byte> queriesBlob, int queryCount, float rho, float betaL0)
+    {
+        using (Slice.From(llt.Allocator, name, out var slice))
+            return SimulateL0OneSwapRepair(llt, slice, queriesBlob, queryCount, rho, betaL0);
+    }
+
     public static void RenderAndShow(LowLevelTransaction llt, string name, Span<byte> vector)
     {
         using (Slice.From(llt.Allocator, name, out var slice))

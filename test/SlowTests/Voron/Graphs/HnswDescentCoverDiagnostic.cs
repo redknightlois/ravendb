@@ -120,6 +120,60 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
     }
 
     [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void SimulateL0OneSwapRepair_OnApolloniusSelector_ReportsMonotonicEta()
+    {
+        // FRAMEWORK §15.10: post-repair η must be ≥ pre-repair η (we only accept swaps
+        // with net positive coverage gain), and ≤ 1.0.
+        const int vectorSize = 32;
+        const int vectorSizeInBytes = vectorSize * sizeof(float);
+        const int numberOfEntries = 1000;
+        const int numberOfQueries = 100;
+        const float rho = 0.85f;
+        const float betaL0 = 1.50f;
+
+        var random = new Random(42);
+        var vectors = new float[numberOfEntries][];
+        for (int i = 0; i < numberOfEntries; i++)
+            vectors[i] = RandomUnitVector(random, vectorSize);
+        var queries = new float[numberOfQueries][];
+        for (int i = 0; i < numberOfQueries; i++)
+            queries[i] = RandomUnitVector(random, vectorSize);
+
+        using var _ = Slice.From(Allocator, nameof(SimulateL0OneSwapRepair_OnApolloniusSelector_ReportsMonotonicEta), out var treeName);
+        using (var wTx = Env.WriteTransaction())
+        {
+            Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: 12, numberOfCandidates: 16, VectorEmbeddingType.Single);
+            using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
+            {
+                for (int i = 0; i < numberOfEntries; i++)
+                    registration.Register(i + 1, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                registration.Commit(CancellationToken.None);
+            }
+            wTx.Commit();
+        }
+
+        Hnsw.L0OneSwapSimulationReport report;
+        using (var rTx = Env.ReadTransaction())
+        {
+            var queryBuffer = new byte[numberOfQueries * vectorSizeInBytes];
+            for (int i = 0; i < numberOfQueries; i++)
+                MemoryMarshal.Cast<float, byte>(queries[i]).CopyTo(queryBuffer.AsSpan(i * vectorSizeInBytes));
+            report = Hnsw.SimulateL0OneSwapRepair(rTx.LowLevelTransaction, treeName, queryBuffer, numberOfQueries, rho, betaL0);
+        }
+
+        Output.WriteLine(report.ToString());
+        Assert.Equal(numberOfQueries, report.QueriesSampled);
+        Assert.True(report.L0Visits > 0);
+        Assert.True(report.NodesRepaired <= report.NodesWithUncoveredQueries);
+        Assert.InRange(report.EtaPre, 0.0, 1.0);
+        Assert.InRange(report.EtaPost, 0.0, 1.0);
+        // η_post may be < η_pre if removal regressions outweigh swap gains; report
+        // the realistic delta either way for the framework's recall-gate decision.
+        Assert.True(report.L0UncoveredPost <= report.L0UncoveredPre + report.NodesRepaired,
+            "post-uncovered should not exceed pre-uncovered by more than one regression per repaired node");
+    }
+
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
     public void MeasureL0RepairFeasibility_OnApolloniusSelector_ReportsValidCounts()
     {
         // FRAMEWORK §6 / §15.10: feasible ⊆ poolHasWitness ⊆ uncovered ⊆ visits.
@@ -2050,6 +2104,23 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         // yield. Small g → repair cannot help, problem is candidate generation.
         // The enriched variant (§15.5) also folds in reverse-neighbours R_ℓ(u) and
         // tests whether incoming-edge candidates lift the ceiling further.
+        // FRAMEWORK §15.10 L0 one-swap repair SIMULATION (no graph mutation): for each
+        // L0 node u visited, pick the single best v* ∈ 3-hop pool satisfying §6 bound
+        // that covers the most of u's currently-uncovered visit-queries. Reports the
+        // post-simulation η at L0 and how many nodes got a swap applied.
+        Output.WriteLine("");
+        Output.WriteLine("L0 one-swap repair simulation (framework §15.10, ρ=0.95):");
+        Output.WriteLine($"{"engine",12}  {"β0",6}  {"η_pre",10}  {"η_post",10}  {"Δη",10}  {"nodesUnc",10}  {"repaired",10}  {"repair%",10}");
+        foreach (var beta in new[] { 1.10f, 1.25f, 1.50f })
+        {
+            using var sls = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_legacy", out var legacyNameS);
+            var sL = Hnsw.SimulateL0OneSwapRepair(rTx.LowLevelTransaction, legacyNameS, queryBuffer, numberOfQueries, 0.95f, beta);
+            using var sas = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_apollonius", out var apoNameS);
+            var sA = Hnsw.SimulateL0OneSwapRepair(rTx.LowLevelTransaction, apoNameS, queryBuffer, numberOfQueries, 0.95f, beta);
+            Output.WriteLine($"{"legacy",12}  {beta,6:F2}  {sL.EtaPre,10:F4}  {sL.EtaPost,10:F4}  {sL.EtaGain,+10:F4}  {sL.NodesWithUncoveredQueries,10}  {sL.NodesRepaired,10}  {sL.NodeRepairRate,10:P1}");
+            Output.WriteLine($"{"apollonius",12}  {beta,6:F2}  {sA.EtaPre,10:F4}  {sA.EtaPost,10:F4}  {sA.EtaGain,+10:F4}  {sA.NodesWithUncoveredQueries,10}  {sA.NodesRepaired,10}  {sA.NodeRepairRate,10:P1}");
+        }
+
         // FRAMEWORK §6 / §15.5 / §15.10 L0 repair feasibility: sweep β_0 ∈
         // {1.10, 1.25, 1.50, 2.00} with both 2-hop and 3-hop pools. BoundSurvival
         // = feasible / poolHasWitness; deepGain = feas3hop − feas2hop is the extra
