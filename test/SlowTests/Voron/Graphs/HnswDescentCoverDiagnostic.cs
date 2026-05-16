@@ -1849,17 +1849,66 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         Output.WriteLine($"{"efSearch",10}  {"engine",12}  {"recall@1",10}  {"recall@10",10}  {"recall@50",10}  {"wall ms",10}");
 
         // Ground truth via exact search (linear scan, same for any built graph).
-        using var sGt = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_legacy", out var gtName);
+        // Cached on disk keyed by (dataset, N, queries, kMax) because the truth is
+        // a pure function of the vectors and queries — independent of which HNSW
+        // graph was built. At 10M scale recomputing this is ~10–15 min of waste.
         var truth = new long[numberOfQueries][];
-        for (int q = 0; q < numberOfQueries; q++)
+        string jsonl = Environment.GetEnvironmentVariable("APOLLO_SPHERE_JSONL") ?? "";
+        long datasetN = long.TryParse(Environment.GetEnvironmentVariable("APOLLO_SPHERE_N"), out var nCache) ? nCache : 0;
+        long datasetMtime = System.IO.File.Exists(jsonl) ? new System.IO.FileInfo(jsonl).LastWriteTimeUtc.Ticks : 0;
+        byte[] queryHashBytes = System.Security.Cryptography.SHA256.HashData(queryBuffer);
+        string queryHash = Convert.ToHexString(queryHashBytes, 0, 8);
+        string truthCachePath = $"/tmp/apollo-truth-{System.IO.Path.GetFileName(jsonl)}-N{datasetN}-Q{numberOfQueries}-k{kMax}-{queryHash}-mt{datasetMtime}.bin";
+        bool truthLoaded = false;
+        if (System.IO.File.Exists(truthCachePath))
         {
-            var qmem = new System.ReadOnlyMemory<byte>(queryBuffer, q * vectorSizeInBytes, vectorSizeInBytes);
-            var ret = Hnsw.ExactNearest(rTx.LowLevelTransaction, gtName, kMax, System.Runtime.InteropServices.MemoryMarshal.AsMemory(qmem), 0f, false);
-            var ids = new long[kMax];
-            var dists = new float[kMax];
-            int got = ret.Fill(ids, dists, null);
-            truth[q] = new long[got];
-            System.Array.Copy(ids, truth[q], got);
+            try
+            {
+                using var fs = System.IO.File.OpenRead(truthCachePath);
+                using var br = new System.IO.BinaryReader(fs);
+                int q = br.ReadInt32();
+                int k = br.ReadInt32();
+                if (q == numberOfQueries && k == kMax)
+                {
+                    for (int i = 0; i < q; i++)
+                    {
+                        int got = br.ReadInt32();
+                        truth[i] = new long[got];
+                        for (int j = 0; j < got; j++) truth[i][j] = br.ReadInt64();
+                    }
+                    truthLoaded = true;
+                    Output.WriteLine($"[truth-cache] loaded from {truthCachePath}");
+                }
+            }
+            catch { /* fall through to recompute */ }
+        }
+        if (truthLoaded == false)
+        {
+            using var sGt = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_legacy", out var gtName);
+            for (int q = 0; q < numberOfQueries; q++)
+            {
+                var qmem = new System.ReadOnlyMemory<byte>(queryBuffer, q * vectorSizeInBytes, vectorSizeInBytes);
+                using var ret = Hnsw.ExactNearest(rTx.LowLevelTransaction, gtName, kMax, System.Runtime.InteropServices.MemoryMarshal.AsMemory(qmem), 0f, false);
+                var ids = new long[kMax];
+                var dists = new float[kMax];
+                int got = ret.Fill(ids, dists, null);
+                truth[q] = new long[got];
+                System.Array.Copy(ids, truth[q], got);
+            }
+            try
+            {
+                using var fs = System.IO.File.Create(truthCachePath);
+                using var bw = new System.IO.BinaryWriter(fs);
+                bw.Write(numberOfQueries);
+                bw.Write(kMax);
+                for (int i = 0; i < numberOfQueries; i++)
+                {
+                    bw.Write(truth[i].Length);
+                    for (int j = 0; j < truth[i].Length; j++) bw.Write(truth[i][j]);
+                }
+                Output.WriteLine($"[truth-cache] saved to {truthCachePath}");
+            }
+            catch (Exception ex) { Output.WriteLine($"[truth-cache] save failed: {ex.Message}"); }
         }
 
         foreach (var ef in efSweep)
@@ -1873,7 +1922,7 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                 for (int q = 0; q < numberOfQueries; q++)
                 {
                     var qmem = new System.ReadOnlyMemory<byte>(queryBuffer, q * vectorSizeInBytes, vectorSizeInBytes);
-                    var ret = Hnsw.ApproximateNearest(rTx.LowLevelTransaction, name, ef, System.Runtime.InteropServices.MemoryMarshal.AsMemory(qmem), 0f);
+                    using var ret = Hnsw.ApproximateNearest(rTx.LowLevelTransaction, name, ef, System.Runtime.InteropServices.MemoryMarshal.AsMemory(qmem), 0f);
                     var ids = new long[kMax];
                     var dists = new float[kMax];
                     int got = ret.Fill(ids, dists, null);
