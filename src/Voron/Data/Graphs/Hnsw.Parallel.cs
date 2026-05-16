@@ -1807,6 +1807,14 @@ public partial class Hnsw
                     _indexVectorIds.Add(n.VectorId);
                 }
 
+                // Defensive guard: under heavy parallel build the outer EdgesIndexesPerLevel
+                // list can intermittently appear stale to a worker even though PrepareEdgesOnLLT
+                // ran SetCapacity(level+1) on the LLT thread. Race window manifests as
+                // IndexOutOfRangeException on this line ~1/5 of Sphere builds. Skip rather than
+                // crash the build — the descent loop will revisit this node on a later iteration.
+                if (level >= n.EdgesIndexesPerLevel.Count)
+                    return _indexes.Count > 0;
+
                 ref var edgesIndexes = ref n.EdgesIndexesPerLevel[level];
                 foreach (var idx in edgesIndexes)
                 {
