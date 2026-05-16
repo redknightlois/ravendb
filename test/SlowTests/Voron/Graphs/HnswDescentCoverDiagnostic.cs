@@ -276,6 +276,71 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
     }
 
     [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void L0Repair_MarginTieBreak_DoesNotDegradeOverPrimaryCoverage()
+    {
+        // FRAMEWORK §15.7 / §13: log-R margin is a SECONDARY tie-break. With
+        // RAVEN_HNSW_L0_MARGIN=1 the simulator must still preserve the primary
+        // first-witness coverage count — running with margin ON cannot produce
+        // a SMALLER NodesRepaired count than running with margin OFF on the same
+        // graph (because margin only chooses among already-tied candidates).
+        const int vectorSize = 32;
+        const int vectorSizeInBytes = vectorSize * sizeof(float);
+        const int numberOfEntries = 1000;
+        const int numberOfQueries = 100;
+        const float rho = 0.85f, betaL0 = 1.50f;
+
+        var random = new Random(19);
+        var vectors = new float[numberOfEntries][];
+        for (int i = 0; i < numberOfEntries; i++) vectors[i] = RandomUnitVector(random, vectorSize);
+        var queries = new float[numberOfQueries][];
+        for (int i = 0; i < numberOfQueries; i++) queries[i] = RandomUnitVector(random, vectorSize);
+
+        using var _ = Slice.From(Allocator, nameof(L0Repair_MarginTieBreak_DoesNotDegradeOverPrimaryCoverage), out var treeName);
+        using (var wTx = Env.WriteTransaction())
+        {
+            Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: 12, numberOfCandidates: 16, VectorEmbeddingType.Single);
+            using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(19)))
+            {
+                for (int i = 0; i < numberOfEntries; i++)
+                    registration.Register(i + 1, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                registration.Commit(CancellationToken.None);
+            }
+            wTx.Commit();
+        }
+
+        var queryBuffer = new byte[numberOfQueries * vectorSizeInBytes];
+        for (int i = 0; i < numberOfQueries; i++)
+            MemoryMarshal.Cast<float, byte>(queries[i]).CopyTo(queryBuffer.AsSpan(i * vectorSizeInBytes));
+
+        Hnsw.L0OneSwapSimulationReport noMargin, withMargin;
+        var prior = Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_MARGIN");
+        try
+        {
+            Environment.SetEnvironmentVariable("RAVEN_HNSW_L0_MARGIN", null);
+            using (var rTx = Env.ReadTransaction())
+                noMargin = Hnsw.SimulateL0OneSwapRepair(rTx.LowLevelTransaction, treeName, queryBuffer, numberOfQueries, rho, betaL0);
+
+            Environment.SetEnvironmentVariable("RAVEN_HNSW_L0_MARGIN", "1");
+            using (var rTx = Env.ReadTransaction())
+                withMargin = Hnsw.SimulateL0OneSwapRepair(rTx.LowLevelTransaction, treeName, queryBuffer, numberOfQueries, rho, betaL0);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("RAVEN_HNSW_L0_MARGIN", prior);
+        }
+
+        Output.WriteLine($"no-margin: {noMargin}");
+        Output.WriteLine($"+margin:   {withMargin}");
+
+        // Margin is a tie-break only — same set of repairable nodes, same number of
+        // swaps applied. (If the chosen v differs, η_post can differ slightly, but
+        // the node count cannot decrease — §15.7 doesn't change WHICH nodes have
+        // ties, only which candidate wins them.)
+        Assert.Equal(noMargin.NodesWithUncoveredQueries, withMargin.NodesWithUncoveredQueries);
+        Assert.Equal(noMargin.NodesRepaired, withMargin.NodesRepaired);
+    }
+
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
     public void UpperLayerRepair_RunsWithoutCrashing_AndRespectsLevel()
     {
         // FRAMEWORK §15.3 upper-layer one-swap repair. Smoke test: the parameterised
