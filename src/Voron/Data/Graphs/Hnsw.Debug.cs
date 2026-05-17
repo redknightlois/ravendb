@@ -1721,7 +1721,14 @@ public unsafe partial class Hnsw
                         bestVCoverage[w] = covCount;
                 }
             }
-            // 3-hop expansion:
+            // 3-hop expansion. When RAVEN_HNSW_L0_4HOP=1 we also collect the
+            // 3-hop frontier so a subsequent 4-hop sweep can run. The 4-hop
+            // gate targets the ~66% of uncovered nodes that have no candidate
+            // within 3 hops + radial ceiling (JOURNAL 2026-05-17 structural
+            // ceiling analysis). β must be lifted (≥1.5) to give 4-hop edges
+            // room inside the radial bound.
+            bool fourHop = Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_4HOP") == "1";
+            var threeHopFrontier = fourHop ? new List<int>(512) : null;
             for (int i = 0; i < twoHopFrontier.Count; i++)
             {
                 int w = twoHopFrontier[i];
@@ -1733,6 +1740,7 @@ public unsafe partial class Hnsw
                 {
                     int x = searchState.GetNodeIndexById(wEdges[k]);
                     if (poolHash.Add(x) == false) continue;
+                    threeHopFrontier?.Add(x);
                     if (x == u) continue;
                     float dux = searchState.Distance(ReadOnlySpan<byte>.Empty, u, x);
                     if (dux > radialCeiling) continue;
@@ -1748,6 +1756,42 @@ public unsafe partial class Hnsw
                     }
                     if (covCount > 0)
                         bestVCoverage[x] = covCount;
+                }
+            }
+            // 4-hop expansion (gated). Same shape as 3-hop but anchored on
+            // threeHopFrontier. The radial-ceiling filter discards most
+            // 4-hop candidates unless β is relaxed; that's the whole point —
+            // only candidates that survive the ceiling can be a §5-feasible
+            // swap target.
+            if (threeHopFrontier != null)
+            {
+                for (int i = 0; i < threeHopFrontier.Count; i++)
+                {
+                    int w = threeHopFrontier[i];
+                    ref var wNode = ref searchState.GetNodeByIndex(w);
+                    if (wNode.EdgesPerLevel.Count <= targetLevel)
+                        continue;
+                    ref var wEdges = ref wNode.EdgesPerLevel[targetLevel];
+                    for (int k = 0; k < wEdges.Count; k++)
+                    {
+                        int y = searchState.GetNodeIndexById(wEdges[k]);
+                        if (poolHash.Add(y) == false) continue;
+                        if (y == u) continue;
+                        float duy = searchState.Distance(ReadOnlySpan<byte>.Empty, u, y);
+                        if (duy > radialCeiling) continue;
+                        int covCount = 0;
+                        for (int vi = 0; vi < visits.Count; vi++)
+                        {
+                            if (visits[vi].covered) continue;
+                            if (useHoeffding && (vi & 1) != 0) continue;
+                            var query = queriesBlob.Slice(visits[vi].qIdx * vectorSizeBytes, vectorSizeBytes);
+                            float dyq = searchState.Distance(query, -1, y);
+                            if (dyq <= rho * visits[vi].dUQ)
+                                covCount++;
+                        }
+                        if (covCount > 0)
+                            bestVCoverage[y] = covCount;
+                    }
                 }
             }
 
