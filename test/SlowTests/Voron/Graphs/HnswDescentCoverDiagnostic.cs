@@ -2455,11 +2455,12 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
             return;
         }
 
+        int efC = int.TryParse(Environment.GetEnvironmentVariable("APOLLO_SPHERE_EFC"), out var efcEnv) && efcEnv > 0 ? efcEnv : 32;
         long Build(string label)
         {
             using var s = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_{label}", out var treeName);
             using var wTx = Env.WriteTransaction();
-            Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: M, numberOfCandidates: 32, VectorEmbeddingType.Single);
+            Hnsw.Create(wTx.LowLevelTransaction, treeName, vectorSizeInBytes, numberOfEdges: M, numberOfCandidates: efC, VectorEmbeddingType.Single);
             var sw = System.Diagnostics.Stopwatch.StartNew();
             using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
             {
