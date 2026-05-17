@@ -279,6 +279,54 @@ result at low λ on real data).
 
 ---
 
+## 2026-05-17 — Cover-mode greedy regresses on Sphere-1M (Phase A null #2)
+
+`RAVEN_APOLLO_GREEDY_MODE=cover` (four-flip default) at M=12 efC=128
+Q=1000: build wall parity (1.02×), η_node and η_front parity or +0.01
+at ρ=0.95, but end-to-end recall drops −15.9pp r@1 at ef=32 and
+−10.7pp at ef=512. Same shape as Phase A radial λ=0.1 regression
+(2026-05-17 above) — selector-cone choice degrades routing on
+cohere-768 at production efC/M.
+
+Combined with Phase A radial null, ALL evaluated Apollonius selector
+variants (radial λ∈{0.1,0.5,0.9}, cover four-flip) underperform plain
+dist-mode α-prune at the same M/efC on real Sphere data. The
+Apollonius framework's recall lever is empirically forced to Phase B
+(repair/enrichment), not Phase A selector geometry.
+
+## 2026-05-17 — L0 repair structural ceiling: 3-hop pool only feeds 34%
+
+Re-reading the 1M cover-A/B diagnostic table: at ρ=0.95 the L0
+`3hopG` (uncovered nodes with at-least-one v in the 3-hop pool inside
+the radial ceiling) is 32.6% (apo) / 25.4% (legacy) at β=1.10, rising
+to 34.1% (apo) / 32.6% (legacy) at β=2.0. This means **~66% of L0
+nodes with uncovered visits have ZERO usable single-swap candidate**
+inside 3 hops, regardless of β or eviction policy.
+
+Implication: single-swap one-iteration L0 repair is bounded above by
+~34% of nodesWithUncovered → maximum simulated post-η lift around
++0.4–0.5 (which matches the observed 0.4075 lift at β=1.10). Further
+single-swap tuning (LCI variants, hub-aware, margin tie-break) is
+≤2-3pp simulated headroom.
+
+Real levers beyond single-swap:
+1. **4-hop pool expansion** — could raise deepG towards 50%, but
+   widens by another M× and would mostly add far candidates outside
+   the radial ceiling unless β ≥ 2.0.
+2. **Multi-swap per node** — only helps the 34% nodes already
+   repairable; bounded by uncovered_per_node × cov_per_v. From the
+   table apo nodesUnc=1041 / total swaps unbounded by code = 697,
+   suggesting most repaired nodes have small uncovered counts.
+3. **Gate 4 / bidirectional repair** — adds reverse edges to bestV
+   without changing u-side eviction. In flight as of 2026-05-17
+   evening; if it helps, lever is reverse-side; if it doesn't, the
+   binding constraint is the radial ceiling on u-side, not the
+   reverse half-step.
+
+The L0 ηpool gap (η_pool − η_cur ≈ 0.27 at ρ=0.95) is not directly
+attackable by single-swap because 66% of it lives in the unreachable
+slice. The reachable 34% has been ≥90% harvested.
+
 ## Open follow-ups (not on the critical path)
 
 - §3 per-node trace reservoirs to recover the ungated +4pp L0 lift at
