@@ -240,16 +240,50 @@ public partial class Hnsw
     internal static readonly float _envSpreadSkip = (1f + MathF.Sqrt(MathF.Max(0f, _envChi))) * (1f + MathF.Sqrt(MathF.Max(0f, _envChi)));
 
     // Greedy ordering for the post-kCapture fill in DoWorkApolloniusCover.
-    //   "cover" (default) — pick by popcount(witness & needsMore); ties → cheapest.
-    //   "dist"            — pick remaining candidates by ascending d(u, v), spread-gated.
-    // The χ sweep on Sphere-100K showed cover-gain plateaus ~12pp under legacy even
-    // at χ=1.0; ascending-distance ordering closes that residual.
-    // Greedy mode for the post-kCapture fill. Default "dist" (ascending d(u,v) +
-    // spread). The χ × greedy-mode sweep on Sphere-100K showed cover-gain greedy
-    // underperforms dist-greedy by 3–4pp at every χ on real clustered embeddings.
-    // Set RAVEN_APOLLO_GREEDY_MODE=cover to restore the original popcount-greedy.
-    internal static readonly bool _envGreedyByDist =
-        string.Equals(Environment.GetEnvironmentVariable("RAVEN_APOLLO_GREEDY_MODE") ?? "dist", "dist", StringComparison.OrdinalIgnoreCase);
+    //   "dist"   (default) — pick remaining candidates by ascending d(u, v), spread-gated.
+    //   "cover"            — pick by popcount(witness & needsMore); ties → cheapest.
+    //   "radial"           — pick candidates whose d(u, v) is closest to the radial-shell
+    //                        target d* ≈ (1 − λ) · median(d(u, q)) derived from FRAMEWORK
+    //                        §27 Theorem C. The construction candidate pool's distToSrc[]
+    //                        is used as the trace sample for median(d(u, q)) — these are
+    //                        the queries that beam-routed to u to begin with, so under
+    //                        the local-isotropic assumption (C3) they sample μ_u.
+    internal enum ApolloGreedyMode : byte { Nearest = 0, Cover = 1, Radial = 2 }
+    internal static readonly ApolloGreedyMode _envGreedyMode = ParseGreedyMode();
+    internal static readonly bool _envGreedyByDist = _envGreedyMode == ApolloGreedyMode.Nearest;
+    internal static readonly bool _envGreedyByRadial = _envGreedyMode == ApolloGreedyMode.Radial;
+
+    private static ApolloGreedyMode ParseGreedyMode()
+    {
+        var s = Environment.GetEnvironmentVariable("RAVEN_APOLLO_GREEDY_MODE");
+        if (string.IsNullOrEmpty(s)) return ApolloGreedyMode.Nearest;
+        if (string.Equals(s, "cover", StringComparison.OrdinalIgnoreCase)) return ApolloGreedyMode.Cover;
+        if (string.Equals(s, "radial", StringComparison.OrdinalIgnoreCase)) return ApolloGreedyMode.Radial;
+        return ApolloGreedyMode.Nearest;
+    }
+
+    // Radial-shell target: d* = (1 − λ_radial) · median(distToSrc). λ_radial defaults to
+    // the witness λ so a single knob controls both the cover witness threshold and the
+    // shell target. Override with RAVEN_APOLLO_RADIAL_LAMBDA.
+    internal static readonly float _envRadialLambda = ParseRadialLambda();
+    private static float ParseRadialLambda()
+    {
+        var s = Environment.GetEnvironmentVariable("RAVEN_APOLLO_RADIAL_LAMBDA");
+        if (string.IsNullOrEmpty(s) == false && float.TryParse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) && v > 0f && v < 1f)
+            return v;
+        return _envApolloLambda;
+    }
+
+    // Protected-nearest count for radial mode: the first p edges are picked by ascending
+    // d(u, v) to keep upper-layer / entry-point quality. Default 1.
+    internal static readonly int _envRadialProtect = ParseRadialProtect();
+    private static int ParseRadialProtect()
+    {
+        var s = Environment.GetEnvironmentVariable("RAVEN_APOLLO_RADIAL_PROTECT");
+        if (string.IsNullOrEmpty(s) == false && int.TryParse(s, out var v) && v >= 0 && v <= 8)
+            return v;
+        return 1;
+    }
 
     // Default L0 kCapture OFF — the unconditional M/2 nearest-by-distance fill
     // bypassed the spread filter and created redundant near-edges that crowded
@@ -1027,7 +1061,9 @@ public partial class Hnsw
                     // thresholds, query magnitudes, cutoffs, JL projections, QuDotCache lookups —
                     // produces values the greedy selection never reads. We compute them only
                     // when the cover-gain greedy actually needs the witness bitmask.
-                    bool needWitness = _envGreedyByDist == false;
+                    // Cover-mode is the only path that consumes the Q_u witness bitmask;
+                    // dist and radial both score off distToSrc alone.
+                    bool needWitness = _envGreedyMode == ApolloGreedyMode.Cover;
 
                     // λ · δ(u, q_k) thresholds for each q in Q_u. In the chordal metric this
                     // corresponds to a ρ_metric = √λ Apollonius cell; the inequality test
@@ -1383,6 +1419,41 @@ public partial class Hnsw
                     // best-gain on the next round (any future picked set is a superset of
                     // the current one, so the same conflicting w would re-block them).
                     bool greedyByDist = _envGreedyByDist;
+                    bool greedyByRadial = _envGreedyByRadial;
+
+                    // Radial-shell target: d_target = (1 − λ_radial) · median(distToSrc).
+                    // FRAMEWORK §27 Theorem C: under local-isotropic conditions a single
+                    // descent edge maximises its descent-cell angular mass when its length
+                    // sits at this shell. The construction candidate pool is the trace
+                    // sample for median(d(u, q)) — these are the queries that beam-routed
+                    // to u, so under C3 they sample μ_u. radialProtect of the picks are
+                    // reserved for ascending-distance fill to preserve entry-point /
+                    // upper-layer quality before the shell allocation begins.
+                    float radialDTarget = 0f;
+                    float radialLogTarget = 0f;
+                    int radialProtect = 0;
+                    if (greedyByRadial)
+                    {
+                        radialProtect = Math.Min(_envRadialProtect, M);
+                        if (N >= 2)
+                        {
+                            // Median via a per-cover scratch copy of distToSrc. Cost is
+                            // O(N log N) once per cover invocation — amortised across the
+                            // M-edge greedy loop and dwarfed by distance compute.
+                            var tmp = new float[N];
+                            distToSrc.Slice(0, N).CopyTo(tmp);
+                            Array.Sort(tmp);
+                            float median = tmp[N / 2];
+                            radialDTarget = (1f - _envRadialLambda) * median;
+                            radialLogTarget = MathF.Log(radialDTarget + 1e-6f);
+                        }
+                        // Degenerate pool → fall back to dist-greedy.
+                        if (radialDTarget <= 0f)
+                        {
+                            greedyByRadial = false;
+                            greedyByDist = true;
+                        }
+                    }
                     // Page-locality tie-breaker: when on, prefer candidates whose vector
                     // shares (or is near) u's page within a configurable near-tie window.
                     // Page = VectorId / PageSize per Voron's container layout. The source
@@ -1405,7 +1476,40 @@ public partial class Hnsw
                             needsMore &= (1UL << Qm) - 1;
 
                         int bestI = -1;
-                        if (greedyByDist)
+                        if (greedyByRadial)
+                        {
+                            // Radial mode: first radialProtect picks are by ascending d(u,v);
+                            // the rest minimise |log((d+eps)/(d_target+eps))|, the log-ratio
+                            // distance to the descent-optimal shell from FRAMEWORK §27 C.
+                            if (candidates.Count < radialProtect)
+                            {
+                                float bestDist = float.MaxValue;
+                                for (int i = 0; i < N; i++)
+                                {
+                                    if (picked[i]) continue;
+                                    float d = distToSrc[i];
+                                    if (d >= bestDist) continue;
+                                    bestDist = d;
+                                    bestI = i;
+                                }
+                            }
+                            else
+                            {
+                                const float eps = 1e-6f;
+                                float bestScore = float.MaxValue;
+                                for (int i = 0; i < N; i++)
+                                {
+                                    if (picked[i]) continue;
+                                    float d = distToSrc[i];
+                                    float score = MathF.Abs(MathF.Log(d + eps) - radialLogTarget);
+                                    if (score >= bestScore) continue;
+                                    bestScore = score;
+                                    bestI = i;
+                                }
+                            }
+                            if (bestI == -1) break;
+                        }
+                        else if (greedyByDist)
                         {
                             // Distance-ordered fill: pick the nearest unpicked v to u that
                             // also passes spread. The cover bitmask is updated for telemetry
@@ -2030,7 +2134,7 @@ public partial class Hnsw
                 // The Q_u sample + per-node dot cache only matter for the cover-greedy witness
                 // bitmask. In dist-greedy mode (the default) or legacy α-prune, none of it is
                 // read. At 10 M nodes the dot cache alone is ~1.28 GB (10M × 32 floats × 4 B).
-                bool quUnused = _envGreedyByDist || Hnsw.UseLegacyHeuristic;
+                bool quUnused = _envGreedyMode != ApolloGreedyMode.Cover || Hnsw.UseLegacyHeuristic;
                 if (quUnused)
                 {
                     GlobalQuerySample = [];
