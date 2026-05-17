@@ -1813,7 +1813,15 @@ public unsafe partial class Hnsw
                     // candidate s whose removal loses the FEWEST currently-covered queries
                     // (treating bestV as a substitute witness). Falls back to farthest-non-
                     // protected when no s is a unique witness on the sample.
-                    int minLoss = int.MaxValue;
+                    //
+                    // Optional hub-aware penalty (RAVEN_HNSW_L0_HUB_AWARE=1): add the descent
+                    // visit-count of s to its eviction score. The intuition is that nodes
+                    // visited frequently during descent are routing hubs whose removal hurts
+                    // low-ef search even when their immediate witness coverage is replaceable.
+                    // Hub count comes from the same per-node trace reservoir (§3) we use for
+                    // the Hoeffding gate, so no extra bookkeeping is needed.
+                    bool hubAware = Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_HUB_AWARE") == "1";
+                    long minScore = long.MaxValue;
                     for (int ei = protectedCount; ei < edgeDists.Length; ei++)
                     {
                         int cand = edgeDists[ei].idx;
@@ -1840,9 +1848,15 @@ public unsafe partial class Hnsw
                             }
                             if (!otherWitness) loss++;
                         }
-                        if (loss < minLoss || (loss == minLoss && (worstS == -1 || edgeDists[ei].dus > searchState.Distance(ReadOnlySpan<byte>.Empty, u, worstS))))
+                        // Hub penalty: how often was `cand` itself a descent visit?
+                        // Reservoir-based, so capped at reservoirCapPerNode in worst case.
+                        long hub = 0;
+                        if (hubAware && l0NodeVisits.TryGetValue(cand, out var candVisits))
+                            hub = candVisits.Count;
+                        long score = (long)loss + hub;
+                        if (score < minScore || (score == minScore && (worstS == -1 || edgeDists[ei].dus > searchState.Distance(ReadOnlySpan<byte>.Empty, u, worstS))))
                         {
-                            minLoss = loss;
+                            minScore = score;
                             worstS = cand;
                         }
                     }
