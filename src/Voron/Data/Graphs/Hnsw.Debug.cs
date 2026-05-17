@@ -2006,6 +2006,7 @@ public unsafe partial class Hnsw
                 // on held-out recall measurement before any persist.
                 if (applyMutations && worstS != -1)
                 {
+                    long uNodeId = searchState.GetNodeByIndex(u).NodeId;
                     long worstSNodeId = searchState.GetNodeByIndex(worstS).NodeId;
                     long bestVNodeId = searchState.GetNodeByIndex(bestV).NodeId;
                     // re-fetch u's ref AFTER any reallocation triggered by the two calls above
@@ -2023,6 +2024,67 @@ public unsafe partial class Hnsw
                     }
                     uEdgesMut.AddUnsafe(bestVNodeId);
                     ArrayPool<long>.Shared.Return(snapshot);
+
+                    // FRAMEWORK Gate 4 — bidirectional repair (RAVEN_HNSW_L0_BIDIRECTIONAL=1).
+                    // The forward edge u→bestV makes bestV reachable from u; the reverse edge
+                    // bestV→u makes u reachable from bestV (raises u's IN-degree, which lifts
+                    // η_front when u is a tube node for queries that route through bestV).
+                    // Eviction on the v side: keep edges ≤ M by dropping bestV's farthest
+                    // existing edge in cosine distance — symmetric to the LCI farthest-non-
+                    // protected default. Skip if u is already in bestV's edges.
+                    bool bidir = Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_BIDIRECTIONAL") == "1";
+                    if (bidir)
+                    {
+                        ref var vNodeMut = ref searchState.GetNodeByIndex(bestV);
+                        if (vNodeMut.EdgesPerLevel.Count > targetLevel)
+                        {
+                            ref var vEdgesMut = ref vNodeMut.EdgesPerLevel[targetLevel];
+                            bool alreadyHasU = false;
+                            for (int i = 0; i < vEdgesMut.Count; i++)
+                            {
+                                if (vEdgesMut[i] == uNodeId) { alreadyHasU = true; break; }
+                            }
+                            if (alreadyHasU == false)
+                            {
+                                int M = searchState.Options.NumberOfEdges;
+                                if (vEdgesMut.Count < M)
+                                {
+                                    // Free slot — just append.
+                                    vEdgesMut.Add(searchState.Llt.Allocator, uNodeId);
+                                }
+                                else
+                                {
+                                    // Evict bestV's farthest existing edge to make room for u.
+                                    int vCount = vEdgesMut.Count;
+                                    int worstIdx = -1;
+                                    float worstDist = -1f;
+                                    for (int i = 0; i < vCount; i++)
+                                    {
+                                        int nIdx = searchState.GetNodeIndexById(vEdgesMut[i]);
+                                        float dvn = searchState.Distance(ReadOnlySpan<byte>.Empty, bestV, nIdx);
+                                        if (dvn > worstDist) { worstDist = dvn; worstIdx = i; }
+                                    }
+                                    // Only displace if u is closer to bestV than the worst existing
+                                    // edge — strict improvement. If u is the farthest, the bidir
+                                    // add would push v's frontier outward; skip to preserve quality.
+                                    float duv = searchState.Distance(ReadOnlySpan<byte>.Empty, bestV, u);
+                                    if (worstIdx >= 0 && duv < worstDist)
+                                    {
+                                        var vSnap = ArrayPool<long>.Shared.Rent(vCount);
+                                        for (int i = 0; i < vCount; i++) vSnap[i] = vEdgesMut[i];
+                                        vEdgesMut.ResetAndEnsureCapacity(searchState.Llt.Allocator, vCount);
+                                        for (int i = 0; i < vCount; i++)
+                                        {
+                                            if (i == worstIdx) continue;
+                                            vEdgesMut.AddUnsafe(vSnap[i]);
+                                        }
+                                        vEdgesMut.AddUnsafe(uNodeId);
+                                        ArrayPool<long>.Shared.Return(vSnap);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             else
