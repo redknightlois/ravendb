@@ -1311,3 +1311,44 @@ The shell-position histogram (`shell_below_min`, `shell_in_range`,
 `shell_above_max` plus mean d_min / d_med / d_max / d_target) is the
 strict diagnostic that any future selector experiment must report
 before claiming a recall lift.
+
+---
+
+## 30. Strict noise-protocol for selector recall claims
+
+Today's confirmed-on-Sphere-1M data (legacy vs apollonius across
+multiple seeds at the SAME M=12 efC=128) gives observed run-to-run
+recall variance of ±1.5–1.8 pp at ef=512 with Q_queries=1000. SE per
+run is ≈ 0.86 %, so 2σ ≈ 1.7 %. This is the noise floor of *any*
+single-run selector A/B at this regime, regardless of how strong the
+structural diagnostic looks.
+
+Consequences for any future selector experiment:
+
+1. **Single-run deltas under ±2 pp are noise.** Report the trial
+   count and the empirical run-to-run spread; if Δrecall < 2 pp and
+   trials = 1, do not claim a lift.
+
+2. **Δη ≠ Δrecall.** The §15.10 simulator reports η_pre/η_post on the
+   *training* sample — its lift does not carry to held-out queries
+   unless the training distribution matches the test distribution
+   AND per-node m clears the §7 Hoeffding bound. Today's repair runs
+   show simulator Δη +0.37 with Δrecall ≈ 0.
+
+3. **Q_queries ≥ 1000 is required.** At Q=200 the SE doubles and the
+   noise floor swamps the typical +0.5-1 pp signals that selector
+   tweaks produce.
+
+4. **Build-wall claims are stable** at one run. The cosine SIMD
+   dominates and selector code is ≤ 1 % of wall (per the dotnet-trace
+   profile), so the 0.78–0.97× build wall ratios *are* signal.
+
+5. **The recall lever at this regime is M / efC, not the selector.**
+   Bumping M=12→24 lifts r@1 ef=16 by +21 pp at +29 % build cost.
+   Once M is at its sweet spot, the apollonius selector adds
+   build-wall efficiency at recall parity. Further selector work
+   should aim at build wall, not recall.
+
+These five points are the §27 hierarchy distilled to a strict
+protocol that future selector PRs in this branch must clear before
+the journal records a positive result.
