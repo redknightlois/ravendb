@@ -258,10 +258,24 @@ single 1M run each, M=12 efC=128 Q=1000):
 
 All Δrecall within ±0.5pp (one-run SE ≈ 0.86%, 2σ ≈ 1.7%). Builds
 0.97×/0.96× legacy. Phase A radial is at parity with dist on real
-cohere-768 — confirms the synthetic-Gaussian λ-sweep finding that
-the construction beam already returns d_min ≈ d_target so the radial
-log-ratio reduces to nearest. See FRAMEWORK.md §29 for the full
-derivation. Memory: [[feedback-apollonius-radial-phase-a-null]].
+cohere-768 at default λ=0.9 — confirms the synthetic-Gaussian
+λ-sweep finding that the construction beam already returns
+d_min ≈ d_target so the radial log-ratio reduces to nearest.
+
+**Radial at λ=0.1 is a regression on real Sphere** (not parity as
+synthetic Gaussians showed). At ef=32 r@1 dropped from 64.7 (legacy)
+to 58.8 (radial), and -5.9 → -1.5 pp across the ef sweep. Combined
+with repair, no recovery. Diagnostic shows η_3hop apo radial = 0.814
+vs dist 0.768 at ρ=0.95 — the radial graph has a *richer* deep pool
+but *worse* current edges. The shell picks reach nodes dist mode
+wouldn't, but those edges hurt routing quality at all ef. This means
+even with pool enrichment, the angular-mass-gradient argument bites:
+the descent-optimal shell on near-isotropic real data is not the
+nearest cluster, and reaching it costs entry-point quality.
+
+See FRAMEWORK.md §29 for the framework derivation. Memory:
+[[feedback-apollonius-radial-phase-a-null]] (extended with negative
+result at low λ on real data).
 
 ---
 
