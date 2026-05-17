@@ -217,6 +217,35 @@ production recall dashboards in the first weeks (Theorem 1 reminder).
 
 ---
 
+## 2026-05-17 — L0 repair at Q=1000 confirmed at noise floor
+
+Direct A/B re-test of L0 repair on Sphere-1M Q=1000 (M=12, efC=128,
+all four variants — legacy, apollonius, apollonius+repair,
+legacy+repair) on the same seed:
+
+| ef | legacy | apo | apo_rep | legacy_rep |
+|---|---:|---:|---:|---:|
+| 32 | 64.7 | 64.2 | 64.9 | 65.0 |
+| 64 | 75.1 | 75.6 | 75.7 | 76.3 |
+| 128 | 84.0 | 82.9 | 84.5 | 83.8 |
+| 256 | 89.8 | 88.4 | 89.2 | 88.7 |
+| 512 | 93.4 | 91.6 | 92.4 | 92.3 |
+
+Repair effect over plain build: +0.1 to +1.6pp. The earlier no-repair
+RUN (same day) showed apo +0.4pp over legacy at ef=128 / ef=512, this
+run shows apo −1.1 / −1.8pp — that ±1.8pp swing IS the predicted
+Q=1000 noise (2σ ≈ 1.7%). The +3-4pp repair signal at Q=200 was
+sampling noise, as the high-precision grid foretold.
+
+**Implication**: at production Q=1000 the L0 repair primitive does
+not clear the bar by itself. The structural argument (η_pre 0.26 →
+η_post 0.64 simulator) still holds, but Δη ≠ recall, exactly as
+Gate 5 (recall holdout) warns. The repair recipe remains a
+non-destructive build-wall win (0.78-0.82×) on Sphere-1M/10M; it is
+not a *recall* lever at Q=1000.
+
+---
+
 ## 2026-05-17 — Phase A radial selector validation (Sphere-1M Q=1000)
 
 `RAVEN_APOLLO_GREEDY_MODE=radial` vs default dist (λ=0.9 default,
