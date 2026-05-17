@@ -2823,4 +2823,183 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
             }
         }
     }
+
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
+    public void RadialOracle_ClusteredGaussians_DistVsRadialSideBySide()
+    {
+        // FRAMEWORK §27 Theorem C oracle: on data with local clusters (mixture
+        // of Gaussians), the per-cover candidate pool contains both near-
+        // cluster members (small d(u,v)) and inter-cluster jumps (large d(u,v)).
+        // The radial shell d_target = (1−λ)·median(distToSrc) should land
+        // in-range, so the radial selector picks edges at the descent-optimal
+        // shell rather than nearest-first. The diagnostics shell_in_range / *_below
+        // / *_above_max measure where d_target actually falls.
+        //
+        // Expected outcome on clustered data: shell_in_range > 0% and radial
+        // gives a measurable (possibly small) recall delta vs dist on
+        // held-out queries. On isotropic data the same probes show
+        // shell_below_min ≈ 100% (companion `ApolloniusSelector_HighDim_RecallSweep`
+        // run with env=radial confirms this).
+        int d = int.TryParse(Environment.GetEnvironmentVariable("APOLLO_D"), out var dEnv) ? dEnv : 64;
+        int K = int.TryParse(Environment.GetEnvironmentVariable("APOLLO_K"), out var kEnv) ? kEnv : 16;     // # clusters
+        int perCluster = int.TryParse(Environment.GetEnvironmentVariable("APOLLO_PERC"), out var pcEnv) ? pcEnv : 625;
+        int N = K * perCluster;
+        int numberOfQueries = int.TryParse(Environment.GetEnvironmentVariable("APOLLO_Q"), out var qEnv) ? qEnv : 500;
+        int M = int.TryParse(Environment.GetEnvironmentVariable("APOLLO_M"), out var mEnv) ? mEnv : 12;
+        float clusterStd = 0.10f;
+        const int kEval = 10;
+        int[] efs = [16, 32, 64, 128, 256];
+
+        var rng = new Random(101);
+        var centers = new float[K][];
+        for (int c = 0; c < K; c++)
+            centers[c] = RandomUnitVector(rng, d);
+
+        var vectors = new float[N][];
+        for (int c = 0; c < K; c++)
+            for (int j = 0; j < perCluster; j++)
+                vectors[c * perCluster + j] = PerturbedUnitVector(rng, centers[c], clusterStd);
+
+        var queries = new float[numberOfQueries][];
+        for (int q = 0; q < numberOfQueries; q++)
+        {
+            // Half queries are near-cluster (in-distribution), half are far perturbations.
+            if (q < numberOfQueries / 2)
+                queries[q] = PerturbedUnitVector(rng, centers[q % K], clusterStd);
+            else
+                queries[q] = RandomUnitVector(rng, d);
+        }
+
+        Output.WriteLine($"[clustered d={d} K={K} N={N} M={M} Q={numberOfQueries} clusterStd={clusterStd}]");
+
+        // Ground truth via legacy exact NN. Run before any apollonius build so the
+        // exact search uses a fresh tree.
+        var groundTruth = new HashSet<long>[numberOfQueries];
+        Hnsw.UseLegacyHeuristic = true;
+        BuildGraph("truth");
+        using (var rTx = Env.ReadTransaction())
+        {
+            for (int q = 0; q < numberOfQueries; q++)
+                groundTruth[q] = TopKExact(rTx.LowLevelTransaction, "truth", queries[q], kEval);
+        }
+
+        // 1) legacy α-prune baseline
+        Hnsw.UseLegacyHeuristic = true;
+        var swL = System.Diagnostics.Stopwatch.StartNew();
+        BuildGraph("legacy");
+        swL.Stop();
+
+        // 2) apollonius dist (default)
+        Hnsw.UseLegacyHeuristic = false;
+        Hnsw._envGreedyMode = Hnsw.ApolloGreedyMode.Nearest;
+        Hnsw.CoverProfileReset();
+        var swD = System.Diagnostics.Stopwatch.StartNew();
+        BuildGraph("apo_dist");
+        swD.Stop();
+        long distModeRadialCalls = Hnsw.RadialCalls;
+        long distEntries = Hnsw.CoverModeNearestEntries;
+
+        // 3) apollonius radial
+        Hnsw._envGreedyMode = Hnsw.ApolloGreedyMode.Radial;
+        Hnsw.CoverProfileReset();
+        var swR = System.Diagnostics.Stopwatch.StartNew();
+        BuildGraph("apo_radial");
+        swR.Stop();
+        long radialCalls = Hnsw.RadialCalls;
+        long radialBelow = Hnsw.RadialShellBelowMin;
+        long radialIn = Hnsw.RadialShellInRange;
+        long radialAbove = Hnsw.RadialShellAboveMax;
+        double dmin = Hnsw.RadialDMinSum1e6 / (1_000_000.0 * Math.Max(radialCalls, 1));
+        double dmed = Hnsw.RadialDMedSum1e6 / (1_000_000.0 * Math.Max(radialCalls, 1));
+        double dmax = Hnsw.RadialDMaxSum1e6 / (1_000_000.0 * Math.Max(radialCalls, 1));
+        double dtgt = Hnsw.RadialDTargetSum1e6 / (1_000_000.0 * Math.Max(radialCalls, 1));
+
+        // Reset for cleanliness in later tests.
+        Hnsw._envGreedyMode = Hnsw.ApolloGreedyMode.Nearest;
+
+        Output.WriteLine($"[build wall] legacy={swL.ElapsedMilliseconds}ms  apo_dist={swD.ElapsedMilliseconds}ms ({(double)swD.ElapsedMilliseconds / swL.ElapsedMilliseconds:F2}x)  apo_radial={swR.ElapsedMilliseconds}ms ({(double)swR.ElapsedMilliseconds / swL.ElapsedMilliseconds:F2}x)");
+        Output.WriteLine($"[dist sanity] CoverModeNearestEntries during dist build = {distEntries}, RadialCalls during dist = {distModeRadialCalls} (should be 0)");
+        if (radialCalls > 0)
+        {
+            double pctR(long s) => 100.0 * s / Math.Max(radialCalls, 1);
+            Output.WriteLine($"[radial shell] calls={radialCalls}  below_min={radialBelow} ({pctR(radialBelow):F1}%)  in_range={radialIn} ({pctR(radialIn):F1}%)  above_max={radialAbove} ({pctR(radialAbove):F1}%)");
+            Output.WriteLine($"[radial geom]  d_min={dmin:F4}  d_med={dmed:F4}  d_max={dmax:F4}  d_target={dtgt:F4}");
+        }
+
+        Output.WriteLine($"{"ef",6} {"legacy",10} {"apo_dist",10} {"apo_radial",12} {"Δ(R-L)",10} {"Δ(R-D)",10}");
+        foreach (var ef in efs)
+        {
+            double rL = RecallAt(ef, "legacy");
+            double rD = RecallAt(ef, "apo_dist");
+            double rR = RecallAt(ef, "apo_radial");
+            Output.WriteLine($"{ef,6} {rL,10:F4} {rD,10:F4} {rR,12:F4} {rR - rL,+10:F4} {rR - rD,+10:F4}");
+        }
+
+        Assert.True(true);
+
+        double RecallAt(int efS, string label)
+        {
+            using var rTx = Env.ReadTransaction();
+            double sum = 0;
+            for (int q = 0; q < numberOfQueries; q++)
+            {
+                var approx = TopKApprox(rTx.LowLevelTransaction, label, queries[q], kEval, efS);
+                int hits = 0;
+                foreach (var id in approx)
+                    if (groundTruth[q].Contains(id))
+                        hits++;
+                sum += (double)hits / kEval;
+            }
+            return sum / numberOfQueries;
+        }
+
+        void BuildGraph(string label)
+        {
+            using var s = Slice.From(Allocator, $"{nameof(RadialOracle_ClusteredGaussians_DistVsRadialSideBySide)}_{label}", out var treeName);
+            using var wTx = Env.WriteTransaction();
+            Hnsw.Create(wTx.LowLevelTransaction, treeName, d * sizeof(float), numberOfEdges: M, numberOfCandidates: 32, VectorEmbeddingType.Single);
+            using (var registration = Hnsw.RegistrationFor(wTx.LowLevelTransaction, treeName, new Random(42)))
+            {
+                for (int i = 0; i < N; i++)
+                    registration.Register(i + 1, MemoryMarshal.Cast<float, byte>(vectors[i]));
+                registration.Commit(CancellationToken.None);
+            }
+            wTx.Commit();
+        }
+
+        HashSet<long> TopKExact(global::Voron.Impl.LowLevelTransaction llt, string treeName, float[] queryVec, int topK)
+        {
+            using var s = Slice.From(Allocator, $"{nameof(RadialOracle_ClusteredGaussians_DistVsRadialSideBySide)}_{treeName}", out var treeSlice);
+            var qBytes = MemoryMarshal.Cast<float, byte>(queryVec).ToArray();
+            using var search = Hnsw.ExactNearest(llt, treeSlice, numberOfCandidates: topK, qBytes, minimumSimilarity: 0f, hasFilterMatch: false);
+            return DrainTopK(search, topK);
+        }
+
+        HashSet<long> TopKApprox(global::Voron.Impl.LowLevelTransaction llt, string treeName, float[] queryVec, int topK, int efS)
+        {
+            using var s = Slice.From(Allocator, $"{nameof(RadialOracle_ClusteredGaussians_DistVsRadialSideBySide)}_{treeName}", out var treeSlice);
+            var qBytes = MemoryMarshal.Cast<float, byte>(queryVec).ToArray();
+            using var search = Hnsw.ApproximateNearest(llt, treeSlice, numberOfCandidates: efS, qBytes, minimumSimilarity: 0f, hasFilterMatch: false);
+            return DrainTopK(search, topK);
+        }
+
+        static HashSet<long> DrainTopK(global::Voron.Data.Graphs.Hnsw.VectorSearchRetriever search, int topK)
+        {
+            var matches = new long[Math.Max(topK, 16)];
+            var distances = new float[matches.Length];
+            var collected = new List<(long id, float dist)>();
+            int read;
+            do
+            {
+                read = search.Fill(matches, distances, filter: null);
+                for (int i = 0; i < read; i++)
+                    collected.Add((matches[i], distances[i]));
+            } while (read != 0);
+            collected.Sort((a, b) => a.dist.CompareTo(b.dist));
+            var result = new HashSet<long>();
+            foreach (var (id, _) in collected.Take(topK))
+                result.Add(id);
+            return result;
+        }
+    }
 }
