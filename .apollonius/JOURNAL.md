@@ -217,12 +217,39 @@ production recall dashboards in the first weeks (Theorem 1 reminder).
 
 ---
 
+## 2026-05-17 — Phase A radial selector validation (Sphere-1M Q=1000)
+
+`RAVEN_APOLLO_GREEDY_MODE=radial` vs default dist (λ=0.9 default,
+single 1M run each, M=12 efC=128 Q=1000):
+
+| mode | build ms | r@1 ef=128 | r@1 ef=512 | r@10 ef=128 |
+|---|---:|---:|---:|---:|
+| apo dist (RUN A) | 153,849 | 85.0% | 93.1% | 82.2% |
+| apo radial (RUN B) | 150,547 | 83.7% | 92.8% | 81.9% |
+
+All Δrecall within ±0.5pp (one-run SE ≈ 0.86%, 2σ ≈ 1.7%). Builds
+0.97×/0.96× legacy. Phase A radial is at parity with dist on real
+cohere-768 — confirms the synthetic-Gaussian λ-sweep finding that
+the construction beam already returns d_min ≈ d_target so the radial
+log-ratio reduces to nearest. See FRAMEWORK.md §29 for the full
+derivation. Memory: [[feedback-apollonius-radial-phase-a-null]].
+
+---
+
 ## Open follow-ups (not on the critical path)
 
 - §3 per-node trace reservoirs to recover the ungated +4pp L0 lift at
-  Q=4000 (gate currently rejects all swaps because per-node m≈1).
-- Two-hop forward expansion in §15.5 pool enrichment (4.4pp Up +
-  22.6pp L0 gain on Sphere-1M vs 1.1pp/8.4pp for reverse-only).
+  Q=4000 (gate currently rejects all swaps because per-node m≈1). The
+  reservoir is implemented (Algorithm R) but the per-node m stays
+  tiny at L0 because most descents end before reaching deep nodes;
+  may need a global-pooled Hoeffding variant instead.
+- **Construction-time pool enrichment** in the cover step (1-hop
+  forward expansion of beam-search candidates before greedy pick).
+  This is the only mechanism that would let Phase A radial see the
+  shell-radius candidates Theorem D says exist in the 2-hop pool
+  (`H_u = 0.27` at ρ=0.95 on Sphere-1M). The L0 *repair* simulator
+  already uses 2-hop + 3-hop pools, so the lever is on the build side
+  not the repair side.
 - Page-locality tie-break in selectors — both per-pick and M-fill
   prototypes were null results; the existing sort-by-VectorId path
   already captures page locality.

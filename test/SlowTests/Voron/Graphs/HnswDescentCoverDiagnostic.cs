@@ -2527,6 +2527,26 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
             Output.WriteLine($"[build wall] apollonius_repair={repairMs}ms (swaps={repairSwaps} pass_ms={repairPassMs})");
             Output.WriteLine($"[build wall] legacy_repair={legacyRepairMs}ms (swaps={legacyRepairSwaps} pass_ms={legacyRepairPassMs})");
         }
+        // FRAMEWORK §29 diagnostic: when RAVEN_APOLLO_GREEDY_MODE=radial is set,
+        // the radial counters accumulate during the apollonius build. Print the
+        // shell-position histogram so we can confirm on real data whether the
+        // construction beam ever exposes shell-radius candidates to Phase A.
+        {
+            long rc = Hnsw.RadialCalls;
+            if (rc > 0)
+            {
+                long below = Hnsw.RadialShellBelowMin;
+                long inRange = Hnsw.RadialShellInRange;
+                long above = Hnsw.RadialShellAboveMax;
+                double pct(long s) => 100.0 * s / Math.Max(rc, 1);
+                double dmin = Hnsw.RadialDMinSum1e6 / (1_000_000.0 * rc);
+                double dmed = Hnsw.RadialDMedSum1e6 / (1_000_000.0 * rc);
+                double dmax = Hnsw.RadialDMaxSum1e6 / (1_000_000.0 * rc);
+                double dtgt = Hnsw.RadialDTargetSum1e6 / (1_000_000.0 * rc);
+                Output.WriteLine($"[radial shell] calls={rc}  below_min={below} ({pct(below):F1}%)  in_range={inRange} ({pct(inRange):F1}%)  above_max={above} ({pct(above):F1}%)");
+                Output.WriteLine($"[radial geom]  d_min={dmin:F4}  d_med={dmed:F4}  d_max={dmax:F4}  d_target={dtgt:F4}");
+            }
+        }
 
         var queryBuffer = new byte[numberOfQueries * vectorSizeInBytes];
         for (int q = 0; q < numberOfQueries; q++)
