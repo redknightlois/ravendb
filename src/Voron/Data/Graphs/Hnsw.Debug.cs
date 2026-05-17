@@ -2054,19 +2054,38 @@ public unsafe partial class Hnsw
                                 }
                                 else
                                 {
-                                    // Evict bestV's farthest existing edge to make room for u.
+                                    // Evict bestV's farthest NON-PROTECTED existing edge to make
+                                    // room for u. Protection mirrors u-side default: keep bestV's
+                                    // M/2 closest edges untouched (framework §5). Without this,
+                                    // bidirectional repair can destructively evict bestV's
+                                    // critical near-neighbour edges and break Theorem-1 safety.
                                     int vCount = vEdgesMut.Count;
+                                    var vEdgeDists = new (int idx, float dvn)[vCount];
+                                    for (int i = 0; i < vCount; i++)
+                                    {
+                                        int nIdx = searchState.GetNodeIndexById(vEdgesMut[i]);
+                                        vEdgeDists[i] = (i, searchState.Distance(ReadOnlySpan<byte>.Empty, bestV, nIdx));
+                                    }
+                                    // Rank by ascending distance to determine protected prefix.
+                                    var vRanked = new int[vCount];
+                                    for (int i = 0; i < vCount; i++) vRanked[i] = i;
+                                    System.Array.Sort(vRanked, (a, b) => vEdgeDists[a].dvn.CompareTo(vEdgeDists[b].dvn));
+                                    int vProtectedCount = System.Math.Max(1, vCount / 2);
+                                    var vProtected = new System.Collections.Generic.HashSet<int>();
+                                    for (int i = 0; i < vProtectedCount; i++) vProtected.Add(vRanked[i]);
                                     int worstIdx = -1;
                                     float worstDist = -1f;
                                     for (int i = 0; i < vCount; i++)
                                     {
-                                        int nIdx = searchState.GetNodeIndexById(vEdgesMut[i]);
-                                        float dvn = searchState.Distance(ReadOnlySpan<byte>.Empty, bestV, nIdx);
-                                        if (dvn > worstDist) { worstDist = dvn; worstIdx = i; }
+                                        if (vProtected.Contains(i)) continue;
+                                        if (vEdgeDists[i].dvn > worstDist)
+                                        {
+                                            worstDist = vEdgeDists[i].dvn;
+                                            worstIdx = i;
+                                        }
                                     }
-                                    // Only displace if u is closer to bestV than the worst existing
-                                    // edge — strict improvement. If u is the farthest, the bidir
-                                    // add would push v's frontier outward; skip to preserve quality.
+                                    // Only displace if u is closer to bestV than that worst
+                                    // non-protected edge — strict improvement.
                                     float duv = searchState.Distance(ReadOnlySpan<byte>.Empty, bestV, u);
                                     if (worstIdx >= 0 && duv < worstDist)
                                     {
