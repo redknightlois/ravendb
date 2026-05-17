@@ -2671,25 +2671,49 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         byte[] queryHashBytes = System.Security.Cryptography.SHA256.HashData(queryBuffer);
         string queryHash = Convert.ToHexString(queryHashBytes, 0, 8);
         string truthCachePath = $"/tmp/apollo-truth-{System.IO.Path.GetFileName(jsonl)}-N{datasetN}-Q{numberOfQueries}-k{kMax}-{queryHash}-mt{datasetMtime}.bin";
+        // FRAMEWORK Gate-4 tube diagnostic: stash per-query top-K distances so we
+        // can report κ_R(q)-style tube tightness (d_top10 / d_top1, etc.). v2 cache
+        // appends a `float[]` distance array after each query's id list. v1 caches
+        // (id-only) are still readable but skip the κ_R block on this run.
+        float[][] truthDist = new float[numberOfQueries][];
         bool truthLoaded = false;
+        bool truthHasDist = false;
         if (System.IO.File.Exists(truthCachePath))
         {
             try
             {
                 using var fs = System.IO.File.OpenRead(truthCachePath);
                 using var br = new System.IO.BinaryReader(fs);
-                int q = br.ReadInt32();
-                int k = br.ReadInt32();
-                if (q == numberOfQueries && k == kMax)
+                int magic = br.ReadInt32();
+                int version;
+                int qCount;
+                if (magic == 0x54525541) // 'TRUA'
                 {
-                    for (int i = 0; i < q; i++)
+                    version = 2;
+                    qCount = br.ReadInt32();
+                }
+                else
+                {
+                    version = 1;
+                    qCount = magic; // v1 stored numberOfQueries as the first int
+                }
+                int k = br.ReadInt32();
+                if (qCount == numberOfQueries && k == kMax)
+                {
+                    for (int i = 0; i < qCount; i++)
                     {
                         int got = br.ReadInt32();
                         truth[i] = new long[got];
                         for (int j = 0; j < got; j++) truth[i][j] = br.ReadInt64();
+                        if (version >= 2)
+                        {
+                            truthDist[i] = new float[got];
+                            for (int j = 0; j < got; j++) truthDist[i][j] = br.ReadSingle();
+                        }
                     }
                     truthLoaded = true;
-                    Output.WriteLine($"[truth-cache] loaded from {truthCachePath}");
+                    truthHasDist = version >= 2;
+                    Output.WriteLine($"[truth-cache] loaded from {truthCachePath} (v{version}, dist={(truthHasDist ? "yes" : "no")})");
                 }
             }
             catch { /* fall through to recompute */ }
@@ -2705,22 +2729,73 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                 var dists = new float[kMax];
                 int got = ret.Fill(ids, dists, null);
                 truth[q] = new long[got];
+                truthDist[q] = new float[got];
                 System.Array.Copy(ids, truth[q], got);
+                System.Array.Copy(dists, truthDist[q], got);
             }
+            truthHasDist = true;
             try
             {
                 using var fs = System.IO.File.Create(truthCachePath);
                 using var bw = new System.IO.BinaryWriter(fs);
+                bw.Write(0x54525541); // 'TRUA' magic = v2
                 bw.Write(numberOfQueries);
                 bw.Write(kMax);
                 for (int i = 0; i < numberOfQueries; i++)
                 {
                     bw.Write(truth[i].Length);
                     for (int j = 0; j < truth[i].Length; j++) bw.Write(truth[i][j]);
+                    for (int j = 0; j < truth[i].Length; j++) bw.Write(truthDist[i][j]);
                 }
-                Output.WriteLine($"[truth-cache] saved to {truthCachePath}");
+                Output.WriteLine($"[truth-cache] saved to {truthCachePath} (v2)");
             }
             catch (Exception ex) { Output.WriteLine($"[truth-cache] save failed: {ex.Message}"); }
+        }
+
+        // FRAMEWORK Gate 4 / §11 — tube tightness diagnostic. For each query,
+        // ratio_K(q) = d(q, top-K) / d(q, top-1) tells us how spread the top-K are
+        // around top-1. The fraction of queries with ratio_K > 1/ρ is the fraction
+        // for which a `ρ * d_top1` tube does NOT contain the K-th nearest neighbour
+        // — those queries cannot achieve recall@K at the ρ frontier-survival
+        // threshold no matter the graph topology, only the beam capacity. This is
+        // the build-vs-search lever disambiguation the journal asks for.
+        if (truthHasDist)
+        {
+            int[] kProbes = new[] { 2, 5, 10, 50 };
+            float[] rhoProbes = new[] { 0.95f, 0.85f, 0.70f };
+            Output.WriteLine("Tube tightness (d_top_K / d_top_1) — Gate 4 / §11 diagnostic:");
+            Output.WriteLine($"{"K",4}  {"median",10}  {"p90",10}  {"p99",10}  {"max",10}  fraction with ratio > 1/ρ");
+            var ratios = new double[numberOfQueries];
+            foreach (var K in kProbes)
+            {
+                int valid = 0;
+                for (int q = 0; q < numberOfQueries; q++)
+                {
+                    var d = truthDist[q];
+                    if (d == null || d.Length < 1 || d[0] <= 0f) continue;
+                    int kIdx = System.Math.Min(K, d.Length) - 1;
+                    ratios[valid++] = d[kIdx] / d[0];
+                }
+                if (valid == 0)
+                {
+                    Output.WriteLine($"{K,4}  (no data)");
+                    continue;
+                }
+                System.Array.Sort(ratios, 0, valid);
+                double median = ratios[valid / 2];
+                double p90 = ratios[System.Math.Min(valid - 1, (int)(valid * 0.90))];
+                double p99 = ratios[System.Math.Min(valid - 1, (int)(valid * 0.99))];
+                double max = ratios[valid - 1];
+                var fracs = new System.Text.StringBuilder();
+                foreach (var rho in rhoProbes)
+                {
+                    double thresh = 1.0 / rho;
+                    int over = 0;
+                    for (int i = 0; i < valid; i++) if (ratios[i] > thresh) over++;
+                    fracs.Append($"  ρ={rho:F2}: {100.0 * over / valid:F1}%");
+                }
+                Output.WriteLine($"{K,4}  {median,10:F4}  {p90,10:F4}  {p99,10:F4}  {max,10:F4}{fracs}");
+            }
         }
 
         var recallVariants = runL0Repair
