@@ -1237,3 +1237,77 @@ RAVEN_APOLLO_GREEDY_MODE = nearest | cover | radial | trace
 $\mathrm{TraceRadius}$. `trace` is repair-only (offline pool, larger
 pool, runs after build). Both must clear the §27 gates on a 100K /
 1M oracle build before any 10M run is funded.
+
+---
+
+## 29. Empirical validation — Phase A radial is null without Phase B
+
+Implementation (commits `016e54f8edf` → `d7d4ae6a5b8`): the Phase A
+radial selector from §28 is implemented as
+`RAVEN_APOLLO_GREEDY_MODE=radial` with shell target
+$d_{\text{target}} = (1-\lambda) \cdot \mathrm{median}(\mathrm{distToSrc})$
+over the construction candidate pool, picking
+$\mathrm{argmin}_v |\log((d+\epsilon)/(d_{\text{target}}+\epsilon))|$
+after one protected nearest fill. Diagnostic counters expose where the
+shell falls per cover invocation: `shell_below_min` /
+`shell_in_range` / `shell_above_max`.
+
+### Synthetic-data findings (clustered Gaussians, d=64 K=16 N=10K)
+
+| λ | shell_in_range | Δrecall(radial − dist) |
+|---|---:|---|
+| 0.10 | 89.7 % | parity within noise |
+| 0.50 | 1.2 % | parity |
+| 0.70 | 1.1 % | parity |
+| 0.90 (default) | 0.0 % | parity (shell 10× below d_min) |
+
+Pool geometry per cover call (means): `d_min=0.107, d_med=0.140,
+d_max=0.182`. At λ=0.9, $d_{\text{target}} = 0.014$ — an order of
+magnitude below the pool's nearest candidate, so the log-ratio score
+is monotone in $d$ and radial collapses to dist. Even at λ=0.1 where
+the shell is reachable 90 % of the time, `d_min ≈ d_target` so dist's
+nearest pick *is* the shell pick.
+
+### Sphere-1M dist mode (2026-05-17 Q=1000)
+
+The pool-ceiling gate (Theorem D) on the same data confirms there *is*
+substantial headroom — but in a region the Phase A pool does not
+expose:
+
+| ρ | L0 ηcur | L0 ηpool | gap (H_u) |
+|---|---:|---:|---:|
+| 0.95 (legacy) | 0.2630 | 0.5320 | 0.2689 |
+| 0.95 (apo dist) | 0.2595 | 0.5329 | 0.2734 |
+
+So $H_u \approx 0.27$ at ρ=0.95 for both selectors — Theorem D
+**passes** the candidate-exposure gate. Yet Phase A radial has no
+recall headroom because its access is restricted to the *construction*
+pool, which lacks the shell-radius candidates.
+
+### What this validates
+
+The §27 hierarchy bites in practice:
+
+- **Theorem C alone is not enough.** A geometrically optimal
+  single-edge shell does not move recall when the candidate pool
+  cannot supply edges at that radius.
+- **Theorem D's $H_u$ gate must be met *at the pool the selector
+  actually sees*.** The 27 pp pool headroom on Sphere-1M is in the
+  2-hop / reverse-enriched pool, not the construction beam.
+- **Phase A and Phase B are inseparable** for recall claims. The
+  next experimental step is a repair primitive that uses the
+  enriched pool *with* the radial scoring (the existing L0 repair
+  uses LCI eviction independent of greedy mode, so it does not test
+  this composition).
+
+### What this rules out
+
+- Shipping `RAVEN_APOLLO_GREEDY_MODE=radial` as a default. It is a
+  no-op without an enriched pool and a small build-wall cost.
+- Re-tuning λ as a recall lever: the entire λ-sweep above shows
+  recall flat regardless of where the shell lands.
+
+The shell-position histogram (`shell_below_min`, `shell_in_range`,
+`shell_above_max` plus mean d_min / d_med / d_max / d_target) is the
+strict diagnostic that any future selector experiment must report
+before claiming a recall lift.
