@@ -980,7 +980,7 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
             return DrainTopK(search, topK);
         }
 
-        static HashSet<long> DrainTopK(global::Voron.Data.Graphs.Hnsw.VectorSearchRetriever search, int topK)
+        static HashSet<long> DrainTopK(Hnsw.VectorSearchRetriever search, int topK)
         {
             var matches = new long[Math.Max(topK, 16)];
             var distances = new float[matches.Length];
@@ -1171,7 +1171,7 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
             return DrainTopK(search, topK);
         }
 
-        static HashSet<long> DrainTopK(global::Voron.Data.Graphs.Hnsw.VectorSearchRetriever search, int topK)
+        static HashSet<long> DrainTopK(Hnsw.VectorSearchRetriever search, int topK)
         {
             var matches = new long[Math.Max(topK, 16)];
             var distances = new float[matches.Length];
@@ -1303,7 +1303,7 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
             return DrainTopK(search, topK);
         }
 
-        static HashSet<long> DrainTopK(global::Voron.Data.Graphs.Hnsw.VectorSearchRetriever search, int topK)
+        static HashSet<long> DrainTopK(Hnsw.VectorSearchRetriever search, int topK)
         {
             var matches = new long[Math.Max(topK, 16)];
             var distances = new float[matches.Length];
@@ -1389,6 +1389,18 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
             Output.WriteLine($"  greedy bitset  = {gr*1000,8:F0}ms ({pct(gr),5:F1}%)");
             Output.WriteLine($"  M-fill         = {mf*1000,8:F0}ms ({pct(mf),5:F1}%)");
         }
+        Output.WriteLine($"[Mode counts] radial_entries={Hnsw.CoverModeRadialEntries} nearest_entries={Hnsw.CoverModeNearestEntries} cover_entries={Hnsw.CoverModeCoverEntries}");
+        if (Hnsw.RadialCalls > 0)
+        {
+            long rc = Hnsw.RadialCalls;
+            double pctR(long s) => 100.0 * s / Math.Max(rc, 1);
+            double avg6(long s) => s / (1_000_000.0 * Math.Max(rc, 1));
+            Output.WriteLine($"[Radial diagnostics] calls={rc}");
+            Output.WriteLine($"  shell_below_min = {Hnsw.RadialShellBelowMin,8} ({pctR(Hnsw.RadialShellBelowMin),5:F1}%)");
+            Output.WriteLine($"  shell_in_range  = {Hnsw.RadialShellInRange,8} ({pctR(Hnsw.RadialShellInRange),5:F1}%)");
+            Output.WriteLine($"  shell_above_max = {Hnsw.RadialShellAboveMax,8} ({pctR(Hnsw.RadialShellAboveMax),5:F1}%)");
+            Output.WriteLine($"  mean d_min={avg6(Hnsw.RadialDMinSum1e6):F4} d_med={avg6(Hnsw.RadialDMedSum1e6):F4} d_max={avg6(Hnsw.RadialDMaxSum1e6):F4} d_target={avg6(Hnsw.RadialDTargetSum1e6):F4}");
+        }
         Output.WriteLine($"{"ef",6} {"legacy",10} {"apollonius",12} {"Δ",10}");
         foreach (var ef in efs)
         {
@@ -1444,7 +1456,7 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
             return DrainTopK(search, topK);
         }
 
-        static HashSet<long> DrainTopK(global::Voron.Data.Graphs.Hnsw.VectorSearchRetriever search, int topK)
+        static HashSet<long> DrainTopK(Hnsw.VectorSearchRetriever search, int topK)
         {
             var matches = new long[Math.Max(topK, 16)];
             var distances = new float[matches.Length];
@@ -2020,7 +2032,7 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
             using var search = Hnsw.ApproximateNearest(llt, tree, numberOfCandidates: ef, qBytes, minimumSimilarity: 0f, hasFilterMatch: false);
             return DrainTopK(search, topK);
         }
-        static HashSet<long> DrainTopK(global::Voron.Data.Graphs.Hnsw.VectorSearchRetriever search, int topK)
+        static HashSet<long> DrainTopK(Hnsw.VectorSearchRetriever search, int topK)
         {
             var matches = new long[Math.Max(topK, 16)];
             var distances = new float[matches.Length];

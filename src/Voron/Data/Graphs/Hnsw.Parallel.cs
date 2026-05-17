@@ -140,6 +140,23 @@ public partial class Hnsw
     internal static long PageTiebreakChanges;
     internal static long PageDistSumPicked;
     internal static long PageDistSumCount;
+    // Radial-mode diagnostics (FRAMEWORK §27 Theorem C).
+    //   RadialShellBelowMin — d_target < min(distToSrc); shell is unreachable from below
+    //                         (curse-of-dim regime; all candidates farther than target).
+    //   RadialShellInRange  — d_target in [min, max]; shell is reachable; theorem C bites.
+    //   RadialShellAboveMax — d_target > max(distToSrc); selector would pick farthest first
+    //                         (mathematically possible if λ is near 0; pathological).
+    internal static long RadialCalls;
+    internal static long RadialShellBelowMin;
+    internal static long RadialShellInRange;
+    internal static long RadialShellAboveMax;
+    internal static long RadialDMinSum1e6;
+    internal static long RadialDMedSum1e6;
+    internal static long RadialDMaxSum1e6;
+    internal static long RadialDTargetSum1e6;
+    internal static long CoverModeRadialEntries;
+    internal static long CoverModeNearestEntries;
+    internal static long CoverModeCoverEntries;
     internal static void CoverProfileReset()
     {
         CoverWitnessTicks = 0;
@@ -153,6 +170,17 @@ public partial class Hnsw
         PageTiebreakChanges = 0;
         PageDistSumPicked = 0;
         PageDistSumCount = 0;
+        RadialCalls = 0;
+        RadialShellBelowMin = 0;
+        RadialShellInRange = 0;
+        RadialShellAboveMax = 0;
+        RadialDMinSum1e6 = 0;
+        RadialDMedSum1e6 = 0;
+        RadialDMaxSum1e6 = 0;
+        RadialDTargetSum1e6 = 0;
+        CoverModeRadialEntries = 0;
+        CoverModeNearestEntries = 0;
+        CoverModeCoverEntries = 0;
     }
 
     private static bool ReadLegacyHeuristicEnv()
@@ -249,9 +277,11 @@ public partial class Hnsw
     //                        the queries that beam-routed to u to begin with, so under
     //                        the local-isotropic assumption (C3) they sample μ_u.
     internal enum ApolloGreedyMode : byte { Nearest = 0, Cover = 1, Radial = 2 }
-    internal static readonly ApolloGreedyMode _envGreedyMode = ParseGreedyMode();
-    internal static readonly bool _envGreedyByDist = _envGreedyMode == ApolloGreedyMode.Nearest;
-    internal static readonly bool _envGreedyByRadial = _envGreedyMode == ApolloGreedyMode.Radial;
+    // Mutable so tests can A/B selector modes within one process without recompile.
+    // Production sets it once from the env var via ParseGreedyMode() at static init.
+    internal static ApolloGreedyMode _envGreedyMode = ParseGreedyMode();
+    internal static bool _envGreedyByDist => _envGreedyMode == ApolloGreedyMode.Nearest;
+    internal static bool _envGreedyByRadial => _envGreedyMode == ApolloGreedyMode.Radial;
 
     private static ApolloGreedyMode ParseGreedyMode()
     {
@@ -1053,6 +1083,14 @@ public partial class Hnsw
                     int M = searchState.Options.NumberOfEdges;
                     int Qm = Qu.Length;
                     Debug.Assert(Qm >= 0 && Qm <= 64, $"|Q_u| must fit one ulong (≤64). Got {Qm}.");
+                    // Count each cover invocation by mode so we can detect "radial mode requested
+                    // but never executed" failures.
+                    if (_envGreedyMode == ApolloGreedyMode.Radial)
+                        Interlocked.Increment(ref CoverModeRadialEntries);
+                    else if (_envGreedyMode == ApolloGreedyMode.Nearest)
+                        Interlocked.Increment(ref CoverModeNearestEntries);
+                    else
+                        Interlocked.Increment(ref CoverModeCoverEntries);
                     bool prof = CoverProfileEnabled;
                     long t0Total = prof ? Stopwatch.GetTimestamp() : 0;
                     long tStep = t0Total;
@@ -1444,8 +1482,23 @@ public partial class Hnsw
                             distToSrc.Slice(0, N).CopyTo(tmp);
                             Array.Sort(tmp);
                             float median = tmp[N / 2];
+                            float dmin = tmp[0];
+                            float dmax = tmp[N - 1];
                             radialDTarget = (1f - _envRadialLambda) * median;
                             radialLogTarget = MathF.Log(radialDTarget + 1e-6f);
+                            Interlocked.Increment(ref RadialCalls);
+                            // Bucket: how does d_target relate to the pool?
+                            //   shell_below_min  → all candidates farther than target (curse-of-dim)
+                            //   shell_in_range   → some candidates near target
+                            //   shell_above_max  → target farther than any candidate (impossible with λ < 1)
+                            if (radialDTarget < dmin) Interlocked.Increment(ref RadialShellBelowMin);
+                            else if (radialDTarget > dmax) Interlocked.Increment(ref RadialShellAboveMax);
+                            else Interlocked.Increment(ref RadialShellInRange);
+                            // Accumulate fixed-point ratios for averaging (×1e6).
+                            Interlocked.Add(ref RadialDMinSum1e6, (long)(dmin * 1_000_000));
+                            Interlocked.Add(ref RadialDMedSum1e6, (long)(median * 1_000_000));
+                            Interlocked.Add(ref RadialDMaxSum1e6, (long)(dmax * 1_000_000));
+                            Interlocked.Add(ref RadialDTargetSum1e6, (long)(radialDTarget * 1_000_000));
                         }
                         // Degenerate pool → fall back to dist-greedy.
                         if (radialDTarget <= 0f)
