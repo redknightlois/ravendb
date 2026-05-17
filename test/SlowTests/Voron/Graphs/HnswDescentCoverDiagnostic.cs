@@ -2622,7 +2622,7 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         int kMax = 50;
         // Default Corax-style efSearch sweep so we can see the recall/wall curve
         // rather than a single point.
-        int[] efSweep = [32, 64, 128];
+        int[] efSweep = [32, 64, 128, 256, 512];
         Output.WriteLine("");
         Output.WriteLine($"End-to-end recall (queries={numberOfQueries}, ground truth = exact top-{kMax} on legacy):");
         Output.WriteLine($"{"efSearch",10}  {"engine",12}  {"recall@1",10}  {"recall@10",10}  {"recall@50",10}  {"wall ms",10}");
