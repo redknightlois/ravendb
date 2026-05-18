@@ -2972,14 +2972,19 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         //   else CLIMB (tight tube ⇒ ambiguous ⇒ needs more ef).
         // The first τ sweep (1.15/1.30/1.50, before flip) showed the inverted
         // predicate stuck recall at ef=32 level while spending ef=128-level wall.
-        if (Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF") == "1")
+        // Mode 1: ratio-only predicate (post-flip).
+        // Mode 2: ratio + top-id stability — exits when ratio confident OR
+        //         top-1 unchanged between rungs (catches bucket C/D cheaply).
+        var adaptiveEfMode = Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF");
+        if (adaptiveEfMode == "1" || adaptiveEfMode == "2")
         {
             int[] efLadder = [32, 128, 512];
             float tau = 1.30f;
             if (float.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF_TAU"), out var tauEnv) && tauEnv > 0)
                 tau = tauEnv;
+            bool useStability = adaptiveEfMode == "2";
             Output.WriteLine("");
-            Output.WriteLine($"§19.13 Adaptive efSearch(q) prototype (ladder=[{string.Join(",", efLadder)}], τ={tau:F2}):");
+            Output.WriteLine($"§19.13 Adaptive efSearch(q) prototype (ladder=[{string.Join(",", efLadder)}], τ={tau:F2}, mode={adaptiveEfMode}{(useStability ? " ratio+stability" : " ratio-only")}):");
             Output.WriteLine($"{"engine",14}  {"r@1",8}  {"r@10",8}  {"r@50",8}  {"mean ef",8}  {"total ms",10}");
             foreach (var (label, treeLabel) in recallVariants)
             {
@@ -2993,6 +2998,7 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                     var qmem = new System.ReadOnlyMemory<byte>(queryBuffer, q * vectorSizeInBytes, vectorSizeInBytes);
                     int chosenEf = efLadder[efLadder.Length - 1];
                     long[] finalIds = null;
+                    long prevTopId = -1;
                     for (int li = 0; li < efLadder.Length; li++)
                     {
                         int ef = efLadder[li];
@@ -3006,6 +3012,8 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                         if (got < 2 || dists[0] <= 0f) break;
                         float ratio = dists[1] / dists[0];
                         if (ratio >= tau) break;
+                        if (useStability && li > 0 && ids[0] == prevTopId) break;
+                        prevTopId = ids[0];
                     }
                     efSum += chosenEf;
                     var t = truth[q];
