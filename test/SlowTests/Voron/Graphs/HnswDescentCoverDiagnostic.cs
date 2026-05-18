@@ -2967,11 +2967,11 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         Output.WriteLine("                bucket A ≈ 0 per §19.1 gateway oracle null on Sphere.");
 
         // FRAMEWORK §19.13 adaptive efSearch(q) prototype.
-        // Per query: start at ef_initial. Run search. If d_top_2 / d_top_1 ≥ τ
-        // (loose tube ⇒ low confidence ⇒ likely bucket B), escalate ef and re-run.
-        // Cap at ef_max. Compare adaptive recall + mean wall to fixed ef in the
-        // sweep above. Confidence proxy is heuristic; the real κ_R(q) is unknown
-        // at search time.
+        // Per query: climb ladder. Predicate (post-empirical-flip 2026-05-18):
+        //   if d_top_2 / d_top_1 ≥ τ ⇒ STOP (well-separated → confident),
+        //   else CLIMB (tight tube ⇒ ambiguous ⇒ needs more ef).
+        // The first τ sweep (1.15/1.30/1.50, before flip) showed the inverted
+        // predicate stuck recall at ef=32 level while spending ef=128-level wall.
         if (Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF") == "1")
         {
             int[] efLadder = [32, 128, 512];
@@ -3005,7 +3005,7 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                         if (li == efLadder.Length - 1) break;
                         if (got < 2 || dists[0] <= 0f) break;
                         float ratio = dists[1] / dists[0];
-                        if (ratio < tau) break;
+                        if (ratio >= tau) break;
                     }
                     efSum += chosenEf;
                     var t = truth[q];
