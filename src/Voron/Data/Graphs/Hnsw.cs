@@ -507,33 +507,114 @@ public unsafe partial class Hnsw
             var indexes = new NativeList<int>();
             var nodeIds = new NativeList<long>();
 
+            // FRAMEWORK §18.9 Test 2 — upper beam width.
+            // When RAVEN_HNSW_SEARCH_UPPER_BEAM_W > 1, levels ≥ 1 use a
+            // bounded-W beam instead of single-step greedy. Level 0 is
+            // unchanged (real L0 beam search runs afterwards in NearestSearch).
+            int upperBeamW = 1;
+            if (dstIdx < 0)
+            {
+                var envW = Environment.GetEnvironmentVariable("RAVEN_HNSW_SEARCH_UPPER_BEAM_W");
+                if (envW != null && int.TryParse(envW, out var w) && w > 1)
+                    upperBeamW = Math.Min(w, 64);
+            }
+            // beam[0..beamCount): (dist, idx) sorted ascending by dist.
+            Span<float> beamDist = stackalloc float[upperBeamW];
+            Span<int> beamIdx = stackalloc int[upperBeamW];
+
             while (level >= 0)
             {
-                bool moved;
-                do
+                if (upperBeamW > 1 && level >= 1)
                 {
-                    moved = false;
-                    ref var n = ref GetNodeByIndex(currentNodeIndex);
-                    Debug.Assert(n.EdgesPerLevel.Count > level, "n.EdgesPerLevel.Count > level");
-                    ref var edges = ref n.EdgesPerLevel[level];
-                    nodeIds.ResetAndCopyFrom(Llt.Allocator, edges.ToSpan());
-                    LoadNodeIndexes(ref nodeIds, ref indexes);
-                    for (var i = 0; i < indexes.Count; i++)
+                    beamDist[0] = distance;
+                    beamIdx[0] = currentNodeIndex;
+                    int beamCount = 1;
+                    bool changed;
+                    do
                     {
-                        var edgeIdx = indexes[i];
-                        ref var edge = ref GetNodeByIndex(edgeIdx);
-                        if (edge.Visited == visitCounter)
-                            continue; // already checked it
-                        edge.Visited = visitCounter;
-                        var curDist = Distance(vector, dstIdx, edgeIdx);
-                        if (curDist >= distance || double.IsNaN(curDist))
-                            continue;
+                        changed = false;
+                        int frontCount = beamCount;
+                        for (int b = 0; b < frontCount; b++)
+                        {
+                            ref var bn = ref GetNodeByIndex(beamIdx[b]);
+                            if (bn.EdgesPerLevel.Count <= level)
+                                continue;
+                            ref var bnEdges = ref bn.EdgesPerLevel[level];
+                            nodeIds.ResetAndCopyFrom(Llt.Allocator, bnEdges.ToSpan());
+                            LoadNodeIndexes(ref nodeIds, ref indexes);
+                            for (var i = 0; i < indexes.Count; i++)
+                            {
+                                var edgeIdx = indexes[i];
+                                ref var edge = ref GetNodeByIndex(edgeIdx);
+                                if (edge.Visited == visitCounter)
+                                    continue;
+                                edge.Visited = visitCounter;
+                                var curDist = Distance(vector, dstIdx, edgeIdx);
+                                if (double.IsNaN(curDist))
+                                    continue;
+                                if (beamCount < upperBeamW)
+                                {
+                                    // Insertion sort into beam ascending.
+                                    int pos = beamCount;
+                                    while (pos > 0 && beamDist[pos - 1] > curDist)
+                                    {
+                                        beamDist[pos] = beamDist[pos - 1];
+                                        beamIdx[pos] = beamIdx[pos - 1];
+                                        pos--;
+                                    }
+                                    beamDist[pos] = (float)curDist;
+                                    beamIdx[pos] = edgeIdx;
+                                    beamCount++;
+                                    changed = true;
+                                }
+                                else if (curDist < beamDist[beamCount - 1])
+                                {
+                                    int pos = beamCount - 1;
+                                    while (pos > 0 && beamDist[pos - 1] > curDist)
+                                    {
+                                        beamDist[pos] = beamDist[pos - 1];
+                                        beamIdx[pos] = beamIdx[pos - 1];
+                                        pos--;
+                                    }
+                                    beamDist[pos] = (float)curDist;
+                                    beamIdx[pos] = edgeIdx;
+                                    changed = true;
+                                }
+                            }
+                        }
+                    } while (changed);
 
-                        moved = true;
-                        distance = curDist;
-                        currentNodeIndex = edgeIdx;
-                    }
-                } while (moved);
+                    currentNodeIndex = beamIdx[0];
+                    distance = beamDist[0];
+                }
+                else
+                {
+                    bool moved;
+                    do
+                    {
+                        moved = false;
+                        ref var n = ref GetNodeByIndex(currentNodeIndex);
+                        Debug.Assert(n.EdgesPerLevel.Count > level, "n.EdgesPerLevel.Count > level");
+                        ref var edges = ref n.EdgesPerLevel[level];
+                        nodeIds.ResetAndCopyFrom(Llt.Allocator, edges.ToSpan());
+                        LoadNodeIndexes(ref nodeIds, ref indexes);
+                        for (var i = 0; i < indexes.Count; i++)
+                        {
+                            var edgeIdx = indexes[i];
+                            ref var edge = ref GetNodeByIndex(edgeIdx);
+                            if (edge.Visited == visitCounter)
+                                continue; // already checked it
+                            edge.Visited = visitCounter;
+                            var curDist = Distance(vector, dstIdx, edgeIdx);
+                            if (curDist >= distance || double.IsNaN(curDist))
+                                continue;
+
+                            moved = true;
+                            distance = curDist;
+                            currentNodeIndex = edgeIdx;
+                        }
+                    } while (moved);
+                }
 
                 nearestIndexes.AddUnsafe(currentNodeIndex);
                 level--;
