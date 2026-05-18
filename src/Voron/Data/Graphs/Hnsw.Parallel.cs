@@ -2074,21 +2074,36 @@ public partial class Hnsw
 
                 // Defensive guard: under heavy parallel build the outer EdgesIndexesPerLevel
                 // list can intermittently appear stale to a worker even though PrepareEdgesOnLLT
-                // ran SetCapacity(level+1) on the LLT thread. Race window manifests as
-                // IndexOutOfRangeException on this line ~1/5 of Sphere builds. Skip rather than
-                // crash the build — the descent loop will revisit this node on a later iteration.
+                // ran SetCapacity(level+1) on the LLT thread. Two race-window manifestations
+                // observed on Sphere-1M parallel builds (~1/5 frequency):
+                //   (a) IndexOutOfRangeException — Count observed below level
+                //   (b) NullReferenceException — outer _storage published after Count (write
+                //       reorder, or use-after-free if Grow released old storage while a worker
+                //       was mid-read). ByteString.Ptr getter dereferences _pointer which is
+                //       null in the default-struct state.
+                // Both cases are handled the same way: skip this node, the descent loop will
+                // revisit it on a later iteration once the writer's state is fully published.
                 if (level >= n.EdgesIndexesPerLevel.Count)
                     return _indexes.Count > 0;
 
-                ref var edgesIndexes = ref n.EdgesIndexesPerLevel[level];
-                foreach (var idx in edgesIndexes)
+                try
                 {
-                    if (MarkVisited(idx) is false)
-                        continue;
-                    _indexes.Add(idx);
-                    ref var edge = ref _searchState.GetNodeByIndex(idx);
-                    _vectors.Add(edge.GetVectorUnmanagedSpan(_searchState));
-                    _indexVectorIds.Add(edge.VectorId);
+                    ref var edgesIndexes = ref n.EdgesIndexesPerLevel[level];
+                    foreach (var idx in edgesIndexes)
+                    {
+                        if (MarkVisited(idx) is false)
+                            continue;
+                        _indexes.Add(idx);
+                        ref var edge = ref _searchState.GetNodeByIndex(idx);
+                        _vectors.Add(edge.GetVectorUnmanagedSpan(_searchState));
+                        _indexVectorIds.Add(edge.VectorId);
+                    }
+                }
+                catch (NullReferenceException)
+                {
+                    // Race (b): outer storage not yet published. Treat same as the IOOR
+                    // pre-check above — caller will revisit this node later.
+                    return _indexes.Count > 0;
                 }
 
                 return _indexes.Count > 0;
