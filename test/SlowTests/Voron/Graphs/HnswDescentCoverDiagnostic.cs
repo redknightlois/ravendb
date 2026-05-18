@@ -3009,17 +3009,24 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         // Mode 3: like mode 1 but uses VectorSearchRetriever.ContinueWith(ef)
         //         to grow ef on the same SearchState (cached distances, no
         //         multi-rung restart cost).
+        // Mode 4: mode 2 + continuation (stability gate + ContinueWith).
         var adaptiveEfMode = Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF");
-        if (adaptiveEfMode == "1" || adaptiveEfMode == "2" || adaptiveEfMode == "3")
+        if (adaptiveEfMode is "1" or "2" or "3" or "4")
         {
             int[] efLadder = [32, 128, 512];
             float tau = 1.30f;
             if (float.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF_TAU"), out var tauEnv) && tauEnv > 0)
                 tau = tauEnv;
-            bool useStability = adaptiveEfMode == "2";
-            bool useContinuation = adaptiveEfMode == "3";
+            bool useStability = adaptiveEfMode is "2" or "4";
+            bool useContinuation = adaptiveEfMode is "3" or "4";
             Output.WriteLine("");
-            string modeLabel = adaptiveEfMode switch { "2" => " ratio+stability", "3" => " ratio-only+continuation", _ => " ratio-only" };
+            string modeLabel = adaptiveEfMode switch
+            {
+                "2" => " ratio+stability",
+                "3" => " ratio-only+continuation",
+                "4" => " ratio+stability+continuation",
+                _ => " ratio-only"
+            };
             Output.WriteLine($"§19.13 Adaptive efSearch(q) prototype (ladder=[{string.Join(",", efLadder)}], τ={tau:F2}, mode={adaptiveEfMode}{modeLabel}):");
             Output.WriteLine($"{"engine",14}  {"r@1",8}  {"r@10",8}  {"r@50",8}  {"mean ef",8}  {"total ms",10}");
             foreach (var (label, treeLabel) in recallVariants)
