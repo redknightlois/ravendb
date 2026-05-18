@@ -1242,6 +1242,35 @@ public unsafe partial class Hnsw
 
         searchState.SearchNearestAcrossLevels(vector.Span, -1, searchState.Options.MaxLevel, ref nearestNodesByLevel);
         var nearest = nearestNodesByLevel[0];
+
+        // FRAMEWORK §18.9 Test 1 — gateway oracle diagnostic.
+        // Replace the descent-chosen L0 entry with the exhaustive argmin over V_1
+        // (nodes present at layer ≥1). Lets us measure the upper-layer routing
+        // ceiling without rebuilding the graph. Env-gated; never enable in prod.
+        if (hasFilterMatch == false && Environment.GetEnvironmentVariable("RAVEN_HNSW_SEARCH_ORACLE_V1") == "1")
+        {
+            var oracleNodes = searchState.Nodes;
+            long oracleReadCounter = 0;
+            int bestIdx = -1;
+            float bestDist = float.MaxValue;
+            for (int i = 1; i < oracleNodes.Length; i++)
+            {
+                ref var n = ref oracleNodes[i];
+                if (n.VectorId == 0)
+                    continue;
+                if (n.EdgesPerLevel.Count < 2)
+                    continue;
+                var d = (float)searchState.QueryDistance(vector.Span, i, ref oracleReadCounter);
+                if (d < bestDist)
+                {
+                    bestDist = d;
+                    bestIdx = i;
+                }
+            }
+            if (bestIdx >= 0)
+                nearest = bestIdx;
+        }
+
         nearestNodesByLevel.Clear();
         var nearestEdgesSearch = searchState.NearestSearch(nearest, vector, 0, numberOfCandidates, nearestNodesByLevel,
             SearchState.NearestEdgesFlags.StartingPointAsEdge | SearchState.NearestEdgesFlags.FilterNodesWithEmptyPostingLists, hasFilterMatch);
