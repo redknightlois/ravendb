@@ -1162,13 +1162,15 @@ the predicate.
 | variant | r@1 | mean ef | wall |
 |---|---|---|---|
 | fixed `efSearch = 512` | 90.0 % | 512 | 5503 ms |
-| adaptive (`ρ≥1.30`, ladder=[32,128,512], continuation) | 89.6 % | 414 | **4864 ms** |
+| adaptive ratio-only (`ρ≥1.30`, [32,128,512], continuation) | 89.6 % | 414 | 4864 ms |
+| adaptive ratio+stability K=2 (`ρ≥1.30`, [32,128,512], cont.) | **90.0 %** | 414 | **4754 ms** |
 
-That is 12 % wall reduction at recall parity. Larger gains are
-plausible with (a) a finer ladder (cheap under continuation), (b) a
-top-id stability gate to short-circuit bucket-C/D queries that cannot
-benefit from climbing, and (c) a sharper confidence proxy that
-identifies the ~69 % truly easy queries cheaply at the bottom of the
-ladder. The recall ceiling at ~90 % is set by the ~10 % bucket-C/D
-residual (§19.10); going above 90 % requires build-time `M_0(u)`
+The ratio+stability K=2 variant matches fixed-ef=512 recall exactly
+at 14 % wall reduction. The K parameter is the stability look-back:
+exit only when the top-1 id has been unchanged across the previous K
+rungs (K=1 collapses on dense ladders because consecutive small-ef
+gaps trivially match; K=2 is the working setting).
+
+**Recall ceiling on this dataset is ~90 %** (the ~10 % bucket-C/D
+residual per §19.10); reaching above requires build-time `M_0(u)`
 expansion, not query-time ef.
