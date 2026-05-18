@@ -3003,19 +3003,24 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         //   else CLIMB (tight tube ⇒ ambiguous ⇒ needs more ef).
         // The first τ sweep (1.15/1.30/1.50, before flip) showed the inverted
         // predicate stuck recall at ef=32 level while spending ef=128-level wall.
-        // Mode 1: ratio-only predicate (post-flip).
+        // Mode 1: ratio-only predicate (post-flip), each rung is a fresh search.
         // Mode 2: ratio + top-id stability — exits when ratio confident OR
         //         top-1 unchanged between rungs (catches bucket C/D cheaply).
+        // Mode 3: like mode 1 but uses VectorSearchRetriever.ContinueWith(ef)
+        //         to grow ef on the same SearchState (cached distances, no
+        //         multi-rung restart cost).
         var adaptiveEfMode = Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF");
-        if (adaptiveEfMode == "1" || adaptiveEfMode == "2")
+        if (adaptiveEfMode == "1" || adaptiveEfMode == "2" || adaptiveEfMode == "3")
         {
             int[] efLadder = [32, 128, 512];
             float tau = 1.30f;
             if (float.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF_TAU"), out var tauEnv) && tauEnv > 0)
                 tau = tauEnv;
             bool useStability = adaptiveEfMode == "2";
+            bool useContinuation = adaptiveEfMode == "3";
             Output.WriteLine("");
-            Output.WriteLine($"§19.13 Adaptive efSearch(q) prototype (ladder=[{string.Join(",", efLadder)}], τ={tau:F2}, mode={adaptiveEfMode}{(useStability ? " ratio+stability" : " ratio-only")}):");
+            string modeLabel = adaptiveEfMode switch { "2" => " ratio+stability", "3" => " ratio-only+continuation", _ => " ratio-only" };
+            Output.WriteLine($"§19.13 Adaptive efSearch(q) prototype (ladder=[{string.Join(",", efLadder)}], τ={tau:F2}, mode={adaptiveEfMode}{modeLabel}):");
             Output.WriteLine($"{"engine",14}  {"r@1",8}  {"r@10",8}  {"r@50",8}  {"mean ef",8}  {"total ms",10}");
             foreach (var (label, treeLabel) in recallVariants)
             {
@@ -3030,21 +3035,47 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                     int chosenEf = efLadder[efLadder.Length - 1];
                     long[] finalIds = null;
                     long prevTopId = -1;
-                    for (int li = 0; li < efLadder.Length; li++)
+                    Hnsw.VectorSearchRetriever retCont = default;
+                    bool retContInitialized = false;
+                    try
                     {
-                        int ef = efLadder[li];
-                        using var ret = Hnsw.ApproximateNearest(rTx.LowLevelTransaction, name, ef, System.Runtime.InteropServices.MemoryMarshal.AsMemory(qmem), 0f);
-                        var ids = new long[kMax];
-                        var dists = new float[kMax];
-                        int got = ret.Fill(ids, dists, null);
-                        finalIds = ids;
-                        chosenEf = ef;
-                        if (li == efLadder.Length - 1) break;
-                        if (got < 2 || dists[0] <= 0f) break;
-                        float ratio = dists[1] / dists[0];
-                        if (ratio >= tau) break;
-                        if (useStability && li > 0 && ids[0] == prevTopId) break;
-                        prevTopId = ids[0];
+                        for (int li = 0; li < efLadder.Length; li++)
+                        {
+                            int ef = efLadder[li];
+                            var ids = new long[kMax];
+                            var dists = new float[kMax];
+                            int got;
+                            if (useContinuation)
+                            {
+                                if (retContInitialized == false)
+                                {
+                                    retCont = Hnsw.ApproximateNearest(rTx.LowLevelTransaction, name, ef, System.Runtime.InteropServices.MemoryMarshal.AsMemory(qmem), 0f);
+                                    retContInitialized = true;
+                                }
+                                else
+                                {
+                                    retCont.ContinueWith(ef);
+                                }
+                                got = retCont.Fill(ids, dists, null);
+                            }
+                            else
+                            {
+                                using var ret = Hnsw.ApproximateNearest(rTx.LowLevelTransaction, name, ef, System.Runtime.InteropServices.MemoryMarshal.AsMemory(qmem), 0f);
+                                got = ret.Fill(ids, dists, null);
+                            }
+                            finalIds = ids;
+                            chosenEf = ef;
+                            if (li == efLadder.Length - 1) break;
+                            if (got < 2 || dists[0] <= 0f) break;
+                            float ratio = dists[1] / dists[0];
+                            if (ratio >= tau) break;
+                            if (useStability && li > 0 && ids[0] == prevTopId) break;
+                            prevTopId = ids[0];
+                        }
+                    }
+                    finally
+                    {
+                        if (retContInitialized) retCont.Dispose();
                     }
                     efSum += chosenEf;
                     var t = truth[q];

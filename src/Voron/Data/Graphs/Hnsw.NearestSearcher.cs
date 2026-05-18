@@ -245,6 +245,15 @@ public partial class Hnsw
                 _internalNumberOfCandidates += GetPrefetchExtendSize(_internalNumberOfCandidates);
             }
 
+            public bool SetCandidateTarget(int target)
+            {
+                if (target <= _internalNumberOfCandidates)
+                    return false;
+                Reset();
+                _internalNumberOfCandidates = target;
+                return true;
+            }
+
             // Reset the NearestSearcher state; however, it does not clear the data already stored inside SearchState.
             // This is important because it allows us to reduce I/O pressure during over-fetching and when restarting the query.
             private void Reset()

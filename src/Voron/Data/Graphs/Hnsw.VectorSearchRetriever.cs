@@ -305,6 +305,30 @@ public partial class Hnsw
             return index;
         }
         
+        // Adaptive efSearch(q) continuation. Re-runs the underlying searcher
+        // with a larger candidate target while preserving the SearchState's
+        // cached per-node distances — re-traversal is I/O-free for any node
+        // already distance-evaluated in the previous run. No-op if newCandidates
+        // ≤ the existing target. Result equivalent to a fresh ApproximateNearest
+        // call at newCandidates ef.
+        public void ContinueWith(int newCandidates)
+        {
+            if (_vectorsSearcher.SetCandidateTarget(newCandidates) == false)
+                return;
+
+            _resultsEnumerator?.Dispose();
+            _resultsEnumerator = _vectorsSearcher.Search().GetEnumerator();
+            _resultsEnumerator.MoveNext();
+
+            _currentNode = 0;
+            _currentMatchesIndex = 0;
+            _returnedCandidates = 0;
+            _postingListResults.Clear();
+            _postingList = null;
+            _foundCandidateInCurrentSmallPostingList = false;
+            IsSortedByDistance = true;
+        }
+
         public void Dispose()
         {
             _postingListResults.Dispose();

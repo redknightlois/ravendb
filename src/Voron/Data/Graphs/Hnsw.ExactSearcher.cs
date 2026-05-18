@@ -111,6 +111,8 @@ public partial class Hnsw
             {
             }
 
+            public bool SetCandidateTarget(int target) => false;
+
             public long CandidatesProcessed { get; set; }
             
             public bool ShouldContinueSearch(long filterDocsCount)
