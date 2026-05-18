@@ -1166,11 +1166,26 @@ the predicate.
 | adaptive ratio+stability K=2 (`ρ≥1.30`, [32,128,512], cont.) | **90.0 %** | 414 | **4754 ms** |
 
 The ratio+stability K=2 variant matches fixed-ef=512 recall exactly
-at 14 % wall reduction. The K parameter is the stability look-back:
-exit only when the top-1 id has been unchanged across the previous K
-rungs (K=1 collapses on dense ladders because consecutive small-ef
-gaps trivially match; K=2 is the working setting).
+at 14 % wall reduction *at 100K*. The K parameter is the stability
+look-back: exit only when the top-1 id has been unchanged across the
+previous K rungs (K=1 collapses on dense ladders because consecutive
+small-ef gaps trivially match; K=2 is the working setting).
 
-**Recall ceiling on this dataset is ~90 %** (the ~10 % bucket-C/D
-residual per §19.10); reaching above requires build-time `M_0(u)`
-expansion, not query-time ef.
+**1M reality check.** On Sphere-1M Q=1000 the same configuration
+gives `mean ef = 509.7` (essentially every query climbed to ef=512)
+and 92.30 % / 7809 ms vs fixed-ef=512 92.30 % / 7681 ms — no wall win.
+Root cause: tube tightness `d_top_2 / d_top_1` collapses with scale
+(100K median 1.10 → 1M median 1.03), so the ratio proxy stops
+separating easy from hard queries. **The 14 % win is a small-N
+artifact.**
+
+**What survives the 1M test:** the `ContinueWith` API itself is
+correctness-preserving and shippable independently of the predicate.
+What does not: any predicate that relies only on `d_top_2 / d_top_1`
+as a confidence proxy. A 1M-scale wall win requires a different
+proxy (absolute distance to top-1, descent depth, pool growth between
+rungs, or a learned classifier).
+
+**Recall ceiling on this dataset is ~92 %** at 1M (the ~7.7 % bucket
+C/D residual); reaching above requires build-time `M_0(u)` expansion,
+not query-time ef.
