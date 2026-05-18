@@ -3027,9 +3027,15 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
             float tau = 1.30f;
             if (float.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF_TAU"), out var tauEnv) && tauEnv > 0)
                 tau = tauEnv;
-            float tauAbs = 0.10f;
-            if (float.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF_TAU_ABS"), out var tauAbsEnv) && tauAbsEnv > 0)
-                tauAbs = tauAbsEnv;
+            float[] tauAbsSweep = [0.10f];
+            var tauAbsEnvStr = Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF_TAU_ABS");
+            if (string.IsNullOrEmpty(tauAbsEnvStr) == false)
+            {
+                tauAbsSweep = tauAbsEnvStr.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                    .Select(s => float.Parse(s.Trim(), System.Globalization.CultureInfo.InvariantCulture))
+                    .Where(v => v > 0).ToArray();
+            }
+            float tauAbs = tauAbsSweep[0];
             bool useStability = adaptiveEfMode is "2" or "4" or "5";
             bool useContinuation = adaptiveEfMode is "3" or "4" or "5";
             bool useAbsolute = adaptiveEfMode == "5";
@@ -3045,7 +3051,13 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                 "5" => " absolute+stability+continuation",
                 _ => " ratio-only"
             };
-            string predicateLabel = useAbsolute ? $"τ_abs={tauAbs:F3}" : $"τ={tau:F2}";
+            // For mode 5 only: sweep over multiple τ_abs values per test invocation
+            // to avoid paying the build cost per threshold. For other modes use single τ.
+            float[] tauAbsRunSweep = useAbsolute ? tauAbsSweep : [tauAbs];
+            foreach (var tauAbsRun in tauAbsRunSweep)
+            {
+            string predicateLabel = useAbsolute ? $"τ_abs={tauAbsRun:F3}" : $"τ={tau:F2}";
+            Output.WriteLine("");
             Output.WriteLine($"§19.13 Adaptive efSearch(q) prototype (ladder=[{string.Join(",", efLadder)}], {predicateLabel}, mode={adaptiveEfMode}{modeLabel}, stab-k={stabilityLookback}):");
             Output.WriteLine($"{"engine",14}  {"r@1",8}  {"r@10",8}  {"r@50",8}  {"mean ef",8}  {"total ms",10}");
             foreach (var (label, treeLabel) in recallVariants)
@@ -3096,7 +3108,7 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                             if (got < 2 || dists[0] <= 0f) break;
                             if (useAbsolute)
                             {
-                                if (dists[0] < tauAbs) break;
+                                if (dists[0] < tauAbsRun) break;
                             }
                             else
                             {
@@ -3146,6 +3158,7 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                 double meanEf = (double)efSum / numberOfQueries;
                 Output.WriteLine($"{label,14}  {r1,8:P2}  {r10,8:P2}  {r50,8:P2}  {meanEf,8:F1}  {sw.ElapsedMilliseconds,10}");
             }
+            } // end τ_abs sweep
         }
     }
 
