@@ -1660,6 +1660,66 @@ public unsafe partial class Hnsw
         var twoHopFrontier = new List<int>(256);
         var bestVCoverage = new Dictionary<int, int>(); // vIdx → count of uncovered queries it covers
 
+        // FRAMEWORK §28 — top-down layered N-hop pool. Walks from EntryPointId
+        // through every level ℓ ∈ [L_max, targetLevel] taking N hops at each
+        // level then projecting survivors (nodes that exist at ℓ-1) to the
+        // next level down. The resulting visited-at-targetLevel set augments
+        // each u's bestVCoverage independent of u's local topology. Bounded
+        // by frontier-cap to keep cost predictable on large graphs.
+        // Enable: RAVEN_HNSW_L0_TOPDOWN=1. Hop count per level: env
+        // RAVEN_HNSW_L0_TOPDOWN_HOPS (default 4). Frontier cap per level:
+        // RAVEN_HNSW_L0_TOPDOWN_CAP (default 4096).
+        HashSet<int> topdownPool = null;
+        if (Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_TOPDOWN") == "1")
+        {
+            int hopsPerLevel = int.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_TOPDOWN_HOPS"), out var _th) && _th >= 1 ? _th : 4;
+            int frontierCap = int.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_TOPDOWN_CAP"), out var _tc) && _tc >= 32 ? _tc : 4096;
+            int maxLvl = searchState.Options.MaxLevel;
+            int entryIdx = searchState.GetNodeIndexById(EntryPointId);
+            if (entryIdx >= 0)
+            {
+                var visited = new HashSet<int> { entryIdx };
+                var frontier = new List<int>(64) { entryIdx };
+                for (int ℓ = maxLvl; ℓ >= targetLevel; ℓ--)
+                {
+                    // N-hop expansion at this level.
+                    int hopStart = 0;
+                    for (int hop = 0; hop < hopsPerLevel && frontier.Count < frontierCap; hop++)
+                    {
+                        int hopEnd = frontier.Count;
+                        for (int i = hopStart; i < hopEnd; i++)
+                        {
+                            int n = frontier[i];
+                            ref var nNode = ref searchState.GetNodeByIndex(n);
+                            if (nNode.EdgesPerLevel.Count <= ℓ) continue;
+                            ref var nEdges = ref nNode.EdgesPerLevel[ℓ];
+                            for (int e = 0; e < nEdges.Count && frontier.Count < frontierCap; e++)
+                            {
+                                int candIdx = searchState.GetNodeIndexById(nEdges[e]);
+                                if (visited.Add(candIdx))
+                                    frontier.Add(candIdx);
+                            }
+                        }
+                        hopStart = hopEnd;
+                    }
+                    // Project to next level: keep only nodes that exist at ℓ-1.
+                    if (ℓ > targetLevel)
+                    {
+                        var nextFrontier = new List<int>(frontier.Count);
+                        foreach (int n in frontier)
+                        {
+                            ref var nNode = ref searchState.GetNodeByIndex(n);
+                            if (nNode.EdgesPerLevel.Count > ℓ - 1)
+                                nextFrontier.Add(n);
+                        }
+                        frontier = nextFrontier;
+                    }
+                }
+                // At targetLevel — visited is the layered-pool augmentation.
+                topdownPool = visited;
+            }
+        }
+
         foreach (var kv in l0NodeVisits)
         {
             int u = kv.Key;
@@ -1814,6 +1874,37 @@ public unsafe partial class Hnsw
                             if (hopStats) cov4++;
                         }
                     }
+                }
+            }
+
+            // FRAMEWORK §28 — top-down layered N-hop pool (RAVEN_HNSW_L0_TOPDOWN=1).
+            // Built once at top of simulator (see topdownPool above); used here
+            // as augmentation to bestVCoverage. The pool is the set of nodes
+            // visited during a top-down walk from EntryPointId where 4 hops
+            // are taken at each level before projecting to the next level. At
+            // targetLevel, this set IS the candidate pool — independent of
+            // u's L0 topology. Targets the failure mode where production
+            // search lands at u but u's local 3-hop pool can't supply a fix
+            // because the right v is in a different HNSW cluster.
+            if (topdownPool != null)
+            {
+                foreach (int candIdx in topdownPool)
+                {
+                    if (poolHash.Add(candIdx) == false) continue;
+                    if (candIdx == u) continue;
+                    float duv = searchState.Distance(ReadOnlySpan<byte>.Empty, u, candIdx);
+                    if (duv > radialCeiling) continue;
+                    int covCount = 0;
+                    for (int wi = 0; wi < visits.Count; wi++)
+                    {
+                        if (visits[wi].covered) continue;
+                        if (useHoeffding && (wi & 1) != 0) continue;
+                        var wq = queriesBlob.Slice(visits[wi].qIdx * vectorSizeBytes, vectorSizeBytes);
+                        float dcq = searchState.Distance(wq, -1, candIdx);
+                        if (dcq <= rho * visits[wi].dUQ) covCount++;
+                    }
+                    if (covCount > 0)
+                        bestVCoverage[candIdx] = covCount;
                 }
             }
 
@@ -2181,10 +2272,10 @@ public unsafe partial class Hnsw
 
         if (hopStats)
         {
-            // Per-hop candidate accounting. Surfaces whether N-hop adds NEW
-            // candidates (poolN > 0), whether they survive the radial ceiling
-            // (feasN > 0), and whether any cover at least one uncovered visit
-            // (covN > 0). Indispensable for diagnosing null-result Phase B
+            // Per-hop candidate accounting. Surfaces whether 4-hop adds NEW
+            // candidates (pool4 > 0), whether they survive the radial ceiling
+            // (feas4 > 0), and whether any cover at least one uncovered visit
+            // (cov4 > 0). Indispensable for diagnosing null-result Phase B
             // experiments — without this you can't tell whether the lever
             // failed at pool widening, ceiling, or coverage.
             Console.WriteLine($"[L0 hopstats ρ={rho:F2} β={betaL0:F2}] " +
