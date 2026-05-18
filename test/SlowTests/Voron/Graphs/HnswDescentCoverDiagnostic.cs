@@ -3024,6 +3024,9 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                 tau = tauEnv;
             bool useStability = adaptiveEfMode is "2" or "4";
             bool useContinuation = adaptiveEfMode is "3" or "4";
+            int stabilityLookback = 1;
+            if (int.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF_STAB_K"), out var kEnv) && kEnv > 0)
+                stabilityLookback = kEnv;
             Output.WriteLine("");
             string modeLabel = adaptiveEfMode switch
             {
@@ -3032,7 +3035,7 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                 "4" => " ratio+stability+continuation",
                 _ => " ratio-only"
             };
-            Output.WriteLine($"§19.13 Adaptive efSearch(q) prototype (ladder=[{string.Join(",", efLadder)}], τ={tau:F2}, mode={adaptiveEfMode}{modeLabel}):");
+            Output.WriteLine($"§19.13 Adaptive efSearch(q) prototype (ladder=[{string.Join(",", efLadder)}], τ={tau:F2}, mode={adaptiveEfMode}{modeLabel}, stab-k={stabilityLookback}):");
             Output.WriteLine($"{"engine",14}  {"r@1",8}  {"r@10",8}  {"r@50",8}  {"mean ef",8}  {"total ms",10}");
             foreach (var (label, treeLabel) in recallVariants)
             {
@@ -3041,12 +3044,13 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                 long[] counts = new long[kSweep.Length];
                 long efSum = 0;
                 var sw = System.Diagnostics.Stopwatch.StartNew();
+                long[] topHistory = new long[efLadder.Length];
                 for (int q = 0; q < numberOfQueries; q++)
                 {
                     var qmem = new System.ReadOnlyMemory<byte>(queryBuffer, q * vectorSizeInBytes, vectorSizeInBytes);
                     int chosenEf = efLadder[efLadder.Length - 1];
                     long[] finalIds = null;
-                    long prevTopId = -1;
+                    System.Array.Fill(topHistory, -1);
                     Hnsw.VectorSearchRetriever retCont = default;
                     bool retContInitialized = false;
                     try
@@ -3081,8 +3085,22 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                             if (got < 2 || dists[0] <= 0f) break;
                             float ratio = dists[1] / dists[0];
                             if (ratio >= tau) break;
-                            if (useStability && li > 0 && ids[0] == prevTopId) break;
-                            prevTopId = ids[0];
+                            topHistory[li] = ids[0];
+                            // Stability gate: exit only when the top-1 id has been unchanged
+                            // for the last stabilityLookback rungs (including this one).
+                            // k=1 ⇒ compares to the prior rung (mode 2/4 original behavior).
+                            // k≥2 ⇒ requires k consecutive matches; needed on dense ladders
+                            // where small ef gaps make consecutive matches too easy.
+                            if (useStability && li >= stabilityLookback)
+                            {
+                                bool stable = true;
+                                long top = ids[0];
+                                for (int b = 1; b <= stabilityLookback; b++)
+                                {
+                                    if (topHistory[li - b] != top) { stable = false; break; }
+                                }
+                                if (stable) break;
+                            }
                         }
                     }
                     finally
