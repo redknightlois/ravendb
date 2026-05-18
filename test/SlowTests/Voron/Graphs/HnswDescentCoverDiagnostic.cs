@@ -3010,8 +3010,13 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         //         to grow ef on the same SearchState (cached distances, no
         //         multi-rung restart cost).
         // Mode 4: mode 2 + continuation (stability gate + ContinueWith).
+        // Mode 5: absolute d_top_1 predicate + stability + continuation. Replaces
+        //         the ratio proxy (which fails at 1M scale where tubes tighten)
+        //         with d_top_1 < τ_abs ⇒ confident exit. Small d_top_1 means
+        //         the query is close to a cluster centroid; large means it's
+        //         in an under-covered region needing more ef.
         var adaptiveEfMode = Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF");
-        if (adaptiveEfMode is "1" or "2" or "3" or "4")
+        if (adaptiveEfMode is "1" or "2" or "3" or "4" or "5")
         {
             int[] efLadder = Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF_LADDER") switch
             {
@@ -3022,8 +3027,12 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
             float tau = 1.30f;
             if (float.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF_TAU"), out var tauEnv) && tauEnv > 0)
                 tau = tauEnv;
-            bool useStability = adaptiveEfMode is "2" or "4";
-            bool useContinuation = adaptiveEfMode is "3" or "4";
+            float tauAbs = 0.10f;
+            if (float.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF_TAU_ABS"), out var tauAbsEnv) && tauAbsEnv > 0)
+                tauAbs = tauAbsEnv;
+            bool useStability = adaptiveEfMode is "2" or "4" or "5";
+            bool useContinuation = adaptiveEfMode is "3" or "4" or "5";
+            bool useAbsolute = adaptiveEfMode == "5";
             int stabilityLookback = 1;
             if (int.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF_STAB_K"), out var kEnv) && kEnv > 0)
                 stabilityLookback = kEnv;
@@ -3033,9 +3042,11 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                 "2" => " ratio+stability",
                 "3" => " ratio-only+continuation",
                 "4" => " ratio+stability+continuation",
+                "5" => " absolute+stability+continuation",
                 _ => " ratio-only"
             };
-            Output.WriteLine($"§19.13 Adaptive efSearch(q) prototype (ladder=[{string.Join(",", efLadder)}], τ={tau:F2}, mode={adaptiveEfMode}{modeLabel}, stab-k={stabilityLookback}):");
+            string predicateLabel = useAbsolute ? $"τ_abs={tauAbs:F3}" : $"τ={tau:F2}";
+            Output.WriteLine($"§19.13 Adaptive efSearch(q) prototype (ladder=[{string.Join(",", efLadder)}], {predicateLabel}, mode={adaptiveEfMode}{modeLabel}, stab-k={stabilityLookback}):");
             Output.WriteLine($"{"engine",14}  {"r@1",8}  {"r@10",8}  {"r@50",8}  {"mean ef",8}  {"total ms",10}");
             foreach (var (label, treeLabel) in recallVariants)
             {
@@ -3083,8 +3094,15 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                             chosenEf = ef;
                             if (li == efLadder.Length - 1) break;
                             if (got < 2 || dists[0] <= 0f) break;
-                            float ratio = dists[1] / dists[0];
-                            if (ratio >= tau) break;
+                            if (useAbsolute)
+                            {
+                                if (dists[0] < tauAbs) break;
+                            }
+                            else
+                            {
+                                float ratio = dists[1] / dists[0];
+                                if (ratio >= tau) break;
+                            }
                             topHistory[li] = ids[0];
                             // Stability gate: exit only when the top-1 id has been unchanged
                             // for the last stabilityLookback rungs (including this one).
