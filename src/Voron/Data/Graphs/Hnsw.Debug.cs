@@ -1638,6 +1638,13 @@ public unsafe partial class Hnsw
         long proposedSwaps = 0;
         long rejectedByHoeffding = 0;
         long rejectedBySpread = 0;
+        // Per-hop candidate accounting (printed when RAVEN_HNSW_L0_HOPSTATS=1).
+        // poolN counts UNIQUE candidates added at hop N (regardless of radial ceiling).
+        // feasN counts those inside radial ceiling. covN counts those with covCount > 0.
+        long pool2 = 0, feas2 = 0, cov2 = 0;
+        long pool3 = 0, feas3 = 0, cov3 = 0;
+        long pool4 = 0, feas4 = 0, cov4 = 0;
+        bool hopStats = Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_HOPSTATS") == "1";
 
         // FRAMEWORK §7 Hoeffding-gated train/val acceptance. Even-qIdx visits feed candidate
         // scoring (Q_train); odd-qIdx feed the validation gain estimate (Q_val). Accept only
@@ -1704,9 +1711,11 @@ public unsafe partial class Hnsw
                     int w = searchState.GetNodeIndexById(vEdges[j]);
                     if (poolHash.Add(w) == false) continue;
                     twoHopFrontier.Add(w);
+                    if (hopStats) pool2++;
                     if (w == u) continue;
                     float duw = searchState.Distance(ReadOnlySpan<byte>.Empty, u, w);
                     if (duw > radialCeiling) continue;
+                    if (hopStats) feas2++;
                     int covCount = 0;
                     for (int vi = 0; vi < visits.Count; vi++)
                     {
@@ -1718,7 +1727,10 @@ public unsafe partial class Hnsw
                             covCount++;
                     }
                     if (covCount > 0)
+                    {
                         bestVCoverage[w] = covCount;
+                        if (hopStats) cov2++;
+                    }
                 }
             }
             // 3-hop expansion. When RAVEN_HNSW_L0_4HOP=1 we also collect the
@@ -1741,9 +1753,11 @@ public unsafe partial class Hnsw
                     int x = searchState.GetNodeIndexById(wEdges[k]);
                     if (poolHash.Add(x) == false) continue;
                     threeHopFrontier?.Add(x);
+                    if (hopStats) pool3++;
                     if (x == u) continue;
                     float dux = searchState.Distance(ReadOnlySpan<byte>.Empty, u, x);
                     if (dux > radialCeiling) continue;
+                    if (hopStats) feas3++;
                     int covCount = 0;
                     for (int vi = 0; vi < visits.Count; vi++)
                     {
@@ -1755,7 +1769,10 @@ public unsafe partial class Hnsw
                             covCount++;
                     }
                     if (covCount > 0)
+                    {
                         bestVCoverage[x] = covCount;
+                        if (hopStats) cov3++;
+                    }
                 }
             }
             // 4-hop expansion (gated). Same shape as 3-hop but anchored on
@@ -1776,9 +1793,11 @@ public unsafe partial class Hnsw
                     {
                         int y = searchState.GetNodeIndexById(wEdges[k]);
                         if (poolHash.Add(y) == false) continue;
+                        if (hopStats) pool4++;
                         if (y == u) continue;
                         float duy = searchState.Distance(ReadOnlySpan<byte>.Empty, u, y);
                         if (duy > radialCeiling) continue;
+                        if (hopStats) feas4++;
                         int covCount = 0;
                         for (int vi = 0; vi < visits.Count; vi++)
                         {
@@ -1790,7 +1809,10 @@ public unsafe partial class Hnsw
                                 covCount++;
                         }
                         if (covCount > 0)
+                        {
                             bestVCoverage[y] = covCount;
+                            if (hopStats) cov4++;
+                        }
                     }
                 }
             }
@@ -2155,6 +2177,20 @@ public unsafe partial class Hnsw
                 // No swap applied — uncovered count unchanged.
                 l0UncoveredPost += uncoveredCount;
             }
+        }
+
+        if (hopStats)
+        {
+            // Per-hop candidate accounting. Surfaces whether N-hop adds NEW
+            // candidates (poolN > 0), whether they survive the radial ceiling
+            // (feasN > 0), and whether any cover at least one uncovered visit
+            // (covN > 0). Indispensable for diagnosing null-result Phase B
+            // experiments — without this you can't tell whether the lever
+            // failed at pool widening, ceiling, or coverage.
+            Console.WriteLine($"[L0 hopstats ρ={rho:F2} β={betaL0:F2}] " +
+                $"2-hop: pool={pool2} feas={feas2} cov={cov2} | " +
+                $"3-hop: pool={pool3} feas={feas3} cov={cov3} | " +
+                $"4-hop: pool={pool4} feas={feas4} cov={cov4}");
         }
 
         return new L0OneSwapSimulationReport(
