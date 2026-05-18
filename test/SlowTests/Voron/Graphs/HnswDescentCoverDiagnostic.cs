@@ -2892,6 +2892,14 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         var recallVariants = runL0Repair
             ? new[] { ("legacy", "legacy"), ("apollonius", "apollonius"), ("apollonius_repair", "apollonius_repair"), ("legacy_repair", "legacy_repair") }
             : new[] { ("legacy", "legacy"), ("apollonius", "apollonius") };
+        // FRAMEWORK §19.7 bucket histogram. Per engine, per query, record the
+        // lowest ef at which top-1 succeeds (or sentinel ∞ if it never succeeds).
+        // Bucket B = succeeded only at high ef (beam-capacity-limited).
+        // Bucket C/D = failed even at max ef (selected-edge or pool-limited).
+        // Bucket A is known ~0 from §19.1 (gateway oracle null on Sphere).
+        var perQueryMinEf = new System.Collections.Generic.Dictionary<string, int[]>();
+        foreach (var (label, _) in recallVariants)
+            perQueryMinEf[label] = System.Linq.Enumerable.Repeat(int.MaxValue, numberOfQueries).ToArray();
         foreach (var ef in efSweep)
         {
             foreach (var (label, treeLabel) in recallVariants)
@@ -2900,6 +2908,7 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                 long[] hits = new long[kSweep.Length];
                 long[] counts = new long[kSweep.Length];
                 var sw = System.Diagnostics.Stopwatch.StartNew();
+                int[] minEf = perQueryMinEf[label];
                 for (int q = 0; q < numberOfQueries; q++)
                 {
                     var qmem = new System.ReadOnlyMemory<byte>(queryBuffer, q * vectorSizeInBytes, vectorSizeInBytes);
@@ -2919,6 +2928,9 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                         hits[ki] += matches;
                         counts[ki] += System.Math.Min(k, t.Length);
                     }
+                    // §19.7 per-query top-1 hit tracking: was the true 1-NN returned?
+                    if (got > 0 && t.Length > 0 && ids[0] == t[0] && ef < minEf[q])
+                        minEf[q] = ef;
                 }
                 sw.Stop();
                 double r1 = counts[0] > 0 ? (double)hits[0] / counts[0] : 0;
@@ -2927,6 +2939,32 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
                 Output.WriteLine($"{ef,10}  {label,12}  {r1,10:P2}  {r10,10:P2}  {r50,10:P2}  {sw.ElapsedMilliseconds,10}");
             }
         }
+        // §19.7 bucket histogram report — top-1 lens only.
+        int maxEf = efSweep[efSweep.Length - 1];
+        Output.WriteLine("");
+        Output.WriteLine($"§19.7 Bucket histogram (top-1, max ef = {maxEf}):");
+        Output.WriteLine($"{"engine",14}  {"never",8}  {"only@max",10}  {"min<max",10}  {"min≤32",10}");
+        foreach (var (label, _) in recallVariants)
+        {
+            int[] minEf = perQueryMinEf[label];
+            int never = 0;          // fails even at max ef — bucket C or D
+            int onlyAtMax = 0;      // first succeeded at max ef
+            int belowMax = 0;       // first succeeded below max — pure bucket B fraction
+            int easy = 0;           // succeeded at smallest ef
+            int smallestEf = efSweep[0];
+            foreach (var v in minEf)
+            {
+                if (v == int.MaxValue) never++;
+                else if (v == maxEf) onlyAtMax++;
+                else belowMax++;
+                if (v <= smallestEf) easy++;
+            }
+            Output.WriteLine($"{label,14}  {never,8}  {onlyAtMax,10}  {belowMax,10}  {easy,10}");
+        }
+        Output.WriteLine("Bucket reading: never = C/D (selected-edge or pool limited);");
+        Output.WriteLine("                only@max = beam-bound queries pushed over by max ef;");
+        Output.WriteLine("                min<max = bucket B (beam-capacity rescued before max);");
+        Output.WriteLine("                bucket A ≈ 0 per §19.1 gateway oracle null on Sphere.");
     }
 
     [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
