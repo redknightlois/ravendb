@@ -3013,7 +3013,12 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         var adaptiveEfMode = Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF");
         if (adaptiveEfMode is "1" or "2" or "3" or "4")
         {
-            int[] efLadder = [32, 128, 512];
+            int[] efLadder = Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF_LADDER") switch
+            {
+                "dense" => [32, 64, 128, 256, 512],
+                "coarse" => [32, 128, 512],
+                _ => [32, 128, 512],
+            };
             float tau = 1.30f;
             if (float.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF_TAU"), out var tauEnv) && tauEnv > 0)
                 tau = tauEnv;
