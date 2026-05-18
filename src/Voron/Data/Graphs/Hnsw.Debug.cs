@@ -1644,6 +1644,7 @@ public unsafe partial class Hnsw
         long pool2 = 0, feas2 = 0, cov2 = 0;
         long pool3 = 0, feas3 = 0, cov3 = 0;
         long pool4 = 0, feas4 = 0, cov4 = 0;
+        long poolTD = 0, feasTD = 0, covTD = 0;
         bool hopStats = Environment.GetEnvironmentVariable("RAVEN_HNSW_L0_HOPSTATS") == "1";
 
         // FRAMEWORK §7 Hoeffding-gated train/val acceptance. Even-qIdx visits feed candidate
@@ -1892,8 +1893,10 @@ public unsafe partial class Hnsw
                 {
                     if (poolHash.Add(candIdx) == false) continue;
                     if (candIdx == u) continue;
+                    if (hopStats) poolTD++;
                     float duv = searchState.Distance(ReadOnlySpan<byte>.Empty, u, candIdx);
                     if (duv > radialCeiling) continue;
+                    if (hopStats) feasTD++;
                     int covCount = 0;
                     for (int wi = 0; wi < visits.Count; wi++)
                     {
@@ -1904,7 +1907,10 @@ public unsafe partial class Hnsw
                         if (dcq <= rho * visits[wi].dUQ) covCount++;
                     }
                     if (covCount > 0)
+                    {
                         bestVCoverage[candIdx] = covCount;
+                        if (hopStats) covTD++;
+                    }
                 }
             }
 
@@ -2281,7 +2287,8 @@ public unsafe partial class Hnsw
             Console.WriteLine($"[L0 hopstats ρ={rho:F2} β={betaL0:F2}] " +
                 $"2-hop: pool={pool2} feas={feas2} cov={cov2} | " +
                 $"3-hop: pool={pool3} feas={feas3} cov={cov3} | " +
-                $"4-hop: pool={pool4} feas={feas4} cov={cov4}");
+                $"4-hop: pool={pool4} feas={feas4} cov={cov4} | " +
+                $"topdown: pool={poolTD} feas={feasTD} cov={covTD}");
         }
 
         return new L0OneSwapSimulationReport(
