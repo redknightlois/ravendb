@@ -2966,6 +2966,37 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         Output.WriteLine("                min<max = bucket B (beam-capacity rescued before max);");
         Output.WriteLine("                bucket A ≈ 0 per §19.1 gateway oracle null on Sphere.");
 
+        // §19.13 oracle adaptive ceiling: per query, charge the smallest ef
+        // at which top-1 succeeded (from minEf above); unrescuable queries
+        // (never) are charged the smallest ef only. This is the upper bound
+        // of any adaptive ef predicate using this ladder — no proxy can do
+        // better. Compare against fixed-ef recall+wall in the sweep above.
+        Output.WriteLine("");
+        Output.WriteLine($"§19.13 Oracle adaptive ceiling (ladder=[{string.Join(",", efSweep)}]):");
+        Output.WriteLine($"{"engine",14}  {"r@1 oracle",12}  {"mean ef",10}  {"never%",8}  {"max ef%",8}");
+        foreach (var (label, _) in recallVariants)
+        {
+            int[] minEf = perQueryMinEf[label];
+            long efSum = 0;
+            int hit = 0;
+            int neverCnt = 0;
+            int maxCnt = 0;
+            int smallestEf = efSweep[0];
+            foreach (var v in minEf)
+            {
+                if (v == int.MaxValue) { efSum += smallestEf; neverCnt++; }
+                else { efSum += v; hit++; if (v == maxEf) maxCnt++; }
+            }
+            double r1Oracle = (double)hit / numberOfQueries;
+            double meanEf = (double)efSum / numberOfQueries;
+            double neverPct = 100.0 * neverCnt / numberOfQueries;
+            double maxPct = 100.0 * maxCnt / numberOfQueries;
+            Output.WriteLine($"{label,14}  {r1Oracle,12:P2}  {meanEf,10:F1}  {neverPct,8:F1}  {maxPct,8:F1}");
+        }
+        Output.WriteLine("Reading: r@1 oracle is the absolute ceiling for any adaptive predicate;");
+        Output.WriteLine("         mean ef is the cost of always picking the right rung;");
+        Output.WriteLine("         never% = unrescuable (bucket C/D); max ef% = bucket B at the cap.");
+
         // FRAMEWORK §19.13 adaptive efSearch(q) prototype.
         // Per query: climb ladder. Predicate (post-empirical-flip 2026-05-18):
         //   if d_top_2 / d_top_1 ≥ τ ⇒ STOP (well-separated → confident),
