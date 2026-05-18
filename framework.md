@@ -768,67 +768,81 @@ finding there determines whether the next investment is:
 The Gateway-Budget Theorem (§18.8) makes both directions defensible: the
 recommendation falls out of the diagnostic, not aesthetic preference.
 
-## 19. Gateway Null Theorem and adaptive M_0 program
+## 19. Adaptive M_0 program: propositions, empirical findings, open hypothesis
 
-§18 left the next investment conditional on the §18.9 Test 1 result. The
-gateway oracle has now been run on Sphere-100K (Q=1000, M=12, efC=128)
-and is null within noise:
+§18 left the next investment conditional on the §18.9 Test 1 result.
+This chapter is careful to label each statement by epistemic status:
+**Proposition** (provable), **Empirical finding** (measured on a
+specific dataset), or **Hypothesis** (plausible but not proven).
+
+### 19.1 Empirical finding — gateway oracle null on Sphere-100K
+
+The §18.9 Test 1 gateway oracle has been run on Sphere-100K
+(Q=1000, M=12, efC=128, ef sweep {32, 64, 128, 256, 512}). With
+
+```
+Δr@1_engine = mean over the ef sweep of recall@1(oracle) − recall@1(baseline),
+```
+
+the result is
 
 ```
 Δr@1_legacy ≈ −0.44 pp,  Δr@1_apollonius ≈ −0.46 pp,  Q=1000 2σ ≈ 1.7 pp.
 ```
 
-Under favorable noise the optimistic upper bound on nearest-V_1 gateway
-headroom is therefore ~+1.26 pp. That is not a structural lever.
+Null within sampling error. Under favorable noise the optimistic upper
+bound on nearest-V_1 gateway headroom is ~+1.26 pp. **This is an
+empirical result on a single dataset, not a universal theorem.**
 
-### 19.1 Gateway Null Theorem
+### 19.2 Proposition 1 — nearest-V_1 oracle dominates metric-gateway methods
 
-Let `s_b(q)` be the baseline upper-layer descent gateway, and let
+Let `s_b(q)` be the baseline upper-layer descent gateway and let
 
 ```
 s*(q) = argmin_{s ∈ V_1} d(q, s)
 ```
 
-be the exhaustive nearest-V_1 oracle. Define `Z(q, s) ∈ {0, 1}` as the
-level-0 search outcome starting from `s`. The gateway-quality recall
-delta is
+be the exhaustive nearest-V_1 node. Let `Z(q, s) ∈ {0, 1}` indicate
+whether level-0 search from `s` recovers the true neighbor. Define
 
 ```
 Δ_gateway = E_q [ Z(q, s*(q)) − Z(q, s_b(q)) ].
 ```
 
-**Theorem (Gateway Null).** *For a fixed level-0 graph `G_0`, fixed
-`efSearch`, and fixed promoted layer `V_1`, if `Δ_gateway ≤ ε`, then any
-upper-layer modification whose only mechanism is to produce a closer
-metric gateway has recall gain at most `ε`, up to sampling error.*
+**Proposition 1.** *For a fixed `G_0`, fixed `efSearch`, and fixed
+`V_1`, if `Δ_gateway ≤ ε`, then any method whose only claimed mechanism
+is to choose a closer-to-`q` node in `V_1` has recall gain at most `ε`.*
 
-On Sphere-100K, `ε ≈ 0`. The mechanism family "make `s_b(q)` closer to
-`s*(q)` in distance" therefore has no recall leverage on this dataset.
-In particular, **adaptive `M_1` is exhausted** under this mechanism.
+**Proof sketch.** The nearest-gateway oracle picks `s*(q)`, which by
+construction minimizes `d(q, s)` over `V_1`. Any method whose only
+metric objective is closeness-to-query in `V_1` cannot pick a node
+closer than `s*(q)`. If even `s*(q)` does not improve `Z`, then
+closeness-to-query inside `V_1` is not the missing variable. ∎
 
-### 19.2 What the theorem does not kill
+**Scope.** Proposition 1 rules out the *metric-closeness* family. It
+does **not** rule out a topological gateway `s'` (non-nearest but with
+a better `G_0` basin), and it does not extend to multi-entry seeding.
 
-The theorem rules out *metric-quality* upper-layer improvement only. It
-does not rule out **topological gateway improvement** — a non-nearest
-`V_1` node `s'` that happens to have a better level-0 outgoing basin
-than `s*(q)`. The fact that several `ef` levels show oracle slightly
-worse than baseline (closer-gateway producing equal or worse success)
-already hints that proximity is not strictly monotone with success — but
-the effect is small and not actionable as an upper-layer M lever.
+### 19.3 Empirical implication and the top-h follow-up
 
-A clean follow-up is the top-`h` `V_1` oracle:
+Combining §19.1 (`ε ≈ 0` on Sphere-100K) with Proposition 1: on this
+dataset, adaptive-`M_1` schemes whose mechanism is "produce a closer
+metric gateway" have no demonstrated recall headroom. The clean
+follow-up that bounds the topological-gateway residual is the top-`h`
+oracle:
 
 ```
 S_h(q) = top-h closest nodes in V_1,
-Z_OR(q) = 1[ ∃ s ∈ S_h(q) : Z(q, s) = 1 ].
+Z_OR(q) = 1[ ∃ s ∈ S_h(q) : Z_h(q, s) = 1 ],
 ```
 
-If `E_q[Z_OR(q) − Z(q, s_b(q))] ≤ ε` for `h ∈ {4, 8, 16, 32}`, then
-upper gateways are "dead-dead" and no upper-M variant rescues recall.
-Until this is run, treat the §19.1 verdict as scoped to the
-nearest-gateway mechanism.
+where `Z_h` is the success indicator when L0 search is restarted from
+seed `s`. If `E_q[Z_OR(q) − Z(q, s_b(q))] ≤ ε` for `h ∈ {4, 8, 16, 32}`,
+the upper-gateway family is closed in both the metric and topological
+senses. Until that test runs, the §19.1 verdict is scoped to the
+nearest-gateway mechanism only.
 
-### 19.3 The bottleneck is level-0 tube connectivity
+### 19.4 The bottleneck is level-0 tube connectivity (hypothesis)
 
 The framework's recall condition is
 
@@ -836,18 +850,20 @@ The framework's recall condition is
 efSearch ≥ κ_R(q)   AND   tube T_R(q) admits a beam-admissible path in G_0.
 ```
 
-The oracle null says the entry into `G_0` is fine. Failed queries
-therefore fail **after entry**, when the beam cannot enter, retain, or
-traverse the level-0 tube. The lever moves from `M_1(u)` to `M_0(u)`,
-but **not** to global `M_0`. The right object is
+**Hypothesis.** *Given §19.1's empirical gateway null, the dominant
+remaining recall failure mode on this regime is `G_0` tube-traversal,
+not entry quality. The lever therefore moves from `M_1(u)` to `M_0(u)`,
+but not to global `M_0`.* The right object is
 
 ```
-M_0(u) = M_min + b(u)
+M_0(u) = M_min + b(u),
 ```
 
 with `b(u) > 0` only on nodes that sit on failed level-0 tube cuts.
+This is a hypothesis until backed by §19.7 bucket-C dominance and the
+§19.6 non-destruction gate.
 
-### 19.4 Trace events and admissibility
+### 19.5 Trace events and admissibility
 
 For each failed query, a trace event is
 
@@ -883,7 +899,7 @@ Let `g_e(v) = 1[beam-admissible] · 1[tube-useful]`. Each candidate edge
 C_a = { e : g_e(v) = 1 }.
 ```
 
-### 19.5 Adaptive M_0 as weighted tube-cut coverage
+### 19.6 Adaptive M_0 as weighted tube-cut coverage
 
 The allocation problem is
 
@@ -915,19 +931,81 @@ choose a = (u, v) maximizing  ΔF(a) / c(a),
 not `argmax ΔF`. This matters: naive "give the most-visited nodes more
 edges" is the wrong heuristic because their query cost dominates.
 
-### 19.6 Approximation guarantee with non-destruction guard
+### 19.7 Proposition 2 — trace-edge coverage is monotone submodular
 
-`F(S)` is monotone submodular (each edge covers a subset of trace
-events; union has diminishing returns). Under cardinality budget the
-weighted-cost greedy achieves
+Let `E` be the set of failed trace events. For each candidate edge
+`a = (u, v)`, let `C_a ⊆ E` be the events for which `v` is
+beam-admissible and tube-useful (§19.5). Define
+
+```
+F(S) = | ∪_{a ∈ S} C_a |.
+```
+
+**Proposition 2.** *`F` is monotone submodular.*
+
+**Proof sketch.** Monotone: adding an edge can only increase the union
+of covered events. Submodular: for `A ⊆ B` and any edge `a`,
+
+```
+F(A ∪ {a}) − F(A) = | C_a \ ∪_{e ∈ A} C_e |.
+```
+
+Since `∪_{e ∈ A} C_e ⊆ ∪_{e ∈ B} C_e`, we have
+
+```
+| C_a \ ∪_{e ∈ A} C_e |  ≥  | C_a \ ∪_{e ∈ B} C_e |.
+```
+
+Marginal gain decreases as the selected set grows. ∎
+
+**Consequence.** Under a cardinality budget the weighted-cost greedy
+satisfies
 
 ```
 F(S_greedy) ≥ (1 − 1/e) · F(S*),
 ```
 
-with standard knapsack/weighted variants for non-uniform costs. The
-guarantee is on *trace coverage*, not recall. To lift to recall, every
-acceptance must clear the framework's non-destruction test:
+with standard knapsack/weighted variants for non-uniform costs. **This
+is a guarantee on trace coverage, not on recall.**
+
+### 19.8 Proposition 3 — selector-only improvement bounded by pool
+
+For each expanded node `u` during a failed descent, let `P(u)` be the
+candidate pool considered by the selector and `S(u) ⊆ P(u)` the
+selected adjacency. Define pool and selected coverage over the failed
+trace events at `u`:
+
+```
+PoolCover(u)     = Pr_e [ ∃ v ∈ P(u) : g_e(v) = 1 ],
+SelectedCover(u) = Pr_e [ ∃ v ∈ S(u) : g_e(v) = 1 ].
+```
+
+**Proposition 3.** *If `PoolCover(u) − SelectedCover(u) = 0`, no
+selector that only reorders or chooses from `P(u)` can improve trace
+coverage at `u`.*
+
+**Proof sketch.** Any selected set `S'(u) ⊆ P(u)` satisfies
+`∪_{v ∈ S'(u)} { events covered }  ⊆  ∪_{v ∈ P(u)} { events covered }`.
+If the existing selection already realizes pool coverage, the inclusion
+is an equality and no permutation increases the count. ∎
+
+**Consequence.** When pool headroom is zero, the lever cannot be a
+selector change — it must enlarge the pool itself (§15.5 enrichment)
+*or* add adjacency capacity beyond the pool (which is the §19.8
+two-tier mechanism).
+
+### 19.9 The recall-lift hypothesis and the non-destruction gate
+
+Propositions 1–3 only certify structural properties (gateway
+dominance, coverage monotonicity, selector lower bound). They do
+**not** certify recall. The missing lift is
+
+```
+trace-coverage gain   ⇒   recall gain,
+```
+
+and it is not free. Every accepted mutation must clear the §9
+hysteresis gate:
 
 ```
 I = Pr[ Z_G(q) = 0  AND  Z_G'(q) = 1 ],
@@ -935,25 +1013,44 @@ D = Pr[ Z_G(q) = 1  AND  Z_G'(q) = 0 ],
 accept ⇔ I − D > 2 ε + Δ.
 ```
 
-This is the exact §9 hysteresis gate — adaptive `M_0` inherits the same
-"nice structural improvement, worse recall" guard.
+**Hypothesis (adaptive M_0 recall lift).** *Given a fixed average edge
+budget `(1/N) Σ_u M_0(u) = M̄`, recall-per-storage improves if extra
+edges are assigned to nodes with positive trace pressure and positive
+pool-vs-selected headroom, rather than uniformly raising all `M_0(u)`.*
 
-### 19.7 Failed-query bucket distribution
+This hypothesis is *unproven*. The propositions above motivate it but
+do not establish it. Acceptance requires the §9 non-destruction
+condition and a held-out recall gain exceeding statistical noise.
+
+### 19.10 Failed-query bucket distribution
 
 Every failed query falls into one of four buckets, and the bucket
 distribution chooses the lever:
 
 | Bucket | Condition | Lever |
 |---|---|---|
-| A — gateway-limited | `Z(q, s*) > Z(q, s_b)` | adaptive `M_1` (now killed by §19.1) |
+| A — gateway-limited | `Z(q, s*) > Z(q, s_b)` | adaptive `M_1` (empirically null on Sphere-100K, §19.1) |
 | B — beam-capacity-limited | `efSearch < κ_R(q)` | adaptive `efSearch(q)` |
-| C — selected-edge-limited | `PoolCover(u) − SelectedCover(u) > 2 ε_u + Δ` for some expanded `u` | adaptive `M_0(u)` |
-| D — pool-limited | the enriched pool `P+(u)` itself lacks any useful edge | candidate-pool enrichment (§15.5) before §19 applies |
+| C — selected-edge-limited | `PoolCover(u) − SelectedCover(u) > 2 ε_u + Δ` for some expanded `u` (Proposition 3 headroom > 0) | adaptive `M_0(u)` |
+| D — pool-limited | even the enriched pool `P+(u)` lacks a useful edge | candidate-pool enrichment (§15.5) before §19 applies |
 
 Without a bucket histogram, adaptive `M_0` is a guess. With it, the
 next implementation step is uniquely determined.
 
-### 19.8 Two-tier adjacency
+**Empirical bucket distribution on Sphere-100K (W=1 baseline,
+top-1 lens, max ef = 512):**
+
+| engine | never (C/D) | only@max ef | min<max (B) | min ≤ 32 (easy) |
+|---|---|---|---|---|
+| legacy | 102 | 32 | 866 | 686 |
+| apollonius | 94 | 46 | 860 | 683 |
+
+~10% of queries fail even at ef = 512 (bucket C or D). ~86% are
+beam-capacity-rescued (bucket B), of which ~68% are already easy at
+ef = 32. Adaptive `efSearch(q)` targets the non-easy ~32% cheaply at
+query time; adaptive `M_0(u)` targets the ~10% C/D residual only.
+
+### 19.11 Two-tier adjacency
 
 Implementation should not rewrite `M_0`. A clean structure is
 
@@ -973,13 +1070,15 @@ the non-destruction gate of §19.6 both pass. Storage is then
 with the global average tunable independently of `M_base`. This is the
 right object for fair comparison to a uniform-`M_0` bump.
 
-### 19.9 Diagnostic order before any build mutation
+### 19.12 Diagnostic order before any build mutation
 
-1. **Top-`h` `V_1` oracle** (§19.2). Run for `h ∈ {4, 8, 16, 32}`. If
-   null, the upper-layer family is closed.
-2. **Bucket distribution** (§19.7). Compute the four-way histogram on
-   the failed-query set. The dominant bucket determines the lever.
-3. **Adaptive `M_0` oracle**. Take the top-`p%` nodes by
+1. **Top-`h` `V_1` oracle** (§19.3). Run for `h ∈ {4, 8, 16, 32}`. If
+   null, the upper-layer family is closed in both the metric and
+   topological senses.
+2. **Bucket distribution** (§19.10). Compute the four-way histogram on
+   the failed-query set. The dominant residual bucket determines which
+   lever has positive expected return.
+3. **Adaptive `M_0` oracle.** Take the top-`p%` nodes by
    `Γ(u) · H_u` (trace pressure × pool-vs-selected headroom). Boost
    only those nodes by `Δ`. Match average storage to a tiny uniform
    bump — e.g. 10% of nodes `16 → 31` versus uniform `16 → 17.5`.
@@ -989,21 +1088,40 @@ right object for fair comparison to a uniform-`M_0` bump.
    Σ_u M_0(u) = N · 17     (adaptive)
    ```
 
-   versus uniform `M_0 = 17`. Recall gain at *matched* storage is the
-   only result that licenses the mechanism.
+   versus uniform `M_0 = 17`. Recall gain at *matched* storage that
+   clears the §19.9 non-destruction gate is the only result that
+   licenses the mechanism.
 
-### 19.10 Engineering posture
+### 19.13 Engineering posture (epistemic summary)
 
-The Gateway-Budget Theorem (§18.8) and the Gateway Null Theorem (§19.1)
-together imply, *for Sphere-cohere-768*:
+**Proven (Propositions 1–3).** Nearest-V_1 oracle dominates the
+metric-gateway family. Trace-edge coverage `F(S)` is monotone
+submodular; weighted greedy is `(1 − 1/e)`-approximate on coverage.
+Selector-only changes cannot improve coverage when pool headroom is
+zero.
 
-- §18.6 / §18.10 upper-layer schedules — closed.
-- Adaptive `M_1(q)` — closed.
-- Adaptive `M_0(u)` — **open**, but only under the §19.7 bucket-C
-  evidence and the §19.6 non-destruction gate.
-- Adaptive `efSearch(q)` — open as a query-time alternative; cheaper to
-  prototype than build-time work.
+**Empirical (Sphere-100K).** Gateway-quality `Δ_gateway ≈ 0` within
+Q=1000 noise. Adaptive-`M_1` mechanisms whose only lever is closer
+metric gateway therefore have no demonstrated recall headroom on this
+dataset.
 
-The first commit should be the diagnostic (§19.9.1–§19.9.2). Build-time
-mutation belongs after the histogram says bucket-C is the dominant
-failure mode.
+**Open hypothesis.** Adaptive `M_0(u)` allocated to high-pressure,
+positive-headroom tube nodes improves recall-per-edge over uniform `M_0`
+at matched storage. This requires both (a) §19.10 evidence that bucket
+C dominates the residual and (b) a held-out recall gain clearing the
+§19.9 non-destruction gate. Until both, the recall claim is
+provisional.
+
+**Mechanism status table.**
+
+| Mechanism | Status on Sphere-cohere-768 |
+|---|---|
+| §18.6 / §18.10 upper-layer schedules | empirically null (§19.1) |
+| Adaptive `M_1(q)` metric-gateway | bounded null by Proposition 1 + §19.1 |
+| Topological-gateway upper-layer | not yet measured (top-`h` oracle pending) |
+| Adaptive `M_0(u)` | hypothesis; gated on bucket-C dominance |
+| Adaptive `efSearch(q)` | hypothesis; cheap to prototype, targets ~32% non-easy share per §19.10 |
+
+The first commit should be diagnostic (§19.12.1–§19.12.2). Build-time
+mutation belongs after the histogram says bucket C dominates the
+residual and the non-destruction gate has been wired.
