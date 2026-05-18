@@ -745,6 +745,15 @@ weighted costs) gives a defensible objective with a known guarantee.
 This is a much cleaner mathematical object than "make local cover
 prettier" — it is failure-trace-driven and provably approximation-bounded.
 
+**Storage note (RavenDB-specific).** Per-node variable degree is free in
+this codebase: `Node.Encode` already writes a VarInt count per level and
+delta-encodes edges, so a node whose `M_ℓ(u) = M_min,ℓ + b_ℓ(u)` pays only
+the extra-edge bytes — no schema migration, no overflow lists. The
+implementation cost of §18.10 is therefore entirely in the builder
+(selector + repair caps that currently read `NumberOfEdges` as a global
+constant) and in the telemetry needed to compute `b_ℓ(u)`. Search-time
+beam logic already treats each node's degree as data, not constant.
+
 ### 18.11 Engineering recommendation
 
 Do **not** rebuild before running Test 1 (gateway oracle). The empirical
