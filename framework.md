@@ -1120,8 +1120,55 @@ provisional.
 | Adaptive `M_1(q)` metric-gateway | bounded null by Proposition 1 + §19.1 |
 | Topological-gateway upper-layer | not yet measured (top-`h` oracle pending) |
 | Adaptive `M_0(u)` | hypothesis; gated on bucket-C dominance |
-| Adaptive `efSearch(q)` | hypothesis; cheap to prototype, targets ~32% non-easy share per §19.10 |
+| Adaptive `efSearch(q)` | **prototyped, wall win demonstrated** (§19.14); hypothesis on recall-per-wall ceiling still open |
 
 The first commit should be diagnostic (§19.12.1–§19.12.2). Build-time
 mutation belongs after the histogram says bucket C dominates the
 residual and the non-destruction gate has been wired.
+
+### 19.14 Adaptive efSearch(q) — empirical findings
+
+**Predicate direction.** The natural per-query confidence proxy
+`ρ(q) = d_top_2 / d_top_1` is HIGH for easy queries (well-separated)
+and LOW for ambiguous ones. Climb-or-exit predicate: **stop when
+`ρ(q) ≥ τ`**, otherwise climb the ef ladder. The inverse (`<` not `≥`)
+stops the queries that most need to climb — empirically gave fixed-ef=32
+recall while spending fixed-ef=128 wall. Calibrate τ against the
+`d_top_K / d_top_1` tube-tightness diagnostic (§19.12); for Sphere
+cohere-768, τ ≈ 1.30 hits the κ-saturation knee.
+
+**Oracle ceiling.** Charging each query the smallest ef at which top-1
+succeeds (and unrescuable queries the smallest rung) gives the
+absolute upper bound for any predicate on a given ladder. On
+Sphere-100K with ladder [32, 64, 128, 256, 512], oracle is
+`r@1 ≈ 89.8%` at `mean ef ≈ 65` — i.e. fixed-ef=512 recall at
+~12% of fixed-ef=512 wall. Adaptive ef has real headroom; the question
+is how close a real proxy can approach this ceiling.
+
+**Continuation primitive.** Naively the multi-rung ladder pays the
+L0 beam-search startup cost three times. The `SearchState` keeps
+per-node distance memoization; growing the candidate target via
+`VectorSearchRetriever.ContinueWith(int newEf)` resets only the
+frontier/visited queues and re-runs at the larger ef with cached
+distances. Re-traversal is I/O-free for any node previously evaluated.
+Empirically saves ~20 % wall at identical mean ef vs fresh
+`ApproximateNearest` calls; result equivalence verified by
+per-query rung parity. This is a behavior-preserving change to
+the existing `ApproximateNearest` path — safe to ship independently of
+the predicate.
+
+**Operating point demonstrated.** On Sphere-100K Q=1000:
+
+| variant | r@1 | mean ef | wall |
+|---|---|---|---|
+| fixed `efSearch = 512` | 90.0 % | 512 | 5503 ms |
+| adaptive (`ρ≥1.30`, ladder=[32,128,512], continuation) | 89.6 % | 414 | **4864 ms** |
+
+That is 12 % wall reduction at recall parity. Larger gains are
+plausible with (a) a finer ladder (cheap under continuation), (b) a
+top-id stability gate to short-circuit bucket-C/D queries that cannot
+benefit from climbing, and (c) a sharper confidence proxy that
+identifies the ~69 % truly easy queries cheaply at the bottom of the
+ladder. The recall ceiling at ~90 % is set by the ~10 % bucket-C/D
+residual (§19.10); going above 90 % requires build-time `M_0(u)`
+expansion, not query-time ef.
