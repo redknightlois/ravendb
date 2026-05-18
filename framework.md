@@ -506,3 +506,255 @@ The core acceptance rule is always
 ```
 
 If it does not clear that threshold, the answer is **no**.
+
+---
+
+## 18. Gateway-Budget Theorem (adaptive upper-layer M)
+
+§1–§17 treat M as fixed per layer and ask only whether selector quality
+moves recall. This chapter asks a different question: given a total edge
+budget, how should it be split across layers?
+
+The hypothesis is that uniform `M_ℓ = M_0` over-spends at the base layer
+relative to the routing layers. Higher upper-layer degree does **not**
+improve recall directly — it improves the distribution of level-0 entry
+points. Recall only improves if current failures are *entry-limited*, not
+*level-0 tube-limited*.
+
+### 18.1 Recall decomposition
+
+Let `V_0 ⊃ V_1 ⊃ V_2 ⊃ …` be the layer hierarchy. Upper-layer search
+produces a gateway `s(q) ∈ V_1` from which level-0 beam search begins.
+For fixed level-0 graph `G_0`, define
+
+```
+P_0(q, s) = Pr[level-0 beam search from s recovers the true neighbor].
+```
+
+Let `μ_upper(s | q)` be the distribution of entry nodes produced by the
+upper layers. Total recall is exactly
+
+```
+R = E_q [ Σ_{s ∈ V_1} μ_upper(s | q) · P_0(q, s) ].
+```
+
+This gives the key separation:
+
+- Upper layers change `μ_upper`.
+- Level 0 changes `P_0(q, s)`.
+
+Upper-layer degree can only help when current upper search is *choosing
+bad level-0 gateways*. It cannot repair a level-0 graph whose tube
+connectivity is insufficient.
+
+### 18.2 The success-basin obstruction
+
+Define the level-0 success basin
+
+```
+A(q) = { s ∈ V_1 : P_0(q, s) > 0 }.
+```
+
+For any upper-layer design,
+
+```
+R_max(upper only) = E_q [ 1[A(q) ≠ ∅] ].
+```
+
+This is the first-principles impossibility boundary. If `A(q) = ∅` for
+many failed queries, no upper-layer M allocation can fix recall. Those
+failures require one of: `M_0 ↑`, `efSearch ↑`, level-0 repair, or denser
+promotion (more nodes in `V_1`, not more edges per node).
+
+### 18.3 Cost asymmetry across layers
+
+Let `π_ℓ = Pr[x ∈ V_ℓ]`. Per base-layer point, expected outgoing edge
+storage is
+
+```
+C = M_0 + π_1 M_1 + π_2 M_2 + …
+```
+
+An extra degree at level `ℓ` costs `ΔC_ℓ = π_ℓ`. With the standard
+`π_ℓ = M^{-ℓ}` schedule, `π_0 = 1`, `π_1 ≈ 1/M`, `π_2 ≈ 1/M²`, so raising
+`M_1` or `M_2` is far cheaper than raising `M_0`. At `M = 16`, the fair
+storage comparison is not `M_1 = 32` vs `M_0 = 32` but rather
+
+```
+M_1: 16 → 32   ≈   M_0: 16 → 17.
+```
+
+That asymmetry is what makes upper-layer over-provisioning attractive
+*if* the gateway-limited regime applies.
+
+### 18.4 Formal condition for upper M to beat lower M
+
+For tube radius `R` define `T_R(q) = { y : d(y, q) ≤ R r_k(q) }` and the
+entry-in-tube event `E_R(q) = 1[s(q) ∈ T_R(q)]`. Let
+
+```
+a = Pr[success | s(q) ∈ T_R(q)],
+b = Pr[success | s(q) ∉ T_R(q)].
+```
+
+Then the recall gain from improving upper routing is approximately
+
+```
+ΔR_upper ≈ (a − b) · ΔPr[s(q) ∈ T_R(q)].
+```
+
+Upper M is useful only when **both**:
+
+- `a − b ≫ 0`  (good entry actually matters), and
+- `ΔPr[s(q) ∈ T_R(q)] ≫ 0`  (higher M_1 actually gives better entry).
+
+If `a ≈ b`, entry quality does not matter. If `a` is low, even a perfect
+entry cannot solve the level-0 problem. If current upper search already
+finds good entries, higher `M_1` is saturated.
+
+### 18.5 Gateway density vs upper-layer degree
+
+Upper layers descend only through nodes that *exist* in upper layers.
+Define `s_1*(q) = argmin_{s ∈ V_1} d(s, q)`. Then
+
+```
+d(s(q), q) ≥ d(s_1*(q), q),
+Pr[s(q) ∈ T_R(q)] ≤ Pr[s_1*(q) ∈ T_R(q)].
+```
+
+If `V_1` is too sparse, increasing `M_1` does not fix the problem. The
+needed lever is `π_1 ↑` (promote more nodes), multiple entry candidates
+(`efUpper ↑`), or stronger level-0 catch-up. **More upper-layer degree
+and more upper-layer nodes are different levers.**
+
+### 18.6 Adaptive budget allocation (marginal condition)
+
+Total cost is `C(M) = Σ_ℓ |V_ℓ| M_ℓ`. With diminishing-return recall
+curves `R_ℓ(M_ℓ)`, the optimal allocation satisfies
+
+```
+(1 / |V_ℓ|) · ∂R / ∂M_ℓ = λ
+```
+
+for every active layer. Equivalently: allocate the next edge to the layer
+with the largest `ΔR_ℓ / |V_ℓ|`. Because `|V_0| ≫ |V_1| ≫ |V_2|`, upper
+layers should receive more degree *until their marginal gain saturates*.
+
+This argues for schedules like `M_0 = 16, M_1 = 32, M_2 ∈ {32, 48},
+M_{3+} ≤ 48` — but the schedule must be driven by **measured marginal
+gain**, not aesthetic symmetry.
+
+### 18.7 Cap-model bound
+
+Suppose at level `ℓ` each selected neighbor is a useful descent witness
+with probability `c_ℓ`. With `M_ℓ` diverse edges, probability of at least
+one useful witness is `p_ℓ(M_ℓ) = 1 − (1 − c_ℓ)^{M_ℓ}`. Marginal gain of
+one more edge is `c_ℓ (1 − c_ℓ)^{M_ℓ}`. Storage-normalized return is
+
+```
+ROI_ℓ = c_ℓ (1 − c_ℓ)^{M_ℓ} / |V_ℓ|.
+```
+
+Because `|V_ℓ|` shrinks geometrically, upper-layer edges can have much
+higher return per stored edge until `(1 − c_ℓ)^{M_ℓ}` becomes tiny. The
+formal result: `M_ℓ` should generally be larger in sparse routing layers
+until routing failure is saturated.
+
+### 18.8 Gateway-Budget Theorem (statement)
+
+> **For a fixed level-0 graph and fixed efSearch, upper-layer degree can
+> improve recall only by increasing the probability of routing into the
+> level-0 success basin `A(q)`. Because upper-layer nodes are
+> geometrically sparse, the cost-normalized marginal gain of upper-layer
+> degree can exceed the marginal gain of base-layer degree whenever
+> failures are gateway-limited. However, if `A(q) = ∅` for a failed
+> query, or the nearest promoted gateway is outside the recoverable
+> tube, upper-layer degree has zero recall leverage on that query.**
+
+This is the version of "raise upper M" that is hard to attack.
+
+### 18.9 Diagnostic tests before any rebuild
+
+Three cheap experiments isolate the bottleneck without changing
+construction.
+
+**Test 1 — Gateway oracle.** Freeze the current `M_0 = 16` level-0 graph.
+For each failed query, compute `s_1*(q) = argmin_{s ∈ V_1} d(s, q)` and
+re-run level-0 search starting from the current upper-search entry, from
+`s_1*(q)`, and from the top-`h` closest `V_1` nodes. The recall delta
+from current entry → oracle entry is the upper-layer *potential*.
+
+- **Large delta** ⇒ upper layers are the bottleneck; §18 applies.
+- **Small delta** ⇒ level 0 is the bottleneck; upper-M won't help.
+
+**Test 2 — Upper beam width without rebuild.** Replace single-candidate
+upper-layer descent with `efUpper ∈ {1, 2, 4, 8, 16}`. Descend to level 0
+from the best of the top-`efUpper` candidates.
+
+- **Recall lifts** ⇒ upper routing is the bottleneck.
+- **Recall flat** ⇒ raising `M_1` likely won't help either.
+
+**Test 3 — Equal-storage schedules.** Compare layer schedules at
+matched edge cost. The fair pair is `(M_0 = 17, M_1 = 16)` vs
+`(M_0 = 16, M_1 = 32)`, not `(M_0 = 32)` vs `(M_1 = 32)`. Schedules to
+sweep:
+
+| Schedule | M_0 | M_1 budget | Note |
+|---|---|---|---|
+| A (baseline) | 16 | M_1 += 16 | reference |
+| B | 17 | M_1 += 16 | tiny base bump |
+| C | 16 | M_1 += 32 | upper over-provision |
+| D | 16 | M_1 = 32, M_2 += 48 | aggressive routing |
+| E | 20 | M_1 += 16 | base-heavy |
+| F | 16 | M_1 += 16, π_1 ↑ | denser gateways |
+
+Recall-per-edge per schedule is the deliverable.
+
+### 18.10 Adaptive per-node M (stronger than per-layer)
+
+Per-layer `M_ℓ` is a coarse instrument. Some nodes deserve more degree
+than others within a layer: upper-layer routers visited by many queries,
+cluster-boundary nodes, nodes whose removal causes routing drift, nodes
+with high upper-layer betweenness, nodes whose outgoing edges appear
+before failed descents, level-0 nodes inside high-κ query tubes.
+
+Replace `M_ℓ = const` with
+
+```
+M_ℓ(u) = M_min,ℓ + b_ℓ(u),
+```
+
+where `b_ℓ(u)` is extra budget assigned by trace pressure. Define
+
+```
+Γ_ℓ(u) = Pr[u is visited before a failed query descent at layer ℓ].
+```
+
+Allocate extra edges to maximize the count of failed traces that gain a
+beam-admissible descent step. Let `C_e` be the set of failed traces
+covered by candidate edge `e = (u, v)`. Then
+
+```
+max F(S) = | ∪_{e ∈ S} C_e |   s.t.   Σ_{e ∈ S} cost(e) ≤ B.
+```
+
+This is monotone submodular coverage. The greedy `(1 − 1/e)`
+approximation under cardinality constraints (and standard variants for
+weighted costs) gives a defensible objective with a known guarantee.
+
+This is a much cleaner mathematical object than "make local cover
+prettier" — it is failure-trace-driven and provably approximation-bounded.
+
+### 18.11 Engineering recommendation
+
+Do **not** rebuild before running Test 1 (gateway oracle). The empirical
+finding there determines whether the next investment is:
+
+- **Gateway-oracle large upside** ⇒ adaptive upper-layer schedule per
+  §18.6 / §18.10 (cheap, theorem-backed).
+- **Gateway-oracle small upside** ⇒ recall bottleneck is level-0 tube
+  connectivity. Next lever is adaptive `M_0(u)` in high-κ regions, *not*
+  globally raising `M_0`.
+
+The Gateway-Budget Theorem (§18.8) makes both directions defensible: the
+recommendation falls out of the diagnostic, not aesthetic preference.
