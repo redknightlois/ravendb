@@ -2965,6 +2965,70 @@ public class HnswDescentCoverDiagnostic(ITestOutputHelper output) : StorageTest(
         Output.WriteLine("                only@max = beam-bound queries pushed over by max ef;");
         Output.WriteLine("                min<max = bucket B (beam-capacity rescued before max);");
         Output.WriteLine("                bucket A ≈ 0 per §19.1 gateway oracle null on Sphere.");
+
+        // FRAMEWORK §19.13 adaptive efSearch(q) prototype.
+        // Per query: start at ef_initial. Run search. If d_top_2 / d_top_1 ≥ τ
+        // (loose tube ⇒ low confidence ⇒ likely bucket B), escalate ef and re-run.
+        // Cap at ef_max. Compare adaptive recall + mean wall to fixed ef in the
+        // sweep above. Confidence proxy is heuristic; the real κ_R(q) is unknown
+        // at search time.
+        if (Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF") == "1")
+        {
+            int[] efLadder = [32, 128, 512];
+            float tau = 1.30f;
+            if (float.TryParse(Environment.GetEnvironmentVariable("RAVEN_HNSW_ADAPTIVE_EF_TAU"), out var tauEnv) && tauEnv > 0)
+                tau = tauEnv;
+            Output.WriteLine("");
+            Output.WriteLine($"§19.13 Adaptive efSearch(q) prototype (ladder=[{string.Join(",", efLadder)}], τ={tau:F2}):");
+            Output.WriteLine($"{"engine",14}  {"r@1",8}  {"r@10",8}  {"r@50",8}  {"mean ef",8}  {"total ms",10}");
+            foreach (var (label, treeLabel) in recallVariants)
+            {
+                using var sx = Slice.From(Allocator, $"{nameof(Sphere_DescentCover_Apollonius_vs_Legacy_DiagnosticReport)}_{treeLabel}", out var name);
+                long[] hits = new long[kSweep.Length];
+                long[] counts = new long[kSweep.Length];
+                long efSum = 0;
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                for (int q = 0; q < numberOfQueries; q++)
+                {
+                    var qmem = new System.ReadOnlyMemory<byte>(queryBuffer, q * vectorSizeInBytes, vectorSizeInBytes);
+                    int chosenEf = efLadder[efLadder.Length - 1];
+                    long[] finalIds = null;
+                    for (int li = 0; li < efLadder.Length; li++)
+                    {
+                        int ef = efLadder[li];
+                        using var ret = Hnsw.ApproximateNearest(rTx.LowLevelTransaction, name, ef, System.Runtime.InteropServices.MemoryMarshal.AsMemory(qmem), 0f);
+                        var ids = new long[kMax];
+                        var dists = new float[kMax];
+                        int got = ret.Fill(ids, dists, null);
+                        finalIds = ids;
+                        chosenEf = ef;
+                        if (li == efLadder.Length - 1) break;
+                        if (got < 2 || dists[0] <= 0f) break;
+                        float ratio = dists[1] / dists[0];
+                        if (ratio < tau) break;
+                    }
+                    efSum += chosenEf;
+                    var t = truth[q];
+                    for (int ki = 0; ki < kSweep.Length; ki++)
+                    {
+                        int k = kSweep[ki];
+                        var tSet = new System.Collections.Generic.HashSet<long>();
+                        for (int j = 0; j < System.Math.Min(k, t.Length); j++) tSet.Add(t[j]);
+                        int matches = 0;
+                        for (int j = 0; j < System.Math.Min(k, finalIds.Length); j++)
+                            if (tSet.Contains(finalIds[j])) matches++;
+                        hits[ki] += matches;
+                        counts[ki] += System.Math.Min(k, t.Length);
+                    }
+                }
+                sw.Stop();
+                double r1 = counts[0] > 0 ? (double)hits[0] / counts[0] : 0;
+                double r10 = counts[1] > 0 ? (double)hits[1] / counts[1] : 0;
+                double r50 = counts[2] > 0 ? (double)hits[2] / counts[2] : 0;
+                double meanEf = (double)efSum / numberOfQueries;
+                Output.WriteLine($"{label,14}  {r1,8:P2}  {r10,8:P2}  {r50,8:P2}  {meanEf,8:F1}  {sw.ElapsedMilliseconds,10}");
+            }
+        }
     }
 
     [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Voron)]
