@@ -836,7 +836,25 @@ namespace FastTests
                 await base.DisposeAsync();
             }
 
-            exceptionAggregator.ThrowIfNeeded();
+            ThrowIfTeardownFailed(exceptionAggregator);
+        }
+
+        private static void ThrowIfTeardownFailed(ExceptionAggregator exceptionAggregator)
+        {
+            var testState = TestContext.Current?.TestState;
+            var bodyFailure = testState?.GetException();
+            var failure = BuildTeardownFailure(exceptionAggregator, bodyFailure, testState == null ? (bool?)null : bodyFailure != null);
+            if (failure != null)
+                throw failure;
+        }
+
+        internal static TestTeardownException BuildTeardownFailure(ExceptionAggregator exceptionAggregator, Exception bodyFailure, bool? bodyFailed)
+        {
+            var teardownErrors = exceptionAggregator.GetAggregateException();
+            if (teardownErrors == null)
+                return null;
+
+            return new TestTeardownException(teardownErrors, bodyFailure, bodyFailed);
         }
 
         private static void DownloadAndSaveDebugPackage(bool shouldSaveDebugPackage, RavenServer server, ExceptionAggregator exceptionAggregator)
@@ -885,7 +903,7 @@ namespace FastTests
             }
         }
 
-        private static async Task ThrowCouldNotDisposeServerExceptionAsync(string url, string debugTag, TimeSpan timeout)
+        internal static async Task ThrowCouldNotDisposeServerExceptionAsync(string url, string debugTag, TimeSpan timeout)
         {
             using (var process = Process.GetCurrentProcess())
             using (var ms = new MemoryStream())
