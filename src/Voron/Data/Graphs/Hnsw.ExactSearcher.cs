@@ -2,8 +2,10 @@
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using Sparrow;
+using Sparrow.Server.Collections;
 using Voron.Global;
 using Voron.Util;
+using Voron.Util.PFor;
 
 namespace Voron.Data.Graphs;
 
@@ -15,20 +17,27 @@ public partial class Hnsw
         {
             private readonly SearchState _searchState;
             private readonly Memory<byte> _vector;
-            private readonly bool _hasFilterMatch;
+            // Only the filter's nodes are candidates.
+            private readonly GrowableBitArray? _filter;
+            private ContextBoundNativeList<long> _filterScratch;
+            private FastPForDecoder _filterDecoder;
             private ContextBoundNativeList<int> _candidates;
             private readonly ContextBoundNativeList<long>? _nodesToScan;
             private PriorityQueue<long, float> _pq;
             private long _vectorReadCounter = 0;
             private bool _initialized;
             
-            public ExactSearcher(SearchState searchState, Memory<byte> vector, bool hasFilterMatch, int numberOfCandidates, ContextBoundNativeList<long>? nodesToScan)
+            public ExactSearcher(SearchState searchState, Memory<byte> vector, int numberOfCandidates, GrowableBitArray? filter, ContextBoundNativeList<long>? nodesToScan)
             {
                 _searchState = searchState;
                 _vector = vector;
-                _hasFilterMatch = hasFilterMatch;
-                PortableExceptions.ThrowIf<NotSupportedException>(_searchState.Options.CountOfVectors >= int.MaxValue && hasFilterMatch, $"Cannot have more than {int.MaxValue} vectors and filter match");
-                
+                if (filter is { } f)
+                {
+                    _filter = f;
+                    _filterScratch = new ContextBoundNativeList<long>(searchState.Llt.Allocator);
+                    _filterDecoder = new(searchState.Llt.Allocator);
+                }
+
                 NumberOfCandidates = numberOfCandidates;
                 _nodesToScan = nodesToScan;
 
@@ -38,6 +47,11 @@ public partial class Hnsw
 
             public void Dispose()
             {
+                if (_filter is not null)
+                {
+                    _filterScratch.Dispose();
+                    _filterDecoder.Dispose();
+                }
                 _searchState._candidatesQ.Clear();
                 _searchState._nearestEdgesQ.Clear();
                 _candidates.Dispose();
@@ -94,11 +108,15 @@ public partial class Hnsw
             {
                 CandidatesProcessed++;
                 var nodeIndex = _searchState.GetNodeIndexById(nodeId);
-                if ((_searchState.GetNodeByIndex(nodeIndex).PostingListId & Constants.Graphs.VectorId.EnsureIsSingleMask) == Constants.Graphs.VectorId.Tombstone)
+                var postingListId = _searchState.GetNodeByIndex(nodeIndex).PostingListId;
+                if ((postingListId & Constants.Graphs.VectorId.EnsureIsSingleMask) == Constants.Graphs.VectorId.Tombstone)
+                    return;
+                if (_filter is { } filter && _searchState.HasEntryInFilter(postingListId, filter, ref _filterScratch, ref _filterDecoder) == false)
                     return;
 
                 var distance = _searchState.QueryDistance(_vector.Span, nodeIndex, ref _vectorReadCounter);
-                if (_pq.Count < NumberOfCandidates || _hasFilterMatch)
+                // The queue keeps the nearest candidates with the farthest on top.
+                if (_pq.Count < NumberOfCandidates)
                     _pq.Enqueue(nodeId, -distance);
                 else
                     _pq.EnqueueDequeue(nodeId, -distance);
