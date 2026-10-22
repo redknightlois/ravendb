@@ -473,7 +473,7 @@ public class HnswPrescreenSearch(ITestOutputHelper output) : StorageTest(output)
         using var tx = Env.ReadTransaction();
         using var fresh = new Hnsw.SearchState(tx.LowLevelTransaction, TreeName);
         using var partial = new Hnsw.SearchState(tx.LowLevelTransaction, TreeName);
-        var edges = fresh.GetNodeById(150).EdgesPerLevel[0].ToSpan().ToArray();
+        var edges = fresh.GetNodeById(150).Edges(0).ToArray();
         Assert.True(edges.Length > 4);
 
         for (var i = 1; i < edges.Length; i += 2)

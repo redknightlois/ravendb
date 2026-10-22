@@ -169,7 +169,7 @@ public partial class Hnsw
                     continue;
 
                 var olderId = EntryPointId;
-                foreach (var id in node.EdgesPerLevel[0].ToSpan())
+                foreach (var id in node.Edges(0))
                 {
                     if (id >= node.NodeId)
                         continue;
@@ -178,7 +178,7 @@ public partial class Hnsw
                 }
 
                 var nodeId = node.NodeId;
-                _searchState.GetNodeById(olderId).EdgesPerLevel[0].Add(_searchState.Llt.Allocator, nodeId);
+                _searchState.GetNodeById(olderId).UpdateEdges(0).Add(_searchState.Llt.Allocator, nodeId);
                 _searchState.GetNodeByIndex(nodeIndex).CountOlderInLink(olderId, 1);
             }
         }
@@ -297,7 +297,7 @@ public partial class Hnsw
                 {
                     //  scoping n here, to avoid "leaking" the reference and async issues
                     ref var n = ref _searchState.GetNodeByIndex(currentNodeIndex);
-                    n.EdgesPerLevel.SetCapacity(_searchState.Llt.Allocator, nodeRandomLevel + 1);
+                    n.EnsureLevels(_searchState.Llt.Allocator, nodeRandomLevel + 1);
                     insertedVector = n.GetVectorUnmanagedSpan(_searchState);
                     AddEdgesFromInFlightNodes(ref n, createdNodeIndex);
                 }
@@ -405,7 +405,7 @@ public partial class Hnsw
 
                     PortableExceptions.ThrowIf<InvalidOperationException>(_candidates.Count == 0, "Cannot add a node to the graph without any edges");
                     ref var node = ref _searchState.GetNodeByIndex(currentNodeIndex);
-                    ref var list = ref node.EdgesPerLevel[level];
+                    ref var list = ref node.UpdateEdges(level);
                     // important - we cannot reset here, since we have added edges from the in flight nodes in AddEdgesFromInFlightNodes()
                     list.EnsureCapacityFor(_searchState.Llt.Allocator, _candidates.Count);
                     _requiresEdgeFiltering.Clear();
@@ -421,9 +421,9 @@ public partial class Hnsw
                                 edge.CountOlderInLink(node.NodeId, 1);
                         }
 
-                        ref var edgeList = ref edge.EdgesPerLevel[level];
-                        if (edgeList.ToSpan().Contains(node.NodeId))
+                        if (edge.Edges(level).Contains(node.NodeId))
                             continue;
+                        ref var edgeList = ref edge.UpdateEdges(level);
                         edgeList.Add(_searchState.Llt.Allocator, node.NodeId);
                         if (level == 0)
                             node.CountOlderInLink(edge.NodeId, 1);
@@ -475,7 +475,7 @@ public partial class Hnsw
             {
                 parent._forTestingPurposes?.BeforeEdgesReplaced?.Invoke(_searchState, nodeIndex, level);
                 _liveIndexes.Clear();
-                foreach (var id in _searchState.GetNodeByIndex(nodeIndex).EdgesPerLevel[level].ToSpan())
+                foreach (var id in _searchState.GetNodeByIndex(nodeIndex).Edges(level))
                     _liveIndexes.Add(_searchState.GetNodeIndexById(id));
 
                 var selected = _candidates.Count;
@@ -490,7 +490,7 @@ public partial class Hnsw
                     KeepLastOlderInLinks(nodeIndex);
 
                 ref Node node = ref _searchState.GetNodeByIndex(nodeIndex);
-                ref var list = ref node.EdgesPerLevel[level];
+                ref var list = ref node.UpdateEdges(level);
                 list.ResetAndEnsureCapacity(_searchState.Llt.Allocator, _candidates.Count);
                 foreach (var idx in _candidates)
                 {
@@ -547,10 +547,10 @@ public partial class Hnsw
                 for (int i = 0; i < used; i++)
                 {
                     ref var edge = ref _searchState.GetNodeByIndex(_indexes[i]);
-                    int sharedLevels = Math.Min(edge.EdgesPerLevel.Count, n.EdgesPerLevel.Count);
+                    int sharedLevels = Math.Min(edge.CountOfLevels, n.CountOfLevels);
                     for (int level = 0; level < sharedLevels; level++)
                     {
-                        n.EdgesPerLevel[level].Add(_searchState.Llt.Allocator, edge.NodeId);
+                        n.UpdateEdges(level).Add(_searchState.Llt.Allocator, edge.NodeId);
                     }
                     if (sharedLevels > 0)
                         edge.CountOlderInLink(n.NodeId, 1);
@@ -661,7 +661,7 @@ public partial class Hnsw
                     for (int i = 0; i < indexes.Count; i++)
                     {
                         var nextIndex = indexes[i];
-                        Debug.Assert(searchState.Nodes[nextIndex].EdgesPerLevel.Count > Level); 
+                        Debug.Assert(searchState.Nodes[nextIndex].CountOfLevels > Level); 
                    
                         float nextDist = -searchState.Distance(_vector, vectors[i]);
                         if (nearestEdgesQ.Count < numberOfCandidates)
@@ -764,12 +764,12 @@ public partial class Hnsw
                 // The slow path runs RegisterForPreloading first, which sizes both lists.
                 // The all-in-memory fast path skips that step, so we must guarantee the slot
                 // exists before we ref into it. SetCapacity is a no-op when already sized.
-                n.EdgesPerLevel.SetCapacity(_searchState.Llt.Allocator, level + 1);
+                n.EnsureLevels(_searchState.Llt.Allocator, level + 1);
                 n.EdgesIndexesPerLevel.SetCapacity(_searchState.Llt.Allocator, level + 1);
 
-                ref var edgesList = ref n.EdgesPerLevel[level];
+                var edgesList = n.Edges(level);
                 ref var edgesIndexes = ref n.EdgesIndexesPerLevel[level];
-                if (edgesIndexes.Count != edgesList.Count)
+                if (edgesIndexes.Count != edgesList.Length)
                 {
                     // Mirror is stale: rebuild edgesIndexes AND, in the same pass, force-load any
                     // edge whose vector is still lazy. This is the only path that introduces
@@ -780,7 +780,7 @@ public partial class Hnsw
                     // sweep entirely on the mirror-in-sync path. Profile (2026-05-09 split) had
                     // that sweep at 6.4 s / 15 s of LLT exclusive (43 %) while only ~2 % of calls
                     // actually triggered the rebuild.
-                    edgesIndexes.ResetAndEnsureCapacity(_searchState.Llt.Allocator, edgesList.Count);
+                    edgesIndexes.ResetAndEnsureCapacity(_searchState.Llt.Allocator, edgesList.Length);
                     foreach (var nodeId in edgesList)
                     {
                         int idx = _searchState.GetNodeIndexById(nodeId);
@@ -1104,17 +1104,17 @@ public partial class Hnsw
                 if (n.VectorLoaded is false)
                     batch.Add(n.NodeId);
                 
-                n.EdgesPerLevel.SetCapacity(searchState.Llt.Allocator, Level + 1);
+                n.EnsureLevels(searchState.Llt.Allocator, Level + 1);
                 n.EdgesIndexesPerLevel.SetCapacity(searchState.Llt.Allocator, Level + 1);
 
-                ref var edgesList = ref n.EdgesPerLevel[Level];
+                var edgesList = n.Edges(Level);
                 ref var edgesIndexes = ref n.EdgesIndexesPerLevel[Level];
                 // turns out that the checks for the node id -> index are really expensive
                 // so we try to cache them
-                if (edgesIndexes.Count != edgesList.Count)
+                if (edgesIndexes.Count != edgesList.Length)
                 {
-                    edgesIndexes.ResetAndEnsureCapacity(searchState.Llt.Allocator, edgesList.Count);
-                    for (int i = 0; i < edgesList.Count; i++)
+                    edgesIndexes.ResetAndEnsureCapacity(searchState.Llt.Allocator, edgesList.Length);
+                    for (int i = 0; i < edgesList.Length; i++)
                     {
                         var nodeId = edgesList[i];
                         if (searchState.TryGetNodeById(nodeId, out var nodeIndex))
