@@ -152,7 +152,7 @@ public class LuceneIndexState
 }
 
 /// <summary>
-/// Holds a Corax index's per-field HNSW vector node caches, keyed by field name. <see cref="Empty"/>
+/// Holds a Corax index's per-field HNSW caches, keyed by field name. <see cref="Empty"/>
 /// carries no caches and is used for Lucene indexes and Corax indexes without vector fields.
 /// </summary>
 public sealed class CoraxVectorState

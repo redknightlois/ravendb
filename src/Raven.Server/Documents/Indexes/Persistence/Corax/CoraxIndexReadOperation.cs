@@ -114,9 +114,8 @@ namespace Raven.Server.Documents.Indexes.Persistence.Corax
                                                   && IndexDefinitionBaseServerSide.IndexVersion.IsPerEntryMultipleTermsMarkerSupported(index.Definition.Version) == false,
             };
 
-            // Attach the per-field HNSW node caches from this transaction's client state and the current
-            // fields-with-multiple-terms snapshot to the searcher. The searcher uses the node caches for vector
-            // lookups instead of reading through Voron, and the fields snapshot to drive plan selection.
+            // Attach the per-field HNSW caches from this transaction's client state and the current
+            // fields-with-multiple-terms snapshot to the searcher, which uses the fields snapshot to drive plan selection.
             var vectorCaches = readTransaction.LowLevelTransaction.TryGetClientState(out IndexStateRecord stateRecord)
                                && stateRecord.CoraxVectorState is { Caches: { Count: > 0 } caches }
                 ? caches
