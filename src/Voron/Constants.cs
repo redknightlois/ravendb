@@ -115,6 +115,7 @@ namespace Voron.Global
                 // Every node record stores its count of older base-layer in-links as a plain field after the count of levels.
                 // Every float32 graph carries a 4-bit prescreen code for each of its nodes, in blocks addressed by node id that its CodePages lookup locates,
                 // and the parameters of those codes.
+                // The container location of every node record lives in blocks addressed by node id, which its LocationPages lookup locates.
                 // A graph at another version is never read: the index that holds it must be reset.
                 public const ushort CurrentVersion = 7_002;
             }

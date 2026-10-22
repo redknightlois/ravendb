@@ -401,9 +401,9 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
     private static Dictionary<long, (long Location, byte[] Bytes)> Records(Transaction tx)
     {
         var llt = tx.LowLevelTransaction;
-        var locations = tx.ReadTree(TreeName).LookupFor<Int64LookupKey>(Hnsw.NodeIdToLocationSlice);
+        var locations = Hnsw.RecordLocations(tx.ReadTree(TreeName).LookupFor<Int64LookupKey>(Hnsw.LocationPagesSlice), null);
         var records = new Dictionary<long, (long, byte[])>();
-        for (var id = 1L; locations.TryGetValue(id, out var location); id++)
+        for (var id = 1L; locations.ReadInt64(llt, id) is var location and not 0; id++)
             records[id] = (location, Container.GetReadOnly(llt, new ContainerEntryId(location)).ToArray());
         return records;
     }

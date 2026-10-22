@@ -4,7 +4,7 @@ using System.Threading;
 namespace Voron.Data.Graphs;
 
 /// <summary>
-/// What every transaction on one graph shares: the decoded code parameters and the page of each committed block of code rows.
+/// What every transaction on one graph shares: the decoded code parameters and the page of each committed block of code rows and of record locations.
 /// One instance serves one graph for the lifetime of its index. Every entry is set once and never changes, so no commit updates it.
 /// </summary>
 public sealed class HnswIndexCache
@@ -18,8 +18,8 @@ public sealed class HnswIndexCache
     internal Hnsw.CodeParameters PublishCodeParameters(Hnsw.CodeParameters parameters) =>
         Interlocked.CompareExchange(ref _codeParameters, parameters, null) ?? parameters;
 
-    // The first page of each block of code rows, 0 until a reader publishes it.
-    internal readonly BlockPages CodeBlocks = new();
+    // The first page of each block of code rows and of record locations, 0 until a reader publishes it.
+    internal readonly BlockPages CodeBlocks = new(), LocationBlocks = new();
 
     /// <summary>A committed block keeps its pages, so a set entry never changes.</summary>
     internal sealed class BlockPages

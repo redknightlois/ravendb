@@ -5,6 +5,12 @@ namespace Voron.Data.Graphs;
 
 public partial class Hnsw
 {
+    // A block of record locations is one page.
+    private const int LocationsPerBlock = (Global.Constants.Storage.PageSize - PageHeader.SizeOf) / sizeof(long);
+
+    /// <summary>The container location of the record of each node, 0 for a node without one, in the blocks that <paramref name="pages"/> locates.</summary>
+    internal static NodeRows RecordLocations(Lookup<Int64LookupKey> pages, HnswIndexCache memo) => new(pages, sizeof(long), LocationsPerBlock, memo?.LocationBlocks);
+
     /// <summary>
     /// Rows of one size addressed by node id: node n holds row n % R of block n / R, one overflow allocation that the lookup of the blocks maps n / R to.
     /// A row that was never written reads as zeros. A committed block keeps its page in every later snapshot.
@@ -42,6 +48,13 @@ public partial class Hnsw
             }
 
             return llt.GetPage(pageNumber).DataPointer + nodeId % _rowsPerBlock * _rowBytes;
+        }
+
+        /// <summary>The value of an eight byte row, 0 when the snapshot holds no block for it.</summary>
+        public long ReadInt64(LowLevelTransaction llt, long nodeId)
+        {
+            var row = Read(llt, nodeId);
+            return row == null ? 0 : *(long*)row;
         }
 
         /// <summary>The row of the node in a page that the write transaction modifies.</summary>

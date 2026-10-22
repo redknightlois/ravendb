@@ -80,8 +80,9 @@ public class HnswPrescreenCodes(ITestOutputHelper output) : StorageTest(output)
             AssertReEncodes(state, id, parameters);
     }
 
-    // A reader publishes the page of each block that it reads. A commit that appends to a published block keeps its page, and the page of a block
-    // that a rolled back transaction allocated never reaches the cache.
+    // A reader publishes the page of each block of code rows and of record locations that it reads. A commit that appends to a published block keeps
+    // its page, and the page of a block that a rolled back transaction allocated never reaches the cache. The nodes past the first block of locations
+    // are created by the rolled back transaction and again by a later commit.
     [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
     public void TheCacheMapsEachBlockToItsCommittedPage()
     {
@@ -93,7 +94,7 @@ public class HnswPrescreenCodes(ITestOutputHelper output) : StorageTest(output)
         {
             using (var registration = Hnsw.RegistrationFor(rolledBack.LowLevelTransaction, TreeName, new Random(3)))
             {
-                var vectors = Around(0, 600, 3);
+                var vectors = Around(0, 800, 3);
                 for (var i = 0; i < vectors.Length; i++)
                     registration.Register(301 + i, MemoryMarshal.AsBytes(vectors[i].AsSpan()));
                 registration.Commit(CancellationToken.None);
@@ -102,6 +103,7 @@ public class HnswPrescreenCodes(ITestOutputHelper output) : StorageTest(output)
             using var name = Slice.From(rolledBack.Allocator, TreeName, out var slice);
             using var state = new Hnsw.SearchState(rolledBack.LowLevelTransaction, slice, cache);
             Assert.False(state.ReadCode(state.Options.CountOfVectors).IsEmpty);
+            Assert.True(state.TryGetLocationForNode(state.Options.CountOfVectors, out var location) && location != 0);
         }
 
         // Shifts the pages of the next commit away from those of the rolled back one.
@@ -111,7 +113,7 @@ public class HnswPrescreenCodes(ITestOutputHelper output) : StorageTest(output)
             tx.Commit();
         }
 
-        Register(TreeName, Around(0, 600, 2), 301, new Random(2), new Random(2));
+        Register(TreeName, Around(0, 800, 2), 301, new Random(2), new Random(2));
         AssertEveryCodeReEncodes(cache);
     }
 
@@ -124,7 +126,7 @@ public class HnswPrescreenCodes(ITestOutputHelper output) : StorageTest(output)
         using var tx = Env.ReadTransaction();
         var report = Env.GenerateDetailedReport(tx);
         Assert.Contains(report.Trees, t => t.Name == TreeName);
-        Assert.Contains(report.Trees, t => t.Name == $"{TreeName}/NodeIdToLocation (Lookup)");
+        Assert.Contains(report.Trees, t => t.Name == $"{TreeName}/LocationPages (Lookup)");
         Assert.Contains(report.Trees, t => t.Name == $"{TreeName}/CodePages (Lookup)");
     }
 
@@ -139,7 +141,7 @@ public class HnswPrescreenCodes(ITestOutputHelper output) : StorageTest(output)
         var owners = Env.GetPageOwners(tx).Values.ToHashSet();
         foreach (var graph in new[] { TreeName, "int8" })
         {
-            Assert.Contains($"{graph}/NodeIdToLocation", owners);
+            Assert.Contains($"{graph}/LocationPages", owners);
             Assert.Contains($"{graph}/NodesByVectorId", owners);
         }
         Assert.Contains($"{TreeName}/CodePages", owners);
