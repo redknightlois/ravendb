@@ -29,21 +29,23 @@ public partial class Hnsw
 
     /// <summary>
     /// Rows of one size addressed by node id: node n holds row n % R of block n / R, one overflow allocation that the lookup of the blocks maps n / R to.
-    /// A row that was never written reads as zeros.
+    /// A row that was never written reads as zeros. A committed block keeps its page in every later snapshot.
     /// </summary>
     internal readonly unsafe struct NodeRows
     {
         private readonly Lookup<Int64LookupKey> _blocks;
         private readonly int _rowBytes;
         private readonly int _rowsPerBlock;
+        private readonly HnswIndexCache.BlockPages _memo;
         // 2^64 / R rounded up; zero for one row per block, whose reciprocal does not fit.
         private readonly ulong _reciprocal;
 
-        public NodeRows(Lookup<Int64LookupKey> blocks, int rowBytes, int rowsPerBlock)
+        public NodeRows(Lookup<Int64LookupKey> blocks, int rowBytes, int rowsPerBlock, HnswIndexCache.BlockPages memo)
         {
             _blocks = blocks;
             _rowBytes = rowBytes;
             _rowsPerBlock = rowsPerBlock;
+            _memo = memo;
             _reciprocal = rowsPerBlock > 1 ? ulong.MaxValue / (ulong)rowsPerBlock + 1 : 0;
         }
 
@@ -53,13 +55,23 @@ public partial class Hnsw
         private long Block(long nodeId) =>
             _reciprocal != 0 && (ulong)nodeId <= uint.MaxValue ? (long)Math.BigMul(_reciprocal, (ulong)nodeId, out _) : nodeId / _rowsPerBlock;
 
-        /// <summary>The row of the node, valid for the lifetime of the transaction; null when the snapshot holds no block for it.</summary>
+        /// <summary>
+        /// The row of the node, valid for the lifetime of the transaction; null when no block for it is found. Callers pass only ids of nodes in the
+        /// snapshot: the cache can hold the page of a block that a later snapshot committed.
+        /// </summary>
         public byte* Read(LowLevelTransaction llt, long nodeId)
         {
             // PERF: The row of a node is found by arithmetic on its id and one page read, with no search by node id.
             long block = Block(nodeId);
-            if (_blocks.TryGetValue(block, out long pageNumber) == false)
-                return null;
+            long pageNumber = _memo?.Get(block) ?? 0;
+            if (pageNumber == 0)
+            {
+                if (_blocks.TryGetValue(block, out pageNumber) == false)
+                    return null;
+                // A write transaction may hold a block that its rollback discards.
+                if (llt.Flags is TransactionFlags.Read)
+                    _memo?.Publish(block, pageNumber);
+            }
 
             return llt.GetPage(pageNumber).DataPointer + (nodeId - block * _rowsPerBlock) * _rowBytes;
         }
