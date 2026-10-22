@@ -88,6 +88,47 @@ public class VectorSearchRetrieverTests(ITestOutputHelper output) : StorageTest(
         Assert.True(FirstFillAllocations() < entries.Length * sizeof(long) / 8);
     }
 
+    // A graph tree that does not exist has no stored options, so the query is not checked against a vector size, whatever its length.
+    [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
+    public void SearchOfAGraphThatDoesNotExistReturnsNoEntries()
+    {
+        using var tx = Env.ReadTransaction();
+        using var state = new Hnsw.SearchState(tx.LowLevelTransaction, "missing");
+        Assert.True(state.IsEmpty);
+        var filter = new GrowableBitArray(Allocator, 16);
+        filter.Add(1);
+        filter.Count = 1;
+
+        foreach (var length in new[] { 0, 3, 32 })
+        {
+            var query = new byte[length];
+            foreach (var hasFilter in new[] { false, true })
+            {
+                using var approximate = Hnsw.ApproximateNearest(state, 16, query, 0f, hasFilter);
+                Assert.Equal(0, approximate.Fill(new long[8], new float[8], hasFilter ? filter : null));
+                using var exact = Hnsw.ExactNearest(state, 16, query, 0f, hasFilter);
+                Assert.Equal(0, exact.Fill(new long[8], new float[8], hasFilter ? filter : null));
+            }
+        }
+    }
+
+    // A graph that was created holds its options, so it keeps the size check of its vectors.
+    [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
+    public void SearchOfAnEmptyGraphThatWasCreatedChecksTheQuerySize()
+    {
+        using (var tx = Env.WriteTransaction())
+        {
+            Hnsw.Create(tx.LowLevelTransaction, TreeName, 4 * sizeof(float), 12, 16, VectorEmbeddingType.Single);
+            tx.Commit();
+        }
+
+        using var read = Env.ReadTransaction();
+        using var state = new Hnsw.SearchState(read.LowLevelTransaction, TreeName);
+        Assert.False(state.IsEmpty);
+        Assert.Throws<ArgumentException>(() => Hnsw.ApproximateNearest(state, 16, new byte[3], 0f));
+        Assert.Throws<ArgumentException>(() => Hnsw.ExactNearest(state, 16, new byte[3], 0f, hasFilterMatch: false));
+    }
+
     // The traversal holds only what it reaches and the queue grows with the matches, so the candidates requested, however large, do not decide the memory.
     [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
     public void FilteredSearchAllocatesInProportionToItsMatchesNotToTheRequestedCandidates()

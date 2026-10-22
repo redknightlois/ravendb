@@ -1505,6 +1505,9 @@ public unsafe partial class Hnsw
     /// </summary>
     public static VectorSearchRetriever ApproximateNearest(SearchState searchState, int numberOfCandidates, Memory<byte> vector, float minimumSimilarity, bool hasFilterMatch = false)
     {
+        if (searchState.IsEmpty)
+            return EmptyRetriever(searchState, vector, minimumSimilarity);
+
         TryNormalizeQueryVector(searchState.Options, searchState.Llt.Allocator, ref vector, out var queryVectorScope);
         // Bind the per-node QueryDistance cache to this query vector before SearchNearestAcrossLevels
         // reads it. Without this, a shared SearchState reuses cached distances from a prior sub-query
@@ -1531,11 +1534,18 @@ public unsafe partial class Hnsw
     /// </summary>
     public static VectorSearchRetriever ExactNearest(SearchState searchState, int numberOfCandidates, Memory<byte> vector, float minimumSimilarity, bool hasFilterMatch, ContextBoundNativeList<long>? nodesToScan = null)
     {
+        if (searchState.IsEmpty)
+            return EmptyRetriever(searchState, vector, minimumSimilarity);
+
         TryNormalizeQueryVector(searchState.Options, searchState.Llt.Allocator, ref vector, out var queryVectorScope);
         searchState.OnQueryVector(vector);
         var results = searchState.ExactSearch(vector, hasFilterMatch, numberOfCandidates, nodesToScan);
         return new VectorSearchRetriever(searchState, results, vector, minimumSimilarity, ownsSearchState: false, queryVectorScope);
     }
+
+    // A graph with no stored options has no vector size to check the query against.
+    private static VectorSearchRetriever EmptyRetriever(SearchState searchState, Memory<byte> vector, float minimumSimilarity)
+        => new(searchState, searchState.EmptySearch(), vector, minimumSimilarity, ownsSearchState: false);
 
     public static VectorSearchRetriever EmptySearch(LowLevelTransaction llt, Slice name, int numberOfCandidates, Memory<byte> vector, float minimumSimilarity)
     {
