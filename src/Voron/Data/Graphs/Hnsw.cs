@@ -1011,6 +1011,9 @@ public unsafe partial class Hnsw
         {
             internal bool SimulateConcurrentRealloc;
 
+            // LLT thread: level and top level of the inserted node, and the number of nodes its insertion beam starts from at that level.
+            internal Action<int, int, int> OnBeamStarted;
+
             // LLT thread, around the rewrite of an overfull list from its dispatch snapshot: state, node index and level.
             internal Action<SearchState, int, int> BeforeEdgesReplaced;
             internal Action<SearchState, int, int> AfterEdgesReplaced;
