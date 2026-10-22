@@ -156,10 +156,11 @@ public struct VectorSearchMatch : IPostFilterMatch
             }
             var searchState = _indexSearcher.GetOrCreateVectorSearchState(fieldName);
 
+            RoaringBitmap? filter = _filterQuery != null ? _filterResults : null;
             _vectorSearchRetriever = _isExact switch
             {
-                _ when _scanningQuery => Hnsw.ExactNearest(searchState, _numberOfCandidates, vector, _minimumMatch, hasFilterMatch: false, nodesIdsToScan),
-                true => Hnsw.ExactNearest(searchState, _numberOfCandidates, vector, _minimumMatch, _filterQuery != null),
+                _ when _scanningQuery => Hnsw.ExactNearest(searchState, _numberOfCandidates, vector, _minimumMatch, nodesToScan: nodesIdsToScan),
+                true => Hnsw.ExactNearest(searchState, _numberOfCandidates, vector, _minimumMatch, filter),
                 false when _filterQuery != null => Hnsw.ApproximateFilteredNearest(searchState, _numberOfCandidates, vector, _minimumMatch, new IndexSearcher.VectorSearchUtils.RandomNodesFromFilterEnumerator(_indexSearcher, _metadata, _filterResults, _random)),
                     _ => Hnsw.ApproximateNearest(searchState, _numberOfCandidates, vector, _minimumMatch, _filterQuery != null),
             };

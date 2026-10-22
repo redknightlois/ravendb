@@ -50,14 +50,15 @@ public class HnswSearch(ITestOutputHelper output) : StorageTest(output)
         using (var rTx = Env.ReadTransaction())
         {
             var qV = MemoryMarshal.Cast<float, byte>(queryVector);
+            var filterBitmap = new RoaringBitmap(Allocator);
+            for (int i = 1; i <= totalEntries; i++)
+                filterBitmap.Add(i);
+            filterBitmap.PrepareForReading();
+
             var nearest = Hnsw.ExactNearest(rTx.LowLevelTransaction, treeName,
-                numberOfCandidates: totalEntries, qV.ToArray(), minimumSimilarity: 0f, hasFilterMatch: true);
+                numberOfCandidates: totalEntries, qV.ToArray(), minimumSimilarity: 0f, filterBitmap);
             try
             {
-                var filterBitmap = new RoaringBitmap(Allocator);
-                for (int i = 1; i <= totalEntries; i++)
-                    filterBitmap.Add(i);
-
                 var matches = new long[128];
                 var distances = new float[128];
                 List<long> allResults = new();
@@ -108,14 +109,15 @@ public class HnswSearch(ITestOutputHelper output) : StorageTest(output)
         using (var rTx = Env.ReadTransaction())
         {
             var qV = MemoryMarshal.Cast<float, byte>(commonVector);
+            var filterBitmap = new RoaringBitmap(Allocator);
+            for (int i = 1; i <= entriesWithSameVector; i++)
+                filterBitmap.Add(i);
+            filterBitmap.PrepareForReading();
+
             var nearest = Hnsw.ExactNearest(rTx.LowLevelTransaction, treeName,
-                numberOfCandidates: 100, qV.ToArray(), minimumSimilarity: 0f, hasFilterMatch: true);
+                numberOfCandidates: 100, qV.ToArray(), minimumSimilarity: 0f, filterBitmap);
             try
             {
-                var filterBitmap = new RoaringBitmap(Allocator);
-                for (int i = 1; i <= entriesWithSameVector; i++)
-                    filterBitmap.Add(i);
-
                 var matches = new long[matchesBufferSize];
                 var distances = new float[matchesBufferSize];
                 List<long> allResults = new();
@@ -172,7 +174,7 @@ public class HnswSearch(ITestOutputHelper output) : StorageTest(output)
         using (var rTx = Env.ReadTransaction())
         {
             var qV = MemoryMarshal.Cast<float, byte>(storage[random.Next(1, storage.Count + 1)]);
-            using var nearest = Hnsw.ExactNearest(rTx.LowLevelTransaction, treeName, 1024, qV.ToArray(), 0f, false);
+            using var nearest = Hnsw.ExactNearest(rTx.LowLevelTransaction, treeName, 1024, qV.ToArray(), 0f);
 
             var totalReturned = 0;
             var matches = new long[64];
