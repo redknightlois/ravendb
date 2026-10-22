@@ -372,7 +372,7 @@ public sealed unsafe class HnswIndexCache : IDisposable
         if (tree is null || tree.TryGetLookupFor(Hnsw.NodeIdToLocationSlice, out Lookup<Int64LookupKey> locations) == false)
             return null;
 
-        var options = Unsafe.Read<Hnsw.Options>(tree.DirectRead(Hnsw.OptionsSlice));
+        var options = Hnsw.ReadOptions(tree);
         var simCalc = ResolveSimilarityKernel(options);
 
         long bytesPerNode = EstimateBytesPerNode(options.NumberOfEdges);
