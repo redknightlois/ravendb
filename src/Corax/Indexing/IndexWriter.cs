@@ -619,7 +619,7 @@ namespace Corax.Indexing
                     bool exists = fieldsByRootPage.TryGetValue(reader.FieldRootPage, out var field);
                     PortableExceptions.ThrowIfNot<InvalidOperationException>(exists, "Tried to remove vector but couldn't find the associated indexed field.");
                     var vectorIndexer = field!.GetVectorIndexer(_transaction.LowLevelTransaction);
-                    Debug.Assert(vectorIndexer != null && reader.StoredField is { Length: 32 });
+                    Debug.Assert(vectorIndexer != null && reader.StoredField is { Length: Voron.Data.Graphs.Hnsw.VectorReferenceSize });
                     vectorIndexer.Remove((long)entryToDelete, reader.StoredField.Value.ToSpan());
                 }
 

@@ -51,9 +51,6 @@ public partial class IndexSearcher
 
         public static bool TryConvertDocumentsIdsToNodesIds(IndexSearcher indexSearcher, in FieldMetadata metadata, GrowableBitArray filterResults, out ContextBoundNativeList<long> nodesIdsToScan)
         {
-            var searchState = new Hnsw.SearchState(indexSearcher.Transaction.LowLevelTransaction, metadata.FieldName);
-            var vectorsByHash = indexSearcher._transaction.CompactTreeFor(Hnsw.VectorsIdByHashSlice);
-            var nodesByVectorId = searchState.NodeIdsByVectorId;
             if (indexSearcher.TryGetRootPageByFieldName(metadata.FieldName, out var vectorRootPage) is false)
             {
                 nodesIdsToScan = default;
@@ -77,12 +74,8 @@ public partial class IndexSearcher
                 indexSearcher.GetEntryTermsReader(it.Current, ref p, out var entryTermsReader, existingKey);
                 while (entryTermsReader.FindNextStored(vectorRootPage))
                 {
-                    var vectorHash = entryTermsReader.StoredField.Value;
-                    if (vectorsByHash.TryGetValue(vectorHash, out var vectorId))
-                    {
-                        if (nodesByVectorId.TryGetValue(vectorId, out var nodeId))
-                            nodesIdsToScan.Add(nodeId);
-                    }
+                    if (entryTermsReader.StoredField is { Length: Hnsw.VectorReferenceSize } vectorReference)
+                        nodesIdsToScan.Add(Hnsw.NodeIdOf(vectorReference.ToSpan()));
                 }
             }
 
@@ -116,7 +109,6 @@ public partial class IndexSearcher
         if (idField.TryGetValue(loweredDocumentId, out var rawId) is false ||
             TryGetRootPageByFieldName(metadata.FieldName, out var vectorRootPage) is false)
             return EmptyMatch();
-        var vectorsByHash = _transaction.CompactTreeFor(Hnsw.VectorsIdByHashSlice);
         PortableExceptions.ThrowIf<InvalidOperationException>((rawId & (long)TermIdMask.EnsureIsSingleMask) != (long)TermIdMask.Single,
             "The provided id must be a document id mapped to a single value, but got: " + documentId + ", which maps to: " + rawId);
 
@@ -131,10 +123,11 @@ public partial class IndexSearcher
         {
             PortableExceptions.ThrowIf<InvalidOperationException>(reader.IsVectorHash is false, "Expected vector field, but got " + metadata.FieldName + ", which isn't a vector");
 
-            if (vectorsByHash.TryGetValue(reader.StoredField.Value.ToSpan(), out var vectorId) is false)
+            if (reader.StoredField is not { Length: Hnsw.VectorReferenceSize } vectorReference)
                 continue;
 
-            var vectorSpan = Hnsw.NodeReader.ReadVector(vectorId, searchState);
+            searchState.ReadNode(Hnsw.NodeIdOf(vectorReference.ToSpan()), out var node);
+            var vectorSpan = node.ReadVector(searchState);
             vectors.Add(new VectorValue(null, vectorSpan.AsMemory()));
         }
 
