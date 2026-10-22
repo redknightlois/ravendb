@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using Sparrow;
 using Sparrow.Compression;
@@ -16,6 +17,7 @@ public partial class Hnsw
         public long PostingListId;
         public long VectorId;
         public int CountOfLevels;
+        public int OlderInLinks;
 
         private int _offset;
         private readonly Span<byte> _buffer = buffer;
@@ -25,35 +27,44 @@ public partial class Hnsw
             node.VectorId = VectorId;
             node.PostingListId = PostingListId;
             node.EdgesPerLevel.EnsureCapacityFor(allocator, CountOfLevels);
-            while (NextReadEdges(out var list))
+            node.OlderInLinks = OlderInLinks;
+            for (var level = 0; level < CountOfLevels; level++)
             {
-                node.EdgesPerLevel.AddUnsafe(list);
+                node.EdgesPerLevel.AddUnsafe(ReadEdges());
             }
         }
 
-        private bool NextReadEdges(out NativeList<long> list)
+        /// <summary>Replaces the content of <paramref name="edges"/> with the edge ids of the next level, without allocating native memory.</summary>
+        public void ReadEdges(List<long> edges)
         {
-            if (_offset >= _buffer.Length)
-            {
-                list = default;
-                return false;
-            }
-
+            edges.Clear();
             var count = VariableSizeEncoding.Read<int>(_buffer, out int offset, _offset);
             _offset += offset;
-            list = new NativeList<long>();
+            long prev = 0;
+            for (int i = 0; i < count; i++)
+            {
+                prev += VariableSizeEncoding.Read<long>(_buffer, out offset, _offset);
+                _offset += offset;
+                edges.Add(prev);
+            }
+        }
+
+        private NativeList<long> ReadEdges()
+        {
+            var count = VariableSizeEncoding.Read<int>(_buffer, out int offset, _offset);
+            _offset += offset;
+            var list = new NativeList<long>();
             list.EnsureCapacityFor(allocator, count);
             long prev = 0;
             for (int i = 0; i < count; i++)
             {
-                var item = VariableSizeEncoding.Read<long>(_buffer, out offset, _offset);
+                prev += VariableSizeEncoding.Read<long>(_buffer, out offset, _offset);
                 _offset += offset;
-                prev += item;
                 Debug.Assert(prev >= 0, "prev >= 0");
                 list.AddUnsafe(prev);
             }
 
-            return true;
+            return list;
         }
 
         public UnmanagedSpan ReadVector(in SearchState state) => ReadVector(VectorId, in state);

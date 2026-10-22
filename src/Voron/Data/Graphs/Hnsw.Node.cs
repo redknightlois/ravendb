@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using Sparrow;
 using Sparrow.Compression;
@@ -19,8 +20,7 @@ public partial class Hnsw
         // Hot fields read by the search inner loop are colocated at the start of the struct so a
         // single cache line covers PostingListId (tombstone check), _vectorSpan (kernel input),
         // Visited (RW per candidate), and the QueryDistance memo. VectorId / NodeId follow to keep
-        // line 0 saturated; the resolve-only fields (EdgesPerLevel / EdgesIndexesPerLevel /
-        // Cached*) land on line 1.
+        // line 0 saturated; the resolve-only fields (EdgesPerLevel / EdgesIndexesPerLevel) land on line 1.
         public long PostingListId;
         internal UnmanagedSpan _vectorSpan;
         public int Visited;
@@ -36,36 +36,19 @@ public partial class Hnsw
         public NativeList<NativeList<long>> EdgesPerLevel;
         public NativeList<NativeList<int>> EdgesIndexesPerLevel;
 
-        // When non-null, this node's edge data lives in the HnswIndexCache buffer rather than in
-        // EdgesPerLevel. Set during search-side LoadNodeIndexes when the node hits the cache and
-        // the alternative copy was elided. Indexing-side code paths never set this pointer and
-        // continue to read/write EdgesPerLevel as before.
-        internal HnswIndexCache.CachedNodeHeader* CachedHeader;
-        internal int* CachedOffsets;
-        internal long* CachedEdges;
+        // Number of distinct nodes with a smaller id whose base-layer list holds this node.
+        internal int OlderInLinks;
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal int GetLevelCount() => CachedHeader != null ? CachedHeader->LevelCount : EdgesPerLevel.Count;
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal int EdgeCountAtLevel(int level)
+        internal void CountOlderInLink(long fromNodeId, int change)
         {
-            if (CachedHeader != null)
-                return CachedOffsets[level + 1] - CachedOffsets[level];
-            return EdgesPerLevel[level].Count;
+            if (fromNodeId >= NodeId)
+                return;
+            OlderInLinks += change;
+            Debug.Assert(OlderInLinks >= 0, "OlderInLinks >= 0");
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal ReadOnlySpan<long> EdgesAtLevel(int level)
-        {
-            if (CachedHeader != null)
-            {
-                int start = CachedOffsets[level];
-                int end = CachedOffsets[level + 1];
-                return new ReadOnlySpan<long>(CachedEdges + start, end - start);
-            }
-            return EdgesPerLevel[level].ToSpan();
-        }
+        // True when an edge from the node fromNodeId would be this node's only in-link from an older node.
+        internal bool NeedsOlderInLinkFrom(long fromNodeId) => fromNodeId < NodeId && OlderInLinks == 0;
 
         public bool VectorLoaded => _vectorSpan.Length > 0;
 
@@ -110,16 +93,18 @@ public partial class Hnsw
             offset += pos;
             var countOfLevels = VariableSizeEncoding.Read<int>(span, out pos, offset);
             offset += pos;
+            var olderInLinks = VariableSizeEncoding.Read<int>(span, out pos, offset);
+            offset += pos;
 
-            return new NodeReader(llt.Allocator, span[offset..]) { PostingListId = postingListId, VectorId = vectorId, CountOfLevels = countOfLevels };
+            return new NodeReader(llt.Allocator, span[offset..]) { PostingListId = postingListId, VectorId = vectorId, CountOfLevels = countOfLevels, OlderInLinks = olderInLinks };
         }
 
         public Span<byte> Encode(ref ContextBoundNativeList<byte> buffer)
         {
             int countOfLevels = EdgesPerLevel.Count;
 
-            // posting list id, vector id, count of levels
-            var maxSize = 3 * VariableSizeEncoding.MaximumSizeOf<long>();
+            // posting list id, vector id, count of levels, older in-link count
+            var maxSize = 4 * VariableSizeEncoding.MaximumSizeOf<long>();
             for (int i = 0; i < countOfLevels; i++)
             {
                 maxSize += EdgesPerLevel[i].Count * VariableSizeEncoding.MaximumSizeOf<long>();
@@ -132,6 +117,7 @@ public partial class Hnsw
             var pos = VariableSizeEncoding.Write(bufferSpan, PostingListId);
             pos += VariableSizeEncoding.Write(bufferSpan, VectorId, pos);
             pos += VariableSizeEncoding.Write(bufferSpan, countOfLevels, pos);
+            pos += VariableSizeEncoding.Write(bufferSpan, OlderInLinks, pos);
 
             for (int i = 0; i < countOfLevels; i++)
             {

@@ -106,16 +106,18 @@ namespace Voron.Global
 
             public static class HnswVersion
             {
-                public const ushort InitialVersion = 7_000;
-
                 // Singles vectors store a trailing float L2 norm alongside the payload,
                 // mirroring the (sbyte[dims] + float magnitude) layout already used by Int8.
                 // The kernel reads the cached norm instead of recomputing Σ x_i² on every
-                // distance call. Indexes created before this version keep the legacy
-                // float[dims] layout and are served by the norm-recomputing kernel.
+                // distance call.
                 public const ushort SinglesWithL2Norm = 7_001;
 
-                public const ushort CurrentVersion = SinglesWithL2Norm;
+                // Every node record stores its count of older base-layer in-links as a plain field after the count of levels.
+                // Every float32 graph carries a 4-bit prescreen code for each of its nodes, in blocks addressed by node id that its CodePages lookup locates,
+                // and the parameters of those codes.
+                // The container location of every node record lives in blocks addressed by node id, which its LocationPages lookup locates.
+                // A graph at another version is never read: the index that holds it must be reset.
+                public const ushort CurrentVersion = 7_002;
             }
         }
         

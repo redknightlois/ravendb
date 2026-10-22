@@ -71,11 +71,10 @@ public unsafe partial class Pager
 
             buffer = GetBufferAndAddToTxState(pager, pageNumber, cryptoState, numberOfPages);
 
-            long toCopy = numberOfPages * (long)Constants.Storage.PageSize;
+            // The header is authenticated in the clear; the body decrypts straight from the mapped page.
+            Memory.Copy(buffer.Pointer, pagePointer, PageHeader.SizeOf);
 
-            Memory.Copy(buffer.Pointer, pagePointer, toCopy);
-
-            DecryptPage(pager, (PageHeader*)buffer.Pointer);
+            DecryptPage(pager, (PageHeader*)buffer.Pointer, pagePointer + PageHeader.SizeOf);
 
             return buffer.Pointer;
         }
@@ -128,7 +127,8 @@ public unsafe partial class Pager
             }
         }
 
-        private static void DecryptPage(Pager pager,PageHeader* page)
+        /// <summary>Decrypts the body at <paramref name="cipher"/> into <paramref name="page"/>, whose header already holds the header of the encrypted page.</summary>
+        private static void DecryptPage(Pager pager, PageHeader* page, byte* cipher)
         {
             var num = page->PageNumber;
 
@@ -145,7 +145,7 @@ public unsafe partial class Pager
                 var rc = Sodium.crypto_aead_xchacha20poly1305_ietf_decrypt_detached(
                     destination + PageHeader.SizeOf,
                     null,
-                    (byte*)page + PageHeader.SizeOf,
+                    cipher,
                     dataSize - PageHeader.SizeOf,
                     (byte*)page + PageHeader.MacOffset,
                     (byte*)page,
@@ -280,7 +280,7 @@ public unsafe partial class Pager
             ulong currentHash = Hashing.XXHash64.Calculate(buffer.Pointer, (ulong)toCopy);
 
             Memory.Copy(buffer.Pointer, pagePointer, toCopy);
-            DecryptPage(pager, (PageHeader*)buffer.Pointer);
+            DecryptPage(pager, (PageHeader*)buffer.Pointer, buffer.Pointer + PageHeader.SizeOf);
             ulong hashFromPager = Hashing.XXHash64.Calculate(buffer.Pointer, (ulong)toCopy);
             
             if(currentHash != hashFromPager)

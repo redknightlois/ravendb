@@ -19,7 +19,7 @@ public partial class Hnsw
         [FieldOffset(8)] // EfConstruction - Number of candidates 
         public int NumberOfCandidates;
 
-        [FieldOffset(12)] // this is used only in debug, not important for persistence
+        [FieldOffset(12)] // graph format version, set once when the graph is created and checked on every open
         public ushort Version;
 
         [FieldOffset(14)]
@@ -36,6 +36,9 @@ public partial class Hnsw
 
         [FieldOffset(32)]
         public ContainerId LastUsedContainerId;
+
+        [FieldOffset(40)] // code rows in each block of a float32 graph, set once when the graph is created; 0 for a graph without codes
+        public int CodeRowsPerBlock;
 
         public int MaxLevel => BitOperations.Log2((ulong)CountOfVectors);
 

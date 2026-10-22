@@ -633,7 +633,7 @@ namespace Raven.Server.Config.Categories
         public int CoraxVectorDefaultNumberOfEdges { get; protected set; }
         
         [Description("The default number of candidates (potential neighboring vectors) that RavenDB evaluates during vector indexing.")]
-        [DefaultValue(16)]
+        [DefaultValue(64)]
         [IndexUpdateType(IndexUpdateType.Reset)]
         [ConfigurationEntry("Indexing.Corax.VectorSearch.DefaultNumberOfCandidatesForIndexing", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
         public int CoraxVectorDefaultNumberOfCandidatesForIndexing { get; protected set; }
@@ -667,15 +667,6 @@ namespace Raven.Server.Config.Categories
         [IndexUpdateType(IndexUpdateType.Refresh)]
         [ConfigurationEntry("Indexing.Corax.VectorSearch.VectorSearchScanningThreshold", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
         public int CoraxVectorSearchScanningThreshold { get; set; }
-
-        [Description("The maximum amount of memory for the HNSW vector search node cache per index. " +
-                     "This cache pre-loads upper-level graph nodes to accelerate vector queries. " +
-                     "Changing this value does not require re-indexing.")]
-        [DefaultValue(10)]
-        [SizeUnit(SizeUnit.Megabytes)]
-        [IndexUpdateType(IndexUpdateType.Refresh)]
-        [ConfigurationEntry("Indexing.Corax.VectorSearch.CacheSizeInMb", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
-        public Size CoraxVectorSearchCacheSize { get; set; }
 
         [Description("Use default search analyzer for dynamic fields if not set explicitly.")]
         [DefaultValue(false)]

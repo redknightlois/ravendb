@@ -30,7 +30,8 @@ public unsafe partial class Hnsw
             private readonly HashSet<int> _alreadyReturnedEdges;
             private long _vectorReadCounter = 0;
             private readonly int _startingPointIndex;
-            private ContextBoundNativeList<int> _startingPointIndexes;
+            // Null when the traversal is not screened: a filtered traversal, a graph without codes, or a restarted traversal.
+            private CodeScreen _screen;
 
             // Traversal state carried across MoveNextBatch calls so the caller can consume
             // one batch at a time. _needsRestart triggers a fresh InitState; _isDone short-circuits
@@ -43,20 +44,22 @@ public unsafe partial class Hnsw
             public long CandidatesProcessed { get => _vectorReadCounter; }
             public int NumberOfCandidates { get; init; }
 
-            private NearestSearcher(SearchState searchState, Memory<byte> vector,
+            public NearestSearcher(SearchState searchState, int startingPointIndex, Memory<byte> vector,
                 int level, int numberOfCandidates,
                 ContextBoundNativeList<int> candidates,
                 NearestEdgesFlags flags,
-                bool hasFilterMatch)
+                bool hasFilterMatch,
+                CodeScreen screen)
             {
                 _searchState = searchState;
+                _startingPointIndex = startingPointIndex;
                 _vector = vector;
                 _level = level;
                 NumberOfCandidates = numberOfCandidates;
 
                 _internalNumberOfCandidates = hasFilterMatch == false
                     ? numberOfCandidates
-                    : numberOfCandidates + GetPrefetchExtendSize(numberOfCandidates);
+                    : ExtendedSize(numberOfCandidates);
                 _candidates = candidates;
                 _flags = flags;
                 _hasFilterMatch = hasFilterMatch;
@@ -66,65 +69,11 @@ public unsafe partial class Hnsw
                 {
                     _alreadyReturnedEdges = new();
                 }
-            }
-            
-            
-            public NearestSearcher(SearchState searchState, ContextBoundNativeList<int> startingPointsIndexes, Memory<byte> vector, int level, int numberOfCandidates, ContextBoundNativeList<int> candidates, NearestEdgesFlags flags) : this(searchState, vector, level, numberOfCandidates, candidates, flags, true)
-            {
-                _startingPointIndexes = startingPointsIndexes;
-                _startingPointIndex = -1;
-            }
 
-            public NearestSearcher(SearchState searchState, int startingPointIndex, Memory<byte> vector,
-                int level, int numberOfCandidates,
-                ContextBoundNativeList<int> candidates,
-                NearestEdgesFlags flags,
-                bool hasFilterMatch) : this(searchState, vector, level, numberOfCandidates, candidates, flags, hasFilterMatch)
-            {
-                _startingPointIndex = startingPointIndex;
+                _screen = screen;
             }
 
             private void InitState(out float lowerBound, out int visitedCounter)
-            {
-                if (_startingPointIndex != -1)
-                {
-                    Deepest(out lowerBound, out visitedCounter);
-                }
-                else
-                {
-                    Multi(out lowerBound, out visitedCounter);
-                }
-            }
-
-            private void Multi(out float lowerBound, out int visitedCounter)
-            {
-                var candidatesQ = _searchState._candidatesQ;
-                var nearestEdgesQ = _searchState._nearestEdgesQ;
-
-                Debug.Assert(candidatesQ.Count == 0, "_candidatesQ.Count == 0");
-                Debug.Assert(nearestEdgesQ.Count == 0, "_nearestEdgesQ.Count == 0");
-
-                lowerBound = float.MaxValue;
-                visitedCounter = ++_searchState._visitsCounter;
-                _searchState.OnQueryVector(_vector);
-
-                foreach (var nodeIdx in _startingPointIndexes)
-                {
-                    ref var startingPoint = ref _searchState.GetNodeByIndex(nodeIdx);
-                    startingPoint.Visited = visitedCounter;
-                    var currentDistance = -_searchState.QueryDistance(_vector.Span, nodeIdx, ref _vectorReadCounter);
-                    lowerBound = Math.Min(lowerBound, currentDistance);
-                    candidatesQ.Enqueue(nodeIdx, -currentDistance);
-                    if (_flags.HasFlag(NearestEdgesFlags.StartingPointAsEdge) &&
-                        ((startingPoint.PostingListId & Constants.Graphs.VectorId.EnsureIsSingleMask) != Constants.Graphs.VectorId.Tombstone
-                         || _flags.HasFlag(NearestEdgesFlags.FilterNodesWithEmptyPostingLists) is false))
-                    {
-                        nearestEdgesQ.Enqueue(nodeIdx, currentDistance);
-                    }
-                }
-            }
-
-            private void Deepest(out float lowerBound, out int visitedCounter)
             {
                 var candidatesQ = _searchState._candidatesQ;
                 var nearestEdgesQ = _searchState._nearestEdgesQ;
@@ -146,6 +95,7 @@ public unsafe partial class Hnsw
 
                     candidatesQ.Enqueue(_startingPointIndex, -lowerBound);
                     if (_flags.HasFlag(NearestEdgesFlags.StartingPointAsEdge) &&
+                        (_hasFilterMatch == false || _alreadyReturnedEdges.Contains(_startingPointIndex) == false) &&
                         ((startingPoint.PostingListId & Constants.Graphs.VectorId.EnsureIsSingleMask) != Constants.Graphs.VectorId.Tombstone
                          || _flags.HasFlag(NearestEdgesFlags.FilterNodesWithEmptyPostingLists) is false))
                     {
@@ -191,7 +141,9 @@ public unsafe partial class Hnsw
                     }
 
                     _searchState.GetNodeByIndex(cur).Visited = _visitedCounter;
-                    _searchState.ResolveEdgeIndexes(cur, _level, ref _nodeIds, ref _indexes);
+                    // Only a full working set has a threshold to screen against.
+                    var screen = nearestEdgesQ.Count == _internalNumberOfCandidates ? _screen : null;
+                    _searchState.ResolveEdgeIndexes(cur, _level, screen, -_lowerBound, ref _nodeIds, ref _indexes);
 
                     // Pin loop locals: NativeList field reads through `this` force the JIT to
                     // reload the storage pointer on every candidate.
@@ -225,6 +177,8 @@ public unsafe partial class Hnsw
                         }
                         else if (_lowerBound < nextDist)
                         {
+                            if (_screen is not null)
+                                _screen.Admissions++;
                             candidatesQ.Enqueue(nextIndex, -nextDist);
 
                             if (isDeleted == false || _flags.HasFlag(NearestEdgesFlags.FilterNodesWithEmptyPostingLists) is false)
@@ -257,8 +211,11 @@ public unsafe partial class Hnsw
 
             public void IncreaseNumberOfCandidates(int currentlyAcceptedNodes)
             {
+                // The restarted traversal has a looser threshold than the rejections of the earlier one were made against.
+                _screen?.Dispose();
+                _screen = null;
                 Reset();
-                _internalNumberOfCandidates += GetPrefetchExtendSize(_internalNumberOfCandidates);
+                _internalNumberOfCandidates = ExtendedSize(_internalNumberOfCandidates);
                 // The next MoveNextBatch call will InitState from the starting points again.
                 _needsRestart = true;
                 _isDone = false;
@@ -336,6 +293,9 @@ public unsafe partial class Hnsw
                 }
             }
 
+            // Saturates: a working set of int.MaxValue entries is never full, so the traversal then visits every reachable node.
+            private static int ExtendedSize(int numberOfCandidates) => (int)Math.Min((long)numberOfCandidates + GetPrefetchExtendSize(numberOfCandidates), int.MaxValue);
+
             private static int GetPrefetchExtendSize(int numberOfCandidates) => numberOfCandidates switch
             {
                 <= 131_072 =>  numberOfCandidates / 2,
@@ -344,8 +304,7 @@ public unsafe partial class Hnsw
 
             public void Dispose()
             {
-                if (_startingPointIndex == -1)
-                    _startingPointIndexes.Dispose();
+                _screen?.Dispose();
                 _candidates.Dispose();
                 _nodeIds.Dispose(_searchState.Llt.Allocator);
                 _indexes.Dispose(_searchState.Llt.Allocator);

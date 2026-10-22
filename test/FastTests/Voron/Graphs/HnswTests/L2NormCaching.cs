@@ -135,50 +135,6 @@ public class L2NormCaching(ITestOutputHelper output) : StorageTest(output)
         }
     }
 
-    [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
-    public void LegacyVersionOptionsYieldLegacyKernel()
-    {
-        // Construct an Options struct pinned to the InitialVersion on-disk layout and verify
-        // the kernel dispatcher selects the norm-recomputing path. Locks the version gate so
-        // an accidental bump cannot silently break indexes written under that layout.
-        var legacyOptions = new global::Voron.Data.Graphs.Hnsw.Options
-        {
-            Version = global::Voron.Global.Constants.Graphs.HnswVersion.InitialVersion,
-            SimilarityMethod = global::Voron.Data.Graphs.Hnsw.SimilarityMethod.CosineSimilaritySingles,
-            VectorSizeBytes = 64,
-        };
-        var newOptions = legacyOptions;
-        newOptions.Version = global::Voron.Global.Constants.Graphs.HnswVersion.SinglesWithL2Norm;
-        newOptions.VectorSizeBytes = 68;
-
-        unsafe
-        {
-            var legacyKernel = global::Voron.Data.Graphs.Hnsw.GetDistanceKernel(in legacyOptions);
-            var newKernel = global::Voron.Data.Graphs.Hnsw.GetDistanceKernel(in newOptions);
-
-            // Evaluate each kernel on payloads sized to match its expected on-disk layout. The
-            // legacy kernel consumes 64 bytes of raw floats; the new kernel consumes 68 bytes
-            // (16 unit floats + trailing norm). Confirming each kernel accepts only its own
-            // layout proves the dispatcher selects different code paths.
-            var rng = new Random(11);
-            var a = RandomFloats(rng, 16, scale: 1.0f);
-            var b = RandomFloats(rng, 16, scale: 1.0f);
-            var aRaw = MemoryMarshal.AsBytes(a.AsSpan());
-            var bRaw = MemoryMarshal.AsBytes(b.AsSpan());
-            var legacyVal = legacyKernel(aRaw, bRaw);
-            Assert.False(float.IsNaN(legacyVal));
-
-            var aAtRest = new byte[Hnsw.TensorSizeBytes<float>(16)];
-            var bAtRest = new byte[Hnsw.TensorSizeBytes<float>(16)];
-            Hnsw.WriteNormalizedTensor(a, aAtRest);
-            Hnsw.WriteNormalizedTensor(b, bAtRest);
-            var newVal = newKernel(aAtRest, bAtRest);
-            Assert.False(float.IsNaN(newVal));
-            // Mathematically equivalent, so the magnitudes must agree to float tolerance.
-            Assert.InRange(newVal - legacyVal, -1e-5f, 1e-5f);
-        }
-    }
-
     private static float[] RandomFloats(Random rng, int dims, float scale)
     {
         var v = new float[dims];

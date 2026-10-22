@@ -89,7 +89,6 @@ namespace FastTests.Issues
                 
                 
 
-                "Indexing.Corax.VectorSearch.CacheSizeInMb",
                 "Indexing.Corax.VectorSearch.DefaultMinimumSimilarity",
                 "Indexing.Corax.VectorSearch.DefaultNumberOfEdges",
                 "Indexing.Corax.VectorSearch.DefaultNumberOfCandidatesForIndexing",

@@ -11,10 +11,10 @@ public class HnswIndexCacheLifecycle(ITestOutputHelper output) : RavenTestBase(o
 {
     private const int DocCount = 200;
 
-    // Vector search must remain consistent across writes that mutate cached HNSW nodes.
-    // After the upper-level node cache has been warmed at index open, updating documents whose
-    // vectors participate in the graph must not leave the cache pointing at stale topology:
-    // a subsequent query must return correct results, not throw and not read freed slots.
+    // Vector search must remain consistent across writes that update HNSW nodes. After the index
+    // reopens and a query fills the per-field cache, updating documents whose vectors participate
+    // in the graph must not leave the cache pointing at stale pages: a subsequent query must return
+    // correct results and not throw.
     [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Corax)]
     public void VectorSearchRemainsConsistentAfterUpdatingCachedDocuments()
     {
@@ -36,7 +36,7 @@ public class HnswIndexCacheLifecycle(ITestOutputHelper output) : RavenTestBase(o
             Indexes.WaitForIndexing(store);
         }
 
-        // Force the index-open path to seed its upper-level node cache from the populated graph.
+        // Force the index-open path to create the per-field cache of the populated graph.
         var off = store.Maintenance.Server.Send(new ToggleDatabasesStateOperation(store.Database, disable: true));
         Assert.True(off.Success && off.Disabled);
         var on = store.Maintenance.Server.Send(new ToggleDatabasesStateOperation(store.Database, disable: false));
@@ -44,6 +44,10 @@ public class HnswIndexCacheLifecycle(ITestOutputHelper output) : RavenTestBase(o
 
         using (var session = store.OpenSession())
         {
+            _ = session.Query<Item>()
+                .VectorSearch(f => f.WithText(x => x.Description), factory => factory.ByText("cat"), numberOfCandidates: 8)
+                .ToList();
+
             for (int i = 1; i <= DocCount / 2; i++)
                 session.Load<Item>($"items/{i}").Description = "fish";
             session.SaveChanges();
@@ -57,7 +61,7 @@ public class HnswIndexCacheLifecycle(ITestOutputHelper output) : RavenTestBase(o
         }
     }
 
-    // The per-field HNSW node cache must be available to readers immediately after the first
+    // The per-field HNSW cache must be available to readers immediately after the first
     // commit that populates the graph. A database that started empty and then ingested vector
     // data should serve subsequent queries through the cache without needing an index or
     // database restart to materialize it.
@@ -97,7 +101,7 @@ public class HnswIndexCacheLifecycle(ITestOutputHelper output) : RavenTestBase(o
 
         var caches = cachesField.GetValue(persistence) as System.Collections.IDictionary;
         Assert.True(caches != null && caches.Count > 0,
-            "Per-field HNSW node cache must be materialized after the first commit that populates the graph.");
+            "Per-field HNSW cache must be materialized after the first commit that populates the graph.");
     }
 
     private sealed class Item
