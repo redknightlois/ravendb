@@ -56,7 +56,7 @@ public unsafe partial class Hnsw
 
                 _internalNumberOfCandidates = hasFilterMatch == false
                     ? numberOfCandidates
-                    : numberOfCandidates + GetPrefetchExtendSize(numberOfCandidates);
+                    : ExtendedSize(numberOfCandidates);
                 _candidates = candidates;
                 _flags = flags;
                 _hasFilterMatch = hasFilterMatch;
@@ -203,7 +203,7 @@ public unsafe partial class Hnsw
             public void IncreaseNumberOfCandidates(int currentlyAcceptedNodes)
             {
                 Reset();
-                _internalNumberOfCandidates += GetPrefetchExtendSize(_internalNumberOfCandidates);
+                _internalNumberOfCandidates = ExtendedSize(_internalNumberOfCandidates);
                 // The next MoveNextBatch call will InitState from the starting points again.
                 _needsRestart = true;
                 _isDone = false;
@@ -280,6 +280,9 @@ public unsafe partial class Hnsw
                     return;
                 }
             }
+
+            // Saturates: a working set of int.MaxValue entries is never full, so the traversal then visits every reachable node.
+            private static int ExtendedSize(int numberOfCandidates) => (int)Math.Min((long)numberOfCandidates + GetPrefetchExtendSize(numberOfCandidates), int.MaxValue);
 
             private static int GetPrefetchExtendSize(int numberOfCandidates) => numberOfCandidates switch
             {

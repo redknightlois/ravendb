@@ -248,11 +248,7 @@ public struct VectorSearchMatch : IQueryMatch
             distances.Truncate(matchesCount);
             matches.Truncate(matchesCount);
         }
-        else if (_vectorSearchRetriever.IsSortedByDistance == false)
-        {
-            distances.Results.Sort(matches.Results);
-        }
-        
+
         Dispose();
     }
     
