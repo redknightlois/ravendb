@@ -1466,19 +1466,24 @@ public unsafe partial class Hnsw
             return parameters;
         }
 
+        // A stored record that already holds the encoded bytes is left unmodified, and so is its page.
         void PersistNode(ref Node node, ref ContextBoundNativeList<byte> byteBuffer)
         {
             var encoded = node.Encode(ref byteBuffer);
             if (_searchState.TryGetLocationForNode(node.NodeId, out var locationId))
             {
-                var existing = Container.GetMutable(_searchState.Llt, new ContainerEntryId(locationId));
-                if (existing.Length == encoded.Length)
+                var id = new ContainerEntryId(locationId);
+                Container.Get(_searchState.Llt, id, out var stored);
+                if (stored.ToSpan().SequenceEqual(encoded))
+                    return;
+
+                if (stored.Length == encoded.Length)
                 {
-                    encoded.CopyTo(existing);
+                    encoded.CopyTo(Container.GetMutable(_searchState.Llt, id));
                     return;
                 }
 
-                Container.Delete(_searchState.Llt, _searchState.Options.Container, new ContainerEntryId(locationId));
+                Container.Delete(_searchState.Llt, _searchState.Options.Container, id);
             }
 
             var allocatedId = Container.Allocate(_searchState.Llt, _searchState.Options.Container, encoded.Length, out var storage);

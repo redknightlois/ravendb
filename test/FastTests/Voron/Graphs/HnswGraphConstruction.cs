@@ -336,6 +336,35 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
         }
     }
 
+    [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
+    public void CommitLeavesThePagesOfUnchangedRecordsUnmodified()
+    {
+        Build(RandomVectors(5000, seed: 11), commits: 1, tasks: 1, seed: 11, beam: 16);
+
+        using var tx = Env.WriteTransaction();
+        var before = Records(tx);
+        using (var registration = Hnsw.RegistrationFor(tx.LowLevelTransaction, TreeName, new Random(12)))
+        {
+            registration.Register(5001, MemoryMarshal.Cast<float, byte>(RandomVectors(1, seed: 12)[0]));
+            registration.Commit(CancellationToken.None);
+        }
+
+        var touched = new HashSet<long>();
+        foreach (var (id, record) in Records(tx))
+        {
+            if (before.TryGetValue(id, out var old) && old.Location == record.Location && old.Bytes.SequenceEqual(record.Bytes))
+                continue;
+            touched.Add(record.Location / global::Voron.Global.Constants.Storage.PageSize);
+            if (old.Bytes != null)
+                touched.Add(old.Location / global::Voron.Global.Constants.Storage.PageSize);
+        }
+
+        var untouched = before.Values.Select(r => r.Location / global::Voron.Global.Constants.Storage.PageSize).Where(page => touched.Contains(page) == false).ToHashSet();
+        Assert.NotEmpty(touched);
+        Assert.NotEmpty(untouched);
+        Assert.All(untouched, page => Assert.False(tx.LowLevelTransaction.IsDirty(page)));
+    }
+
     // RavenDB-26809: under parallel placement a worker dereferences a pointer into the node array while the LLT thread may grow it.
     // Growth must retain the grown-from buffer instead of freeing it, so the worker never reads freed memory.
     [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
