@@ -45,14 +45,13 @@ public partial class Hnsw
 
         public void LoadInto(ref Node node)
         {
-            node.VectorId = VectorId;
-            node.PostingListId = PostingListId;
-            node.EdgesPerLevel.EnsureCapacityFor(_allocator, CountOfLevels);
-            node.OlderInLinks = OlderInLinks;
+            var edgesPerLevel = new NativeList<NativeList<long>>();
+            edgesPerLevel.EnsureCapacityFor(_allocator, CountOfLevels);
             for (var level = 0; level < CountOfLevels; level++)
             {
-                node.EdgesPerLevel.AddUnsafe(ReadEdges());
+                edgesPerLevel.AddUnsafe(ReadEdges());
             }
+            node.Load(VectorId, PostingListId, OlderInLinks, edgesPerLevel);
         }
 
         /// <summary>Replaces the content of <paramref name="edges"/> with the edge ids of the next level, without allocating native memory.</summary>
