@@ -3,6 +3,7 @@
     <TargetFramework>net11.0</TargetFramework>
     <RuntimeFrameworkVersion>11.0.0</RuntimeFrameworkVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);SYSLIB5003</NoWarn>
     <AssemblyName>FastTests</AssemblyName>
     <PackageId>FastTests</PackageId>
     <OutputType>Exe</OutputType>
