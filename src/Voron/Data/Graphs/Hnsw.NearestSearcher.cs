@@ -39,6 +39,8 @@ public unsafe partial class Hnsw
             private NativeList<long> _nodeIds;
             private long _vectorReadCounter = 0;
             private readonly int _startingPointIndex;
+            // Null when the graph carries no codes.
+            private readonly CodeScreen _screen;
             // With a filter, the results are the nearest of the filter's nodes that the traversal reaches, and the traversal runs until it holds
             // the requested number of them as well as a full working set.
             private readonly GrowableBitArray? _filter;
@@ -57,7 +59,8 @@ public unsafe partial class Hnsw
                 ContextBoundNativeList<int> candidates,
                 NearestEdgesFlags flags,
                 GrowableBitArray? filter,
-                Func<ContextBoundNativeList<long>> filterNodes)
+                Func<ContextBoundNativeList<long>> filterNodes,
+                CodeScreen screen)
             {
                 _searchState = searchState;
                 _startingPointIndex = startingPointIndex;
@@ -80,6 +83,7 @@ public unsafe partial class Hnsw
                 _flags = flags;
                 _indexes = new NativeList<int>();
                 _nodeIds = new NativeList<long>();
+                _screen = screen;
             }
 
             private int InitState()
@@ -155,8 +159,9 @@ public unsafe partial class Hnsw
                     }
 
                     _searchState.GetNodeByIndex(cur).Visited = visitedCounter;
+                    // Only full queues have a threshold to screen against.
                     var isFull = threshold > float.NegativeInfinity;
-                    _searchState.ResolveEdgeIndexes(cur, _level, ref _nodeIds, ref _indexes);
+                    _searchState.ResolveEdgeIndexes(cur, _level, isFull ? _screen : null, -threshold, ref _nodeIds, ref _indexes);
 
                     // Pin loop locals: NativeList field reads through `this` force the JIT to
                     // reload the storage pointer on every candidate.
@@ -177,8 +182,13 @@ public unsafe partial class Hnsw
                         var isDeleted = (next.PostingListId & Constants.Graphs.VectorId.EnsureIsSingleMask) == Constants.Graphs.VectorId.Tombstone;
 
                         float nextDist = -_searchState.QueryDistance(_vector.Span, ref next, ref _vectorReadCounter);
-                        if (isFull && (threshold < nextDist) == false)
-                            continue;
+                        if (isFull)
+                        {
+                            if ((threshold < nextDist) == false)
+                                continue;
+                            if (_screen is not null)
+                                _screen.Admissions++;
+                        }
 
                         candidatesQ.Enqueue(nextIndex, -nextDist);
                         if (isDeleted == false || _flags.HasFlag(NearestEdgesFlags.FilterNodesWithEmptyPostingLists) is false)
@@ -249,6 +259,7 @@ public unsafe partial class Hnsw
                     _filterScratch.Dispose();
                     _filterDecoder.Dispose();
                 }
+                _screen?.Dispose();
                 _candidates.Dispose();
                 _nodeIds.Dispose(_searchState.Llt.Allocator);
                 _indexes.Dispose(_searchState.Llt.Allocator);
