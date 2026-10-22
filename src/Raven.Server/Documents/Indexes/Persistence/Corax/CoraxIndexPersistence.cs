@@ -202,6 +202,10 @@ public sealed class CoraxIndexPersistence : IndexPersistenceBase
     {
         using (var tx = environment.WriteTransaction())
         {
+            // A graph at another format version is never read: the index opens faulty until a reset rebuilds it.
+            if (Hnsw.HasGraphOfOtherVersion(tx))
+                throw new NotSupportedException("The index holds a vector graph of another format version. Reset the index to rebuild it.");
+
             // Warm the per-field HNSW node caches and publish them on the transaction client state.
             WarmInitialCaches(tx);
             tx.LowLevelTransaction.UpdateClientState(UpdateIndexCache(tx));

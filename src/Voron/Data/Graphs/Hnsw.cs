@@ -87,6 +87,8 @@ public unsafe partial class Hnsw
         return options;
     }
 
+    public static bool HasGraphOfOtherVersion(Transaction tx) => GraphsOf(tx).Exists(g => g.Version != Constants.Graphs.HnswVersion.CurrentVersion);
+
     /// <summary>
     /// Lists every vector graph tree of the environment with its stored format version. Reads only the options of each tree,
     /// so it works on a graph of any version.
