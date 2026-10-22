@@ -22,6 +22,7 @@ public partial class Hnsw
         [FieldOffset(8)]
         public int NumberOfCandidates;
 
+        // The graph format version, set once when the graph is created and checked on every open.
         [FieldOffset(12)]
         public ushort Version;
 
