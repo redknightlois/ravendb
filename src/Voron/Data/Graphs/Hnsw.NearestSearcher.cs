@@ -58,6 +58,7 @@ public unsafe partial class Hnsw
                 ContextBoundNativeList<int> candidates,
                 NearestEdgesFlags flags,
                 RoaringBitmap? filter,
+                long filterCount,
                 Func<ContextBoundNativeList<long>> filterNodes,
                 CodeScreen screen)
             {
@@ -70,7 +71,6 @@ public unsafe partial class Hnsw
                 if (filter is { } f)
                 {
                     _filter = f;
-                    var filterCount = f.ComputeCount();
                     searchState._admittedQ ??= new();
                     _internalNumberOfCandidates = FilteredBeam(numberOfCandidates, filterCount, searchState.Options.CountOfVectors);
                     _filterNodes = filterNodes;
