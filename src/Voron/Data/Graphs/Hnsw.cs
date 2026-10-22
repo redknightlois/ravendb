@@ -831,17 +831,17 @@ public unsafe partial class Hnsw
                 BeginScreen(vector.Span, numberOfCandidates));
         }
 
-        /// <summary>The descent from the entry point and the base-layer traversal from where it ends.</summary>
+        /// <summary>The descent from the entry point and the base-layer traversal from where it ends, with one screen for both.</summary>
         internal IHnswSearcher ApproximateSearch(Memory<byte> vector, int numberOfCandidates, RoaringBitmap? filter, Func<ContextBoundNativeList<long>> filterNodes = null)
         {
             var nearestNodesByLevel = new ContextBoundNativeList<int>(Llt.Allocator);
             nearestNodesByLevel.EnsureCapacityFor(Options.MaxLevel + 1);
-            SearchNearestAcrossLevels(vector.Span, -1, Options.MaxLevel, ref nearestNodesByLevel);
+            var screen = BeginScreen(vector.Span, filter is { } f ? FilteredBeam(numberOfCandidates, f.ComputeCount(), Options.CountOfVectors) : numberOfCandidates);
+            SearchNearestAcrossLevels(vector.Span, -1, Options.MaxLevel, ref nearestNodesByLevel, screen);
             var nearest = nearestNodesByLevel[0];
             nearestNodesByLevel.Clear();
             return new NearestSearcher(this, nearest, vector, 0, numberOfCandidates, nearestNodesByLevel,
-                NearestEdgesFlags.StartingPointAsEdge | NearestEdgesFlags.FilterNodesWithEmptyPostingLists, filter, filterNodes,
-                BeginScreen(vector.Span, filter is { } f ? FilteredBeam(numberOfCandidates, f.ComputeCount(), Options.CountOfVectors) : numberOfCandidates));
+                NearestEdgesFlags.StartingPointAsEdge | NearestEdgesFlags.FilterNodesWithEmptyPostingLists, filter, filterNodes, screen);
         }
 
         public IHnswSearcher EmptySearch() => new EmptySearcher();
@@ -849,8 +849,13 @@ public unsafe partial class Hnsw
         public IHnswSearcher ExactSearch(Memory<byte> vector, int numberOfCandidates, RoaringBitmap? filter, ContextBoundNativeList<long>? nodesToScan) => new ExactSearcher(this, vector, numberOfCandidates, filter, nodesToScan);
 
 
-        public void SearchNearestAcrossLevels(ReadOnlySpan<byte> vector, int dstIdx, int maxLevel, ref ContextBoundNativeList<int> nearestIndexes)
+        public void SearchNearestAcrossLevels(ReadOnlySpan<byte> vector, int dstIdx, int maxLevel, ref ContextBoundNativeList<int> nearestIndexes) =>
+            SearchNearestAcrossLevels(vector, dstIdx, maxLevel, ref nearestIndexes, null);
+
+        internal void SearchNearestAcrossLevels(ReadOnlySpan<byte> vector, int dstIdx, int maxLevel, ref ContextBoundNativeList<int> nearestIndexes, CodeScreen screen)
         {
+            if (screen is not null)
+                screen.Descending = true;
             var visitCounter = ++_visitsCounter;
             var currentNodeIndex = GetNodeIndexById(EntryPointId);
             var level = maxLevel;
@@ -867,7 +872,9 @@ public unsafe partial class Hnsw
                 {
                     moved = false;
                     Debug.Assert(GetNodeByIndex(currentNodeIndex).GetLevelCount() > level, "n.GetLevelCount() > level");
-                    ResolveEdgeIndexes(currentNodeIndex, level, null, 0, ref nodeIds, ref indexes);
+                    // A node is evaluated once and the distance only falls, so a neighbor that the descent without the screen does not move to is never closer
+                    // than a later current node: the screened descent, which may check or evaluate it again, does not move to it either.
+                    ResolveEdgeIndexes(currentNodeIndex, level, screen, distance, ref nodeIds, ref indexes);
                     for (var i = 0; i < indexes.Count; i++)
                     {
                         var edgeIdx = indexes[i];
@@ -882,6 +889,8 @@ public unsafe partial class Hnsw
                         moved = true;
                         distance = curDist;
                         currentNodeIndex = edgeIdx;
+                        if (screen is not null)
+                            screen.Admissions++;
                     }
                 } while (moved);
 
@@ -892,6 +901,8 @@ public unsafe partial class Hnsw
             indexes.Dispose(Llt.Allocator);
             nodeIds.Dispose(Llt.Allocator);
             nearestIndexes.Inner.Reverse();
+            if (screen is not null)
+                screen.Descending = false;
         }
 
 
