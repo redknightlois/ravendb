@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using JetBrains.Annotations;
 using Raven.Client.Documents.Indexes;
 using Raven.Server.Documents.Indexes.Debugging;
+using Raven.Server.Documents.Indexes.Persistence.Corax;
 using Raven.Server.Json;
 using Raven.Server.ServerWide;
 using Raven.Server.ServerWide.Context;
@@ -106,6 +107,25 @@ internal sealed class IndexHandlerProcessorForDebug : AbstractIndexHandlerProces
                 return;
             }
             
+            if (string.Equals(operation, "vector-graphs", StringComparison.OrdinalIgnoreCase))
+            {
+                if (index.IndexPersistence is not CoraxIndexPersistence || (index.HasVectorFields == false && index.Definition.IndexFields.Values.All(x => x.Vector is null)))
+                {
+                    HttpContext.Response.StatusCode = (int)HttpStatusCode.BadRequest;
+
+                    context.Write(writer, new DynamicJsonValue
+                    {
+                        ["Error"] = $"{index.Name} is not a Corax index with vector fields"
+                    });
+
+                    return;
+                }
+
+                using (var token = RequestHandler.CreateHttpRequestBoundOperationToken())
+                    index.VectorGraphsOutput(writer, token.Token);
+                return;
+            }
+
             if (string.Equals(operation, "hnsw", StringComparison.OrdinalIgnoreCase))
             {
                 var field = RequestHandler.GetStringQueryString("field");
