@@ -119,6 +119,7 @@ namespace Voron.Global
                 // distance call.
                 public const ushort SinglesWithL2Norm = 7_001;
 
+                // Every index entry stores each of its vectors as the vector hash followed by the vector's node id in the field's graph.
                 // Every node record stores its count of older base-layer in-links as a plain field after the count of levels.
                 // A graph at another version is never read: the index that holds it must be reset.
                 public const ushort CurrentVersion = 8_000;

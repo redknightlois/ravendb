@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Hashing;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
@@ -9,7 +10,6 @@ using System.Threading;
 using Sparrow;
 using Sparrow.Binary;
 using Sparrow.Compression;
-using Sparrow.Platform;
 using Sparrow.Server;
 using Sparrow.Server.Tensors;
 using Sparrow.Server.Utils;
@@ -274,8 +274,6 @@ public unsafe partial class Hnsw
             return slice;
         }
         
-        public Lookup<Int64LookupKey> NodeIdsByVectorId => _tree.LookupFor<Int64LookupKey>(Hnsw.NodesByVectorIdSlice);
-
         public SearchState(LowLevelTransaction llt, Slice name) : this(llt, name, null)
         {
         }
@@ -1008,10 +1006,18 @@ public unsafe partial class Hnsw
 
     }
 
+    // Vectors with the same hash share one stored vector and one node. The hash is not cryptographic: it keeps different vectors apart by chance, not against a crafted collision.
+    public const int VectorHashSize = 128 / 8;
+
+    // An entry stores each of its vectors as a reference: the vector hash followed by the vector's node id in the field's graph.
+    public const int VectorReferenceSize = VectorHashSize + sizeof(long);
+
+    public static long NodeIdOf(ReadOnlySpan<byte> vectorReference) => MemoryMarshal.Read<long>(vectorReference[VectorHashSize..]);
+
     public partial class Registration : IDisposable
     {
         public bool IsCommited { get; private set; }
-        private readonly Dictionary<ByteString, (ByteString Key, int NodeIndex, NativeList<long> PostingList)> _vectorHashCache = new(ByteStringContentComparer.Instance);
+        private readonly Dictionary<ByteString, (ByteString Reference, int NodeIndex, NativeList<long> PostingList)> _vectorHashCache = new(ByteStringContentComparer.Instance);
 
         /// <summary>
         /// Node ids whose persisted record was written or rewritten during this commit. The
@@ -1159,16 +1165,16 @@ public unsafe partial class Hnsw
         /// Removes a vector from the graph.
         /// </summary>
         /// <param name="entryId">The ID of the document.</param>
-        /// <param name="vectorHash">The hash of the vector to remove.</param>
-        public void Remove(long entryId, ReadOnlySpan<byte> vectorHash)
+        /// <param name="vectorReference">The reference that registering the vector returned.</param>
+        public void Remove(long entryId, ReadOnlySpan<byte> vectorReference)
         {
             entryId = EntryIdToInternalEntryId(entryId);
             const long RemovalMask = 1;
 
             PortableExceptions.ThrowIfOnDebug<ArgumentOutOfRangeException>((entryId & Constants.Graphs.VectorId.EnsureIsSingleMask) != 0, "Entry ids must have the first two bits cleared, we are using those");
 
-            _searchState.Llt.Allocator.AllocateDirect(Sodium.GenericHashSize, out var hashBuffer);
-            vectorHash.CopyTo(hashBuffer.ToSpan());
+            _searchState.Llt.Allocator.AllocateDirect(VectorHashSize, out var hashBuffer);
+            vectorReference[..VectorHashSize].CopyTo(hashBuffer.ToSpan());
 
             ref var postingList = ref CollectionsMarshal.GetValueRefOrAddDefault(_vectorHashCache, hashBuffer, out var exists);
             if (exists)
@@ -1179,14 +1185,8 @@ public unsafe partial class Hnsw
                 return;
             }
 
-            if (_vectorsByHash.TryGetValue(vectorHash, out var vectorId) is false)
-                PortableExceptions.Throw<InvalidOperationException>($"Unable to find the vector corresponding to the provided vector hash: base64({Convert.ToBase64String(vectorHash)}).");
-
-            if (_nodesByVectorId.TryGetValue(vectorId, out var nodeId) is false)
-                PortableExceptions.Throw<InvalidOperationException>($"Unable to find the node corresponding to the provided vector hash: base64({Convert.ToBase64String(vectorHash)}) and VectorId({vectorId}).");
-
-            int nodeIndex = _searchState.GetNodeIndexById(nodeId);
-            postingList = (hashBuffer, nodeIndex, NativeList<long>.Create(_searchState.Llt.Allocator, entryId | RemovalMask));
+            var nodeId = NodeIdOf(vectorReference);
+            postingList = (ReferenceTo(hashBuffer.ToReadOnlySpan(), nodeId), _searchState.GetNodeIndexById(nodeId), NativeList<long>.Create(_searchState.Llt.Allocator, entryId | RemovalMask));
         }
 
         /// <summary>
@@ -1245,7 +1245,7 @@ public unsafe partial class Hnsw
         /// </summary>
         /// <param name="entryId">The ID of the document (source).</param>
         /// <param name="vector">The vector's data.</param>
-        /// <returns>The CompactKey address of the hash calculated from the vector, which will be required for removal.</returns>
+        /// <returns>The vector's reference, which removal requires.</returns>
         public ByteString Register(long entryId, ReadOnlySpan<byte> vector)
         {
             entryId = EntryIdToInternalEntryId(entryId);
@@ -1255,14 +1255,14 @@ public unsafe partial class Hnsw
                 vector = NormalizeIntoScratch(vector);
 
             var hashBuffer = ComputeHashFor(vector);
-            ref (ByteString Hash, int NodeIndex, NativeList<long> PostingList) postingList = ref CollectionsMarshal.GetValueRefOrAddDefault(_vectorHashCache, hashBuffer, out var exists);
+            ref (ByteString Reference, int NodeIndex, NativeList<long> PostingList) postingList = ref CollectionsMarshal.GetValueRefOrAddDefault(_vectorHashCache, hashBuffer, out var exists);
             if (exists)
             {
                 // already added this in the current batch
                 ref var l = ref postingList.PostingList;
                 l.Add(_searchState.Llt.Allocator, entryId);
                 _searchState.Llt.Allocator.Release(ref hashBuffer);
-                return postingList.Hash;
+                return postingList.Reference;
             }
 
             var vectorHash = hashBuffer.ToReadOnlySpan();
@@ -1277,16 +1277,24 @@ public unsafe partial class Hnsw
             if (_nodesByVectorId.TryGetValue(vectorId, out var nodeId))
             {
                 int nodeIndex = _searchState.GetNodeIndexById(nodeId);
-                postingList = (hashBuffer, nodeIndex, NativeList<long>.Create(_searchState.Llt.Allocator, entryId));
-                return hashBuffer;
+                postingList = (ReferenceTo(vectorHash, nodeId), nodeIndex, NativeList<long>.Create(_searchState.Llt.Allocator, entryId));
+                return postingList.Reference;
             }
 
             long newNodeId = ++_searchState.Options.CountOfVectors;
             int nodeIdx = _searchState.RegisterVectorNode(newNodeId, vectorId);
             _nodesByVectorId.Add(vectorId, newNodeId);
 
-            postingList = (hashBuffer, nodeIdx, ToPostingListTuple(entryId));
-            return hashBuffer;
+            postingList = (ReferenceTo(vectorHash, newNodeId), nodeIdx, ToPostingListTuple(entryId));
+            return postingList.Reference;
+        }
+
+        private ByteString ReferenceTo(ReadOnlySpan<byte> vectorHash, long nodeId)
+        {
+            _searchState.Llt.Allocator.AllocateDirect(VectorReferenceSize, out var reference);
+            vectorHash.CopyTo(reference.ToSpan());
+            MemoryMarshal.Write(reference.ToSpan()[VectorHashSize..], in nodeId);
+            return reference;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1365,8 +1373,8 @@ public unsafe partial class Hnsw
 
         private ByteString ComputeHashFor(ReadOnlySpan<byte> vector)
         {
-            _searchState.Llt.Allocator.AllocateDirect(Sodium.GenericHashSize, out var hashBuffer);
-            Sodium.GenericHash(vector, hashBuffer.ToSpan());
+            _searchState.Llt.Allocator.AllocateDirect(VectorHashSize, out var hashBuffer);
+            XxHash128.Hash(vector, hashBuffer.ToSpan());
             return hashBuffer;
         }
 
