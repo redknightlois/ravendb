@@ -8,8 +8,14 @@ namespace Voron.Data.Graphs;
 
 public partial class Hnsw
 {
+    // A block of record locations is one page.
+    private const int LocationsPerBlock = (Global.Constants.Storage.PageSize - PageHeader.SizeOf) / sizeof(long);
+
+    /// <summary>The container location of the record of each node, 0 for a node without one, in the blocks that <paramref name="pages"/> locates.</summary>
+    internal static NodeRows RecordLocations(Lookup<Int64LookupKey> pages, HnswIndexCache memo) => new(pages, sizeof(long), LocationsPerBlock, memo?.LocationBlocks);
+
     /// <summary>Whether the values of the nested lookup of a graph are the first pages of row blocks.</summary>
-    internal static bool IsBlockLookup(Slice key) => SliceComparer.AreEqual(key, CodePagesSlice);
+    internal static bool IsBlockLookup(Slice key) => SliceComparer.AreEqual(key, LocationPagesSlice) || SliceComparer.AreEqual(key, CodePagesSlice);
 
     /// <summary>Every page of the row blocks that <paramref name="blocks"/> maps.</summary>
     internal static List<long> BlockPages(Lookup<Int64LookupKey> blocks)
@@ -74,6 +80,13 @@ public partial class Hnsw
             }
 
             return llt.GetPagePointer(pageNumber) + PageHeader.SizeOf + (nodeId - block * _rowsPerBlock) * _rowBytes;
+        }
+
+        /// <summary>The value of an eight byte row, 0 when the snapshot holds no block for it.</summary>
+        public long ReadInt64(LowLevelTransaction llt, long nodeId)
+        {
+            var row = Read(llt, nodeId);
+            return row == null ? 0 : *(long*)row;
         }
 
         /// <summary>The row of the node in a page that the write transaction modifies.</summary>
