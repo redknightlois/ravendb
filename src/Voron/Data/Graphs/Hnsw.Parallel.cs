@@ -157,7 +157,9 @@ public partial class Hnsw
         {
             private readonly SearchState _searchState = parent._searchState;
             private readonly List<int> _candidates = [];
-            private readonly List<int> _nearestIndexes = [];
+            // The beam result of the level above with distances to the inserted vector; it seeds the beam of the level below.
+            private readonly List<(int Index, float Distance)> _levelResults = [];
+            private readonly List<int> _liveIndexes = [];
             private readonly List<int> _indexes = [];
             private readonly List<int> _requiresEdgeFiltering = [];
             private readonly List<int> _pruned = [];
@@ -270,17 +272,16 @@ public partial class Hnsw
                     AddEdgesFromInFlightNodes(ref n, createdNodeIndex);
                 }
 
-                // Inlined descent from the entry point down to level 0, capturing the closest
-                // node at each level. Folding this into the placement loop removes the per-node
-                // enumerator allocation that a yielding helper would produce.
+                // PERF: The greedy descent from the entry point down to the node's top level runs inline in the placement loop, so a placement
+                // allocates no enumerator for it.
+                int startingPointIndex;
                 {
-                    _nearestIndexes.Clear();
                     ClearVisited();
                     MarkVisited(currentNodeIndex);
                     var snalCurrentNodeIndex = _searchState.GetNodeIndexById(EntryPointId);
                     var snalLevel = currentMaxLevel;
                     var snalDistance = float.MaxValue;
-                    while (snalLevel >= 0)
+                    while (snalLevel >= nodeRandomLevel)
                     {
                         do
                         {
@@ -292,16 +293,15 @@ public partial class Hnsw
                             snalDistance = _findNearestWorker.Distance;
                         } while (true);
 
-                        _nearestIndexes.Add(snalCurrentNodeIndex);
                         snalLevel--;
                     }
 
-                    _nearestIndexes.Reverse();
+                    startingPointIndex = snalCurrentNodeIndex;
                 }
-                
+
+                _levelResults.Clear();
                 for (int level = nodeRandomLevel; level >= 0; level--)
                 {
-                    int startingPointIndex = _nearestIndexes[level];
 
                     // Inlined NearestEdges(startingPointIndex, currentNodeIndex, insertedVector, level):
                     // beam-search candidate expansion + (conditional) heuristic edge filter. Inlined for
@@ -316,7 +316,23 @@ public partial class Hnsw
                         ClearVisited();
                         MarkVisited(currentNodeIndex); // we can't have an edge to itself
 
-                        _candidatesQ.Enqueue(startingPointIndex, -lowerBound);
+                        if (level == nodeRandomLevel)
+                        {
+                            _candidatesQ.Enqueue(startingPointIndex, -lowerBound);
+                        }
+                        else
+                        {
+                            foreach (var (index, distance) in _levelResults)
+                            {
+                                MarkVisited(index);
+                                _candidatesQ.Enqueue(index, distance);
+                                _nearestEdgesQ.Enqueue(index, -distance);
+                            }
+
+                            _nearestEdgesQ.TryPeek(out _, out lowerBound);
+                        }
+
+                        parent._forTestingPurposes?.OnBeamStarted?.Invoke(level, nodeRandomLevel, _candidatesQ.Count);
 
                         while (_candidatesQ.TryDequeue(out var cur, out var curDistance))
                         {
@@ -331,9 +347,11 @@ public partial class Hnsw
 
                         _candidatesQ.Clear();
                         _candidates.Clear();
-                        while (_nearestEdgesQ.TryDequeue(out var edgeId, out _))
+                        _levelResults.Clear();
+                        while (_nearestEdgesQ.TryDequeue(out var edgeId, out var negatedDistance))
                         {
                             _candidates.Add(edgeId);
+                            _levelResults.Add((edgeId, -negatedDistance));
                         }
                         _candidates.Reverse();
 
@@ -387,8 +405,9 @@ public partial class Hnsw
                         _requiresEdgeFiltering.Add(edgeIdx);
                     }
 
-                    foreach (var edgeIdx in _requiresEdgeFiltering)
+                    for (var filtered = 0; filtered < _requiresEdgeFiltering.Count; filtered++)
                     {
+                        var edgeIdx = _requiresEdgeFiltering[filtered];
                         UnmanagedSpan vector;
                         {
                             ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
@@ -401,29 +420,54 @@ public partial class Hnsw
                         yield return _filterEdgesWorker;
                         
                         PortableExceptions.ThrowIf<InvalidOperationException>(_candidates.Count == 0 , "Cannot add a node to the graph without any edges after heuristic");
-                        {
-                            ref Node edge = ref _searchState.GetNodeByIndex(edgeIdx);
-                            ref var edgeList = ref edge.EdgesPerLevel[level];
-                            edgeList.ResetAndEnsureCapacity(_searchState.Llt.Allocator, _candidates.Count);
-                            foreach (var idx in _candidates)
-                            {
-                                edgeList.AddUnsafe(_searchState.GetNodeByIndex(idx).NodeId);
-                            }
-
-                            // _candidates already holds node indexes, so we can rewrite the
-                            // mirrored cache directly without touching the node id table.
-                            if (edge.EdgesIndexesPerLevel.Count > level)
-                            {
-                                ref var edgeIndexes = ref edge.EdgesIndexesPerLevel[level];
-                                edgeIndexes.ResetAndEnsureCapacity(_searchState.Llt.Allocator, _candidates.Count);
-                                foreach (var idx in _candidates)
-                                {
-                                    edgeIndexes.AddUnsafe(idx);
-                                }
-                            }
-                        }
+                        ReplaceEdges(edgeIdx, level);
                     }
                 }
+            }
+
+            /// <summary>
+            /// Rewrites the list of a node at a level to the heuristic selection in <see cref="_candidates"/>, which was made from the
+            /// snapshot taken when the work was dispatched. Ids that other placements appended since then are kept, and the list is
+            /// selected again when they put it over the cap.
+            /// </summary>
+            private void ReplaceEdges(int nodeIndex, int level)
+            {
+                parent._forTestingPurposes?.BeforeEdgesReplaced?.Invoke(_searchState, nodeIndex, level);
+                _liveIndexes.Clear();
+                foreach (var id in _searchState.GetNodeByIndex(nodeIndex).EdgesPerLevel[level].ToSpan())
+                    _liveIndexes.Add(_searchState.GetNodeIndexById(id));
+
+                var selected = _candidates.Count;
+                foreach (var idx in _liveIndexes)
+                {
+                    if (_edgeIndexSnapshot.Contains(idx) is false)
+                        _candidates.Add(idx);
+                }
+
+                var keptBackLinks = _candidates.Count > selected;
+
+                ref Node node = ref _searchState.GetNodeByIndex(nodeIndex);
+                ref var list = ref node.EdgesPerLevel[level];
+                list.ResetAndEnsureCapacity(_searchState.Llt.Allocator, _candidates.Count);
+                foreach (var idx in _candidates)
+                {
+                    list.AddUnsafe(_searchState.GetNodeByIndex(idx).NodeId);
+                }
+
+                // PERF: The candidates are node indexes, so the list of edge indexes is rewritten from them without a lookup in the node id table.
+                if (node.EdgesIndexesPerLevel.Count > level)
+                {
+                    ref var edgeIndexes = ref node.EdgesIndexesPerLevel[level];
+                    edgeIndexes.ResetAndEnsureCapacity(_searchState.Llt.Allocator, _candidates.Count);
+                    foreach (var idx in _candidates)
+                    {
+                        edgeIndexes.AddUnsafe(idx);
+                    }
+                }
+
+                if (keptBackLinks && _candidates.Count > _searchState.Options.MaxEdgesAtLevel(level))
+                    _requiresEdgeFiltering.Add(nodeIndex);
+                parent._forTestingPurposes?.AfterEdgesReplaced?.Invoke(_searchState, nodeIndex, level);
             }
 
             private void AddEdgesFromInFlightNodes(ref Node n, int createdNodeIndex)
