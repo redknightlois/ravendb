@@ -591,14 +591,15 @@ public sealed unsafe partial class IndexSearcher : IDisposable
     internal Hnsw.SearchState GetOrCreateVectorSearchState(Slice fieldName)
     {
         _vectorSearchStateCache ??= new(SliceComparer.Instance);
-        ref var state = ref CollectionsMarshal.GetValueRefOrAddDefault(_vectorSearchStateCache, fieldName, out bool exists);
-        if (exists == false)
-        {
-            // Look for a shared HnswIndexCache for this field
-            HnswIndexCache nodeCache = null;
-            _vectorNodeCaches?.TryGetValue(fieldName, out nodeCache);
-            state = new Hnsw.SearchState(_transaction.LowLevelTransaction, fieldName, nodeCache);
-        }
+        if (_vectorSearchStateCache.TryGetValue(fieldName, out var state))
+            return state;
+
+        // Look for a shared HnswIndexCache for this field
+        HnswIndexCache nodeCache = null;
+        _vectorNodeCaches?.TryGetValue(fieldName, out nodeCache);
+        // Cached only once constructed: a constructor that throws leaves no entry for Dispose or a later lookup to find.
+        state = new Hnsw.SearchState(_transaction.LowLevelTransaction, fieldName, nodeCache);
+        _vectorSearchStateCache.Add(fieldName, state);
         return state;
     }
 

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
+using Corax.Querying;
 using Voron.Util;
 using Tests.Infrastructure;
 using Voron;
@@ -196,6 +197,15 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
         AssertRefused(llt => Hnsw.ApproximateNearest(llt, treeName, 8, query, 0f));
         AssertRefused(llt => Hnsw.ExactNearest(llt, treeName, 8, query, 0f, hasFilterMatch: false));
         AssertRefused(llt => HnswIndexCache.WarmFromScratch(llt, treeName, maxNodes: 100));
+
+        // A Corax searcher reports the refusal on every lookup and disposes cleanly, so the refusal is what a query sees.
+        using (var tx = Env.ReadTransaction())
+        {
+            var searcher = new IndexSearcher(tx, null);
+            Assert.Throws<NotSupportedException>(() => searcher.GetOrCreateVectorSearchState(treeName));
+            Assert.Throws<NotSupportedException>(() => searcher.GetOrCreateVectorSearchState(treeName));
+            searcher.Dispose();
+        }
 
         Assert.Equal(before, StoredBytes());
 
