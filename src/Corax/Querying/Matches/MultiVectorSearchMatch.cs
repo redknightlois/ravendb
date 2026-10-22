@@ -149,6 +149,7 @@ public struct MultiVectorSearchMatch : IQueryMatch
 
         _matches.Init(_indexSearcher.Allocator, 128);
         _distances.Init(_indexSearcher.Allocator, 128);
+        var filter = _filterQuery != null ? _filterResults : null;
         for (var i = 0; i < _vectorsToSearch.Length; ++i)
         {
             // Invariant: when a new retriever starts, the shared priority queues on SearchState
@@ -159,8 +160,8 @@ public struct MultiVectorSearchMatch : IQueryMatch
             var vector = _vectorsToSearch[i].GetEmbeddingMemory();
             var vectorSearcher = (_isExact) switch
             {
-                _ when _scanningQuery => Hnsw.ExactNearest(sharedSearchState, _numberOfCandidates, vector, _minimumMatch, false, _nodesIdsToScan),
-                true => Hnsw.ExactNearest(sharedSearchState, _numberOfCandidates, vector, _minimumMatch, _filterQuery != null, null),
+                _ when _scanningQuery => Hnsw.ExactNearest(sharedSearchState, _numberOfCandidates, vector, _minimumMatch, nodesToScan: _nodesIdsToScan),
+                true => Hnsw.ExactNearest(sharedSearchState, _numberOfCandidates, vector, _minimumMatch, filter),
                 false when _filterQuery != null => Hnsw.ApproximateFilteredNearest(sharedSearchState, _numberOfCandidates, vector, _minimumMatch, new IndexSearcher.VectorSearchUtils.RandomNodesFromFilterEnumerator(_indexSearcher, _metadata, _filterResults!.Value, _random)),
                 false => Hnsw.ApproximateNearest(sharedSearchState, _numberOfCandidates, vector, _minimumMatch, _filterQuery != null),
             };
