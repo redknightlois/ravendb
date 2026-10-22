@@ -1,4 +1,8 @@
-﻿using System.Runtime.InteropServices;
+﻿using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Runtime.InteropServices;
 using Raven.Client.Documents.Queries.Vector;
 using Raven.Server.Config;
 using Tests.Infrastructure;
@@ -46,6 +50,55 @@ public class Int8VectorSimilarityTests : RavenTestBase
         }
     }
 
+    [RavenFact(RavenTestCategory.Vector)]
+    public void AllZeroVectorConvertsToInt8WithZeroScale()
+    {
+        var int8 = VectorQuantizer.ToInt8(new float[16]);
+
+        // 16 components and the magnitude stored as four bytes.
+        Assert.Equal(new sbyte[20], int8);
+    }
+
+    // 127 / 1e-38 and 127 / 2e-37 overflow float32, so a subnormal and a small normal largest component have no scale, as a NaN component and an infinite one have none.
+    [RavenFact(RavenTestCategory.Vector)]
+    public void VectorWithoutAFiniteScaleConvertsToInt8Zeros()
+    {
+        float[][] vectors = [[1e-38f, 0], [2e-37f, 0], [3e-37f, 1e-37f], [float.NaN, 1], [float.PositiveInfinity, 1], [1, float.NegativeInfinity]];
+        foreach (var vector in vectors)
+            Assert.Equal(new sbyte[vector.Length + sizeof(float)], VectorQuantizer.ToInt8(vector));
+    }
+
+    [RavenFact(RavenTestCategory.Vector)]
+    public void FiniteVectorKeepsItsInt8BytesAndMagnitude()
+    {
+        var int8 = VectorQuantizer.ToInt8([1f, -0.5f, 0f]);
+
+        Assert.Equal(new sbyte[] { 127, -64, 0 }, int8[..3]);
+        Assert.Equal(1f, MemoryMarshal.Cast<sbyte, float>(int8.AsSpan(3))[0]);
+    }
+
+    [RavenTheory(RavenTestCategory.Indexes | RavenTestCategory.Vector)]
+    [RavenData(SearchEngineMode = RavenSearchEngineMode.Corax, DatabaseMode = RavenDatabaseMode.Single)]
+    public void AllZeroVectorIsIndexedAndDoesNotChangeTheOtherResults(Options options)
+    {
+        using var store = GetDocumentStore(options);
+        using (var session = store.OpenSession())
+        {
+            session.Store(new Dto { Id = "dtos/1", EmbeddingSingles = Vector1 });
+            session.Store(new Dto { Id = "dtos/2", EmbeddingSingles = Vector2 });
+            session.Store(new Dto { Id = "dtos/3", EmbeddingSingles = new float[Vector1.Length] });
+            session.SaveChanges();
+
+            IEnumerable<string> Search(float minimumSimilarity) => session.Advanced
+                .RawQuery<Dto>($"from 'Dtos' where vector.search(embedding.f32_i8('EmbeddingSingles'), $p0, {minimumSimilarity.ToString(CultureInfo.InvariantCulture)}) order by score()")
+                .AddParameter("$p0", Vector1).ToList().Select(d => d.Id);
+
+            Assert.Equal(["dtos/1", "dtos/2"], Search(0.75f));
+            // The zero vector is at distance 1 from any other vector, so it is stored and found below similarity 0.5.
+            Assert.Equal(["dtos/1", "dtos/2", "dtos/3"], Search(0.4f));
+        }
+    }
+
     private class QueryResult
     {
         public float Score { get; set; }
@@ -53,6 +106,7 @@ public class Int8VectorSimilarityTests : RavenTestBase
 
     private class Dto
     {
+        public string Id { get; set; }
         public float[] EmbeddingSingles { get; set; }
     }
 
