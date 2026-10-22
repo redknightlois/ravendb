@@ -773,7 +773,7 @@ public partial class Hnsw
                 {
                     // Mirror is stale: rebuild edgesIndexes AND, in the same pass, force-load any
                     // edge whose vector is still lazy. This is the only path that introduces
-                    // freshly cache-resolved nodes (CopyNodeFromCache leaves _vectorSpan default),
+                    // freshly loaded nodes (a loaded record leaves _vectorSpan default),
                     // so once we walk it, every entry in edgesIndexes references a Node with
                     // VectorLoaded=true. _vectorSpan never resets, so subsequent calls on this
                     // (node, level) keep that invariant — letting us skip the per-edge VectorLoaded

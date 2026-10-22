@@ -20,8 +20,7 @@ public partial class Hnsw
         // Hot fields read by the search inner loop are colocated at the start of the struct so a
         // single cache line covers PostingListId (tombstone check), _vectorSpan (kernel input),
         // Visited (RW per candidate), and the QueryDistance memo. VectorId / NodeId follow to keep
-        // line 0 saturated; the resolve-only fields (EdgesPerLevel / EdgesIndexesPerLevel /
-        // Cached*) land on line 1.
+        // line 0 saturated; the resolve-only fields (EdgesPerLevel / EdgesIndexesPerLevel) land on line 1.
         public long PostingListId;
         internal UnmanagedSpan _vectorSpan;
         public int Visited;
@@ -50,37 +49,6 @@ public partial class Hnsw
 
         // True when an edge from the node fromNodeId would be this node's only in-link from an older node.
         internal bool NeedsOlderInLinkFrom(long fromNodeId) => fromNodeId < NodeId && OlderInLinks == 0;
-
-        // When non-null, this node's edge data lives in the HnswIndexCache buffer rather than in
-        // EdgesPerLevel. Set during search-side LoadNodeIndexes when the node hits the cache and
-        // the alternative copy was elided. Indexing-side code paths never set this pointer and
-        // continue to read/write EdgesPerLevel as before.
-        internal HnswIndexCache.CachedNodeHeader* CachedHeader;
-        internal int* CachedOffsets;
-        internal long* CachedEdges;
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal int GetLevelCount() => CachedHeader != null ? CachedHeader->LevelCount : EdgesPerLevel.Count;
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal int EdgeCountAtLevel(int level)
-        {
-            if (CachedHeader != null)
-                return CachedOffsets[level + 1] - CachedOffsets[level];
-            return EdgesPerLevel[level].Count;
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal ReadOnlySpan<long> EdgesAtLevel(int level)
-        {
-            if (CachedHeader != null)
-            {
-                int start = CachedOffsets[level];
-                int end = CachedOffsets[level + 1];
-                return new ReadOnlySpan<long>(CachedEdges + start, end - start);
-            }
-            return EdgesPerLevel[level].ToSpan();
-        }
 
         public bool VectorLoaded => _vectorSpan.Length > 0;
 

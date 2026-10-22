@@ -209,10 +209,7 @@ public unsafe partial class Hnsw
         private readonly bool _carriesCodes;
         private readonly int _codeRowBytes;
         private readonly NodeRows _codeRows;
-        private readonly HnswIndexCache _nodeCache;
-        // Fixed at construction. Lookups gate the shared cache on this so a reader at
-        // storage tx R never observes an entry stamped by a later commit.
-        private readonly long _readerTxId;
+        private readonly HnswIndexCache _cache;
         private ByteStringContext<ByteStringMemoryCache>.InternalScope? _queryNormalizationScope;
 
         public Span<Node> Nodes => _nodes.ToSpan();
@@ -294,11 +291,10 @@ public unsafe partial class Hnsw
                 _queryNormalizationScope = scope;
         }
 
-        public SearchState(LowLevelTransaction llt, Slice name, HnswIndexCache nodeCache)
+        public SearchState(LowLevelTransaction llt, Slice name, HnswIndexCache cache)
         {
             Llt = llt;
-            _nodeCache = nodeCache;
-            _readerTxId = llt.Id;
+            _cache = cache;
             _tree = llt.Transaction.ReadTree(name);
 
             if (_tree is null || _tree.TryGetLookupFor(NodeIdToLocationSlice, out _nodeIdToLocations) == false)
@@ -307,19 +303,16 @@ public unsafe partial class Hnsw
                 return;
             }
 
-            // Options must come from disk: CountOfVectors (and the derived MaxLevel) advances
-            // with every commit, while the cache snapshot is frozen at warm-up time. Using the
-            // cached value would route the search from a level the entry point never reached.
             Options = ReadOptions(_tree);
             _carriesCodes = Options.SimilarityMethod == SimilarityMethod.CosineSimilaritySingles;
             if (_carriesCodes)
             {
                 _codeRowBytes = CodeParameters.RowBytesOf((Options.VectorSizeBytes - MagnitudeSizeInBytes) / sizeof(float));
-                _codeRows = new NodeRows(_tree.LookupFor<Int64LookupKey>(CodePagesSlice), _codeRowBytes, Options.CodeRowsPerBlock, _nodeCache?.CodeBlocks);
+                _codeRows = new NodeRows(_tree.LookupFor<Int64LookupKey>(CodePagesSlice), _codeRowBytes, Options.CodeRowsPerBlock, _cache?.CodeBlocks);
             }
-            SimilarityCalc = _nodeCache != null ? _nodeCache.SimilarityCalc : GetDistanceKernel(Options);
+            SimilarityCalc = GetDistanceKernel(Options);
 
-            if (_nodeCache != null)
+            if (_cache != null)
             {
                 // Skip ~7 NativeList<Node>.Grow doublings (and Dictionary rehashes) for the typical
                 // per-query visit set when a shared cache is attached. ByteStringMemoryCache.Allocate
@@ -327,12 +320,6 @@ public unsafe partial class Hnsw
                 _nodes.Initialize(llt.Allocator, InitialNodesCapacityWithCache);
                 _nodeIdToIdx.EnsureCapacity(InitialNodesCapacityWithCache);
             }
-
-            // Lazy lookup only: LoadNodeIndexes / GetNodeIndexById probe the shared cache
-            // on demand. Eagerly materializing the entire cache into a per-query SearchState
-            // dominated query wall (~49% in dotnet-trace) because the prepop work isn't
-            // amortized — each Corax query builds its own IndexSearcher and SearchState.
-            // Call PrepopulateFromNodeCache() explicitly for long-lived/batch SearchStates only.
         }
 
         private const int InitialNodesCapacityWithCache = 256;
@@ -397,68 +384,6 @@ public unsafe partial class Hnsw
             return nodeIndex;
         }
 
-        /// <summary>
-        /// Materialize one local Node per cache entry up front so every dictionary probe in the
-        /// search hot path takes the cached fast path. Vector spans are resolved through the
-        /// shared LLT here, eliminating the per-candidate Container.Get walk; edge ids are
-        /// pre-translated to local node indexes for each level. Suitable for batch and long-lived
-        /// SearchStates only — per-query SearchStates would pay the prepop cost without
-        /// amortizing it across queries.
-        /// </summary>
-        public void PrepopulateFromNodeCache()
-        {
-            if (_nodeCache is null)
-                return;
-
-            // Pass 1: allocate a local Node and copy cache pointers.
-            _nodeCache.ForEachNode(_readerTxId, (nodeId, view) =>
-            {
-                int idx = AllocateNodeIndex(nodeId);
-                CopyNodeFromCache(in view, ref _nodes[idx]);
-                _nodeIdToIdx[nodeId] = idx;
-            });
-
-            // Pass 2: resolve vector spans so QueryDistance miss path skips Container.Get.
-            var self = this;
-            for (int i = 0; i < _nodes.Count; i++)
-            {
-                ref var node = ref _nodes[i];
-                if (node.VectorLoaded)
-                    continue;
-                var span = NodeReader.ReadVector(node.VectorId, in self);
-                node.SetVector(in Options, span);
-            }
-
-            // Pass 3: pre-translate edges per level into EdgesIndexesPerLevel so ResolveEdgeIndexes
-            // takes its fast path on first visit.
-            var translation = new NativeList<int>();
-            for (int i = 0; i < _nodes.Count; i++)
-            {
-                ref var node = ref _nodes[i];
-                int levels = node.GetLevelCount();
-                node.EdgesIndexesPerLevel.SetCapacity(Llt.Allocator, levels);
-                for (int lvl = 0; lvl < levels; lvl++)
-                {
-                    var edges = node.EdgesAtLevel(lvl);
-                    translation.ResetAndEnsureCapacity(Llt.Allocator, edges.Length);
-                    for (int e = 0; e < edges.Length; e++)
-                    {
-                        if (_nodeIdToIdx.TryGetValue(edges[e], out var idx) == false)
-                        {
-                            // Edge target not in cache: leave EdgesIndexesPerLevel[lvl] empty so
-                            // ResolveEdgeIndexes falls through to the slow path on first visit.
-                            translation.Clear();
-                            break;
-                        }
-                        translation.AddUnsafe(idx);
-                    }
-                    if (translation.Count == edges.Length)
-                        node.EdgesIndexesPerLevel[lvl].ResetAndCopyFrom(Llt.Allocator, translation.ToSpan());
-                }
-            }
-            translation.Dispose(Llt.Allocator);
-        }
-
         public bool TryGetLocationForNode(long nodeId, out long locationId) =>
             _nodeIdToLocations.TryGetValue(nodeId, out locationId);
 
@@ -481,30 +406,6 @@ public unsafe partial class Hnsw
         }
 
         /// <summary>
-        /// Populate a local node from the shared HnswIndexCache. Edge slices are copied into
-        /// local <see cref="NativeList{T}"/>s because NativeLists can't be shared across
-        /// allocator boundaries. Vector span is left default — <see cref="Node.GetVectorUnmanagedSpan"/>
-        /// lazily resolves it via <c>Llt</c>, which is consistent with the cache because the
-        /// publication invariant guarantees the cache reflects state visible to this
-        /// transaction's snapshot.
-        /// </summary>
-        private void CopyNodeFromCache(in HnswIndexCache.CachedNodeView cached, ref Node local)
-        {
-            local.NodeId = cached.Header->NodeId;
-            local.PostingListId = cached.Header->PostingListId;
-            local.VectorId = cached.Header->VectorId;
-            // Per-query scratch (Visited, QueryDistance*) stays at default; vector span is
-            // resolved on first use.
-
-            // Bind the cache-resident topology into the Node so EdgesAtLevel / EdgeCountAtLevel
-            // read directly from the cache buffer. EdgesPerLevel is left empty: indexing-side
-            // code paths never traverse a Node loaded through this method.
-            local.CachedHeader = cached.Header;
-            local.CachedOffsets = cached.Offsets;
-            local.CachedEdges = cached.Edges;
-        }
-
-        /// <summary>
         /// Resolves edge indexes for a node at the specified level, caching the result in
         /// <see cref="Node.EdgesIndexesPerLevel"/>. On cache hit the expensive
         /// <see cref="LoadNodeIndexes"/> dictionary lookups are skipped entirely.
@@ -519,7 +420,7 @@ public unsafe partial class Hnsw
             // Fast path: the resolved indexes for this level are already cached on the node.
             // The slow path (miss) is in a NoInlining helper so only this copy is inlined into
             // callers inside the search loop.
-            int edgeCount = node.EdgeCountAtLevel(level);
+            int edgeCount = node.EdgesPerLevel[level].Count;
             if (node.EdgesIndexesPerLevel.Count > level &&
                 node.EdgesIndexesPerLevel[level].Count == edgeCount)
             {
@@ -534,7 +435,7 @@ public unsafe partial class Hnsw
         private void ResolveEdgeIndexesSlow(int nodeIndex, int level, CodeScreen screen, double threshold, ref NativeList<long> nodeIds, ref NativeList<int> indexes)
         {
             ref var node = ref GetNodeByIndex(nodeIndex);
-            nodeIds.ResetAndCopyFrom(Llt.Allocator, node.EdgesAtLevel(level));
+            nodeIds.ResetAndCopyFrom(Llt.Allocator, node.EdgesPerLevel[level].ToSpan());
             var edgeCount = nodeIds.Count;
             LoadNodeIndexes(ref nodeIds, ref indexes, screen, threshold);
 
@@ -554,7 +455,7 @@ public unsafe partial class Hnsw
         /// The indexes are listed in the order of the given ids, whatever resolved each node before, so the order of an evaluation never depends
         /// on the nodes that a screened traversal left unresolved.
         /// With a <paramref name="screen"/>, the ids that it rejects against <paramref name="threshold"/>, now or earlier in the traversal, are dropped.
-        /// An id that this SearchState holds is resolved and is never checked: with the HnswIndexCache attached, an id that only the cache holds is checked.
+        /// An id that this SearchState holds is resolved and is never checked.
         /// </summary>
         private unsafe void LoadNodeIndexes(ref NativeList<long> nodeIds, ref NativeList<int> indexes, CodeScreen screen, double threshold)
         {
@@ -578,19 +479,8 @@ public unsafe partial class Hnsw
             {
                 var id = nodeIds[i];
                 var index = indexes[i];
-                if (index < 0)
-                {
-                    if (screen is not null && ScreenRejects(screen, screening, id, (byte*)rows[i], threshold))
-                        continue;
-
-                    // Check the shared HnswIndexCache before going to disk
-                    if (_nodeCache != null && _nodeCache.TryGetNode(id, _readerTxId, out var cached))
-                    {
-                        index = AllocateNodeIndex(id);
-                        CopyNodeFromCache(in cached, ref _nodes[index]);
-                        _nodeIdToIdx[id] = index;
-                    }
-                }
+                if (index < 0 && screen is not null && ScreenRejects(screen, screening, id, (byte*)rows[i], threshold))
+                    continue;
 
                 // The slot of an unresolved id holds -1 until its record is read below.
                 indexes[kept] = index;
@@ -632,18 +522,6 @@ public unsafe partial class Hnsw
             ref var nodeIdx = ref CollectionsMarshal.GetValueRefOrAddDefault(_nodeIdToIdx, nodeId, out var exists);
             if (exists)
                 return nodeIdx;
-
-            // The shared HnswIndexCache is optimistic — a stale entry would have to be tolerated
-            // by every consumer, which the entry point cannot do: its cached LevelCount sets
-            // maxLevel for the entire descent. Reading it from disk costs one extra container
-            // fetch per query but keeps the search routed correctly when the graph has grown
-            // past the warm-up snapshot.
-            if (nodeId != EntryPointId && _nodeCache != null && _nodeCache.TryGetNode(nodeId, _readerTxId, out var cached))
-            {
-                nodeIdx = AllocateNodeIndex(nodeId);
-                CopyNodeFromCache(in cached, ref GetNodeByIndex(nodeIdx));
-                return nodeIdx;
-            }
 
             if (TryGetLocationForNode(nodeId, out var nodeLocation) is false)
                 throw new InvalidOperationException($"Unable to find node id {nodeId}");
@@ -813,7 +691,7 @@ public unsafe partial class Hnsw
                 do
                 {
                     moved = false;
-                    Debug.Assert(GetNodeByIndex(currentNodeIndex).GetLevelCount() > level, "n.GetLevelCount() > level");
+                    Debug.Assert(GetNodeByIndex(currentNodeIndex).EdgesPerLevel.Count > level, "n.EdgesPerLevel.Count > level");
                     ResolveEdgeIndexes(currentNodeIndex, level, screen, distance, ref nodeIds, ref indexes);
                     for (var i = 0; i < indexes.Count; i++)
                     {
@@ -1002,13 +880,6 @@ public unsafe partial class Hnsw
         public bool IsCommited { get; private set; }
         private readonly Dictionary<ByteString, (ByteString Key, int NodeIndex, NativeList<long> PostingList)> _vectorHashCache = new(ByteStringContentComparer.Instance);
 
-        /// <summary>
-        /// Node ids whose persisted record was written or rewritten during this commit. The
-        /// post-commit cache update (HnswIndexCache.ApplyCommit) consumes this set to bring the
-        /// in-memory cache forward without re-running BFS from the entry point. Populated by
-        /// the persistence loop in Commit.
-        /// </summary>
-        public HashSet<long> DirtyNodeIds { get; } = new();
         private readonly Lookup<Int64LookupKey> _nodesByVectorId;
         private SearchState _searchState;
         public Random Random;
@@ -1387,10 +1258,7 @@ public unsafe partial class Hnsw
 
             nodes = _searchState.Nodes;
             for (int i = 0; i < nodes.Length; i++)
-            {
                 PersistNode(ref nodes[i], ref byteBuffer);
-                DirtyNodeIds.Add(nodes[i].NodeId);
-            }
 
             WriteCodes();
 

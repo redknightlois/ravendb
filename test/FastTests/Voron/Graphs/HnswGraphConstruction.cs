@@ -196,7 +196,6 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
         AssertRefused(llt => Hnsw.RegistrationFor(llt, treeName), write: true);
         AssertRefused(llt => Hnsw.ApproximateNearest(llt, treeName, 8, query, 0f));
         AssertRefused(llt => Hnsw.ExactNearest(llt, treeName, 8, query, 0f, hasFilterMatch: false));
-        AssertRefused(llt => HnswIndexCache.WarmFromScratch(llt, treeName, maxNodes: 100));
 
         // A Corax searcher reports the refusal on every lookup and disposes cleanly, so the refusal is what a query sees.
         using (var tx = Env.ReadTransaction())
@@ -323,19 +322,37 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
     public void ListsPastTheCapEncodeAndDecodeOnBothReadPaths()
     {
         Build(RandomVectors(2000, seed: 6), commits: 1, tasks: 1, seed: 6, beam: 16);
-        var stored = ReadBaseLayer().ToDictionary(n => n.Id);
-        Assert.True(stored.Values.Max(n => n.Edges.Length) > Cap);
+        var stored = ReadBaseLayer();
+        Assert.True(stored.Max(n => n.Edges.Length) > Cap);
 
         using var tx = Env.ReadTransaction();
-        using var treeName = Slice.From(Allocator, TreeName, out var slice);
-        using var cache = HnswIndexCache.WarmFromScratch(tx.LowLevelTransaction, slice, maxNodes: 10_000);
-        var cached = 0;
-        cache.ForEachNode(tx.LowLevelTransaction.Id, (id, view) =>
+        using var state = new Hnsw.SearchState(tx.LowLevelTransaction, TreeName);
+        var edges = new List<long>();
+        foreach (var node in stored)
         {
-            cached++;
-            Assert.Equal(stored[id].Edges, view.EdgesAtLevel(0).ToArray());
-        });
-        Assert.True(cached > 0);
+            state.ReadNode(node.Id, out var reader);
+            reader.ReadEdges(edges);
+            Assert.Equal(node.Edges, edges);
+        }
+    }
+
+    // RavenDB-26809: under parallel placement a worker dereferences a pointer into the node array while the LLT thread may grow it.
+    // Growth must retain the grown-from buffer instead of freeing it, so the worker never reads freed memory.
+    [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
+    public void GrowingNodeArrayRetainsGrownFromBuffer()
+    {
+        using var _ = Slice.From(Allocator, TreeName, out var treeName);
+        using (var tx = Env.WriteTransaction())
+        {
+            Hnsw.Create(tx.LowLevelTransaction, treeName, 16 * sizeof(float), Edges, numberOfCandidates: 16, VectorEmbeddingType.Single);
+            tx.Commit();
+        }
+
+        using var rtx = Env.ReadTransaction();
+        using var state = new Hnsw.SearchState(rtx.LowLevelTransaction, treeName);
+        Assert.True(state.ForceGrowNodesForTesting(), "node array did not move");
+        Assert.True(state.ForceGrowNodesForTesting(), "node array did not move");
+        Assert.Equal(2, state.RetiredNodeStorageCountForTesting);
     }
 
     private IReadOnlyList<byte[]> Build(float[][] vectors, int commits, int tasks, int seed, int beam, Action<Hnsw.Registration.TestingStuff> testing = null, int edges = Edges, string treeName = TreeName)

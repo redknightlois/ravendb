@@ -46,7 +46,6 @@ class configurationItem {
         "Indexing.Corax.MaxAllocationsAtDictionaryTrainingInMb",
         "Indexing.Corax.Static.ComplexFieldIndexingBehavior",
         "Indexing.Corax.UnmanagedAllocationsBatchSizeLimitInMb",
-        "Indexing.Corax.VectorSearch.CacheSizeInMb",
         "Indexing.Corax.VectorSearch.DefaultMinimumSimilarity",
         "Indexing.Corax.VectorSearch.DefaultNumberOfEdges",
         "Indexing.Corax.VectorSearch.DefaultNumberOfCandidatesForIndexing",

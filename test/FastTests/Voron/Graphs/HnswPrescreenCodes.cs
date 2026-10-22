@@ -86,14 +86,7 @@ public class HnswPrescreenCodes(ITestOutputHelper output) : StorageTest(output)
     public void TheCacheMapsEachBlockToItsCommittedPage()
     {
         Build(TreeName, [Around(0, 300, 1)]);
-        HnswIndexCache cache;
-        using (var warm = Env.ReadTransaction())
-        {
-            using var name = Slice.From(warm.Allocator, TreeName, out var slice);
-            cache = HnswIndexCache.WarmFromScratch(warm.LowLevelTransaction, slice, maxNodes: 1000);
-        }
-
-        using var _ = cache;
+        var cache = new HnswIndexCache();
         AssertEveryCodeReEncodes(cache);
 
         using (var rolledBack = Env.WriteTransaction())
