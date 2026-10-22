@@ -48,7 +48,7 @@ public unsafe partial class Hnsw
         // global creation for all HNSWs in the database
         var vectorsContainerId = CreateHnswGlobalState(llt);
         ContainerId storage = Container.Create(llt);
-        tree.LookupFor<Int64LookupKey>(NodeIdToLocationSlice);
+        tree.LookupFor<Int64LookupKey>(LocationPagesSlice);
         tree.LookupFor<Int64LookupKey>(NodesByVectorIdSlice);
 
         var similarityMethod = embeddingType switch
@@ -133,7 +133,7 @@ public unsafe partial class Hnsw
     /// A graph tree holds raw values beside its nested lookups, so a walker of the graph tree reads a root object header only under these keys.
     /// </summary>
     internal static bool IsNestedLookup(Slice key) =>
-        SliceComparer.AreEqual(key, NodeIdToLocationSlice) || SliceComparer.AreEqual(key, NodesByVectorIdSlice) || SliceComparer.AreEqual(key, CodePagesSlice);
+        SliceComparer.AreEqual(key, LocationPagesSlice) || SliceComparer.AreEqual(key, NodesByVectorIdSlice) || SliceComparer.AreEqual(key, CodePagesSlice);
 
     /// <summary>
     /// Translates a minimum similarity on the [0, 1] scale into the maximum distance the similarity method reports for
@@ -201,7 +201,7 @@ public unsafe partial class Hnsw
         private NativeList<Node> _nodes = default;
         private NativeList<int> _newNodes = default;
         private readonly Tree _tree;
-        private readonly Lookup<Int64LookupKey> _nodeIdToLocations;
+        private readonly NodeRows _locations;
         public readonly LowLevelTransaction Llt;
         // _visitsCounter versions Node.Visited; every traversal start bumps it so the visited
         // set is reset in O(1). _queryVectorVersion versions Node.QueryDistanceVersion; it is
@@ -306,13 +306,14 @@ public unsafe partial class Hnsw
             _cache = cache;
             _tree = llt.Transaction.ReadTree(name);
 
-            if (_tree is null || _tree.TryGetLookupFor(NodeIdToLocationSlice, out _nodeIdToLocations) == false)
+            if (_tree is null)
             {
                 IsEmpty = true;
                 return;
             }
 
             Options = ReadOptions(_tree);
+            _locations = RecordLocations(_tree.LookupFor<Int64LookupKey>(LocationPagesSlice), _cache);
             var codeDimensions = CodeDimensions(Options.SimilarityMethod, Options.VectorSizeBytes);
             _carriesCodes = codeDimensions > 0;
             if (_carriesCodes)
@@ -395,10 +396,13 @@ public unsafe partial class Hnsw
         }
 
         public bool TryGetLocationForNode(long nodeId, out long locationId) =>
-            _nodeIdToLocations.TryGetValue(nodeId, out locationId);
+            (locationId = _locations.ReadInt64(Llt, nodeId)) != 0;
 
-        public void RegisterNodeLocation(long nodeId, long locationId) =>
-            _nodeIdToLocations.Add(nodeId, locationId);
+        // A container read gives an empty span for a negative id; a node without a record has location 0.
+        private long RecordLocation(long nodeId) => _locations.ReadInt64(Llt, nodeId) is var location and not 0 ? location : -1;
+
+        public unsafe void RegisterNodeLocation(long nodeId, long locationId) =>
+            *(long*)_locations.Write(Llt, nodeId) = locationId;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ref Node GetNodeByIndex(int index)
@@ -504,7 +508,7 @@ public unsafe partial class Hnsw
             if (unresolved == 0)
                 return;
 
-            Buffers.Get(unresolved, out var keys, out _, out var spans, out var targets, out _);
+            Buffers.Get(unresolved, out var locations, out _, out var spans, out var targets, out _);
             var loading = 0;
             for (int i = 0; i < kept; i++)
             {
@@ -514,15 +518,11 @@ public unsafe partial class Hnsw
                 var nodeIdx = AllocateNodeIndex(nodeIds[i]);
                 _nodeIdToIdx[nodeIds[i]] = nodeIdx;
                 indexes[i] = nodeIdx;
-                keys[loading] = nodeIds[i];
+                locations[loading] = RecordLocation(nodeIds[i]);
                 targets[loading++] = nodeIdx;
             }
 
-            // Lookup.GetFor needs its keys sorted.
-            keys = keys[..loading];
-            keys.Sort(targets[..loading]);
-            _nodeIdToLocations.GetFor(keys, keys, -1);
-            Container.GetAllSortedByPage(Llt, keys, spans, Llt.PageLocator);
+            Container.GetAllSortedByPage(Llt, locations[..loading], spans, Llt.PageLocator);
             for (int i = 0; i < loading; i++)
                 Node.Decode(Llt, spans[i].ToSpan()).LoadInto(ref _nodes[targets[i]]);
         }
@@ -862,7 +862,8 @@ public unsafe partial class Hnsw
                idsToLoad = idsToLoad[..idsToLoadIdx];
                indexesOfIds = indexesOfIds[..idsToLoadIdx];
            
-               _nodeIdToLocations.GetFor(idsToLoad, idsToLoad, -1);
+               for (int i = 0; i < idsToLoad.Length; i++)
+                   idsToLoad[i] = RecordLocation(idsToLoad[i]);
                Container.GetAllSortedByPage(Llt, idsToLoad, spans, Llt.PageLocator);
                for (int i = 0; i < indexesOfIds.Length; i++)
                {
