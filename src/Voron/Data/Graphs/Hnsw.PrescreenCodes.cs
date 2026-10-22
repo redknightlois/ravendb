@@ -5,8 +5,10 @@ using System.IO;
 using System.Numerics;
 using System.Numerics.Tensors;
 using System.Runtime.InteropServices;
+using Sparrow;
 using Sparrow.Server;
 using Sparrow.Server.Tensors;
+using Voron.Util;
 
 namespace Voron.Data.Graphs;
 
@@ -230,6 +232,40 @@ public partial class Hnsw
             }
         }
 
+        /// <summary>
+        /// The slack that a rejection adds to the threshold, as a distance: with the bound L, computed in double from the stored float32 terms, and the
+        /// distance dk that the kernel of the graph returns, L - dk &lt;= Margin except with probability alpha over the draw of the dither, so
+        /// L &gt; threshold + Margin implies dk &gt; threshold. It covers every rounding that the probabilistic bound does not.
+        /// </summary>
+        internal static double Margin(int dimensions)
+        {
+            // A stored unit vector, a query and the center have a norm of at most U = 1 + (D + 3) 2^-23: the float32 norm and the division err by at most
+            // D 2^-25 + 2^-24 and 2^-24 relative, and the center is a mean of such vectors. So n = |u - c| and |z| = |P (q - c)| are at most 2U, because P
+            // is orthogonal. |w| = 1, so max|w_j| <= 1 and the step is s <= 2/15, which puts n s at most 4U/15. A decoded vector errs by at most s/2 per
+            // coordinate, so its norm is at most 1 + sqrt(D) / 15.
+            var epsilon = Math.ScaleB(1, -23);
+            var unit = 1 + (dimensions + 3) * epsilon;
+            var unitSquared = unit * unit;
+            var root = Math.Sqrt(dimensions);
+
+            // T1: the stored n s is rounded up by a relative 2^-23 at most, and the estimate multiplies it by (z·decoded w) / s: 2^-23 times n |z| times the
+            // decoded norm.
+            var storedScale = epsilon * 4 * unitSquared * (1 + root / 15);
+            // T2: the stored c·y is rounded to float32, a relative 2^-24 of |c| |y| <= 2U².
+            var storedCenterTerm = epsilon * unitSquared;
+            // T3: the dither is a multiple of 2^-24, not a continuous draw. The centered error stays within the exp(t²/24) bound, because a discrete uniform
+            // variable has a smaller moment generating function than the continuous one, but its mean is not 0: it is at most 2^-25 steps per coordinate,
+            // which moves the distance by n s 2^-25 |z|_1 <= n s 2^-25 sqrt(D) |z|.
+            var ditherMean = 8 * unitSquared * root * Math.ScaleB(1, -25) / 15;
+            // T4: the double arithmetic of the encoder, the query preparation and the comparison: fewer than 2^8 D operations of relative error 2^-53 on
+            // partial sums of at most 16 sqrt(D) times the factors above, which is below D² 2^-45.
+            var doubleArithmetic = Math.ScaleB((double)dimensions * dimensions, -45);
+            // T5: the kernel. The float32 dot product of D terms errs by at most (D + 1) 2^-24 |q| |u| in any order of summation, and the subtraction from 1
+            // by 2^-24 (1 + |q| |u|). The int8 kernel sums the integers exactly and then rounds a few times, each by 2^-24 relative, which stays under this term.
+            var kernel = (dimensions + 2) * unitSquared * epsilon;
+            return storedScale + storedCenterTerm + ditherMean + doubleArithmetic + kernel;
+        }
+
         // The smallest float32 that is not below the value.
         internal static float RoundUp(double value)
         {
@@ -334,6 +370,7 @@ public partial class Hnsw
         /// <summary>
         /// A lower bound on the cosine distance between the query and the node that holds <paramref name="row"/>, which exceeds the exact distance
         /// with probability at most alpha over the draw of the graph's dither. Negative infinity when there is no bound: the query or the node has no direction.
+        /// It does not cover the roundings that <see cref="CodeParameters.Margin"/> covers.
         /// </summary>
         public double LowerBound(ReadOnlySpan<byte> row)
         {
@@ -354,8 +391,158 @@ public partial class Hnsw
         }
     }
 
+    /// <summary>
+    /// The prescreen of the base-layer traversals of one SearchState, one traversal at a time: before the node record of a neighbor is resolved, the lower
+    /// bound of the neighbor's code may reject it. A screened traversal differs from the one that reads no code with probability at most
+    /// <see cref="FailureBudget"/>. Its buffers come from the allocator it is created with, so it must be disposed before the allocator is.
+    /// </summary>
+    internal sealed unsafe class CodeScreen : IDisposable
+    {
+        internal const double FailureBudget = 0.01;
+
+        private readonly CodeQuery _query;
+        private readonly ByteStringContext _allocator;
+        private long _maxNodeId;
+        // PERF: One bit per node id of the snapshot, so remembering an id is one bit test and set, with no hashing. Allocated at the first rejection and
+        // kept across traversals, which clear only the words that the traversal before set, so the clearing follows the rejections and not the graph.
+        private ulong* _rejected;
+        private long _words;
+        private ByteStringContext<ByteStringMemoryCache>.InternalScope _rejectedScope;
+        private ContextBoundNativeList<int> _setWords;
+
+        public CodeScreen(CodeParameters parameters, ByteStringContext allocator)
+        {
+            Margin = CodeParameters.Margin(parameters.Dimensions);
+            _query = new CodeQuery(parameters, allocator);
+            _allocator = allocator;
+            _setWords = new ContextBoundNativeList<int>(allocator);
+        }
+
+        // A larger working set admits more neighbors before it settles. A traversal that spends the cap loses part of the saving, never correctness.
+        public static int DefaultCap(int numberOfCandidates) => (int)Math.Min(Math.Max(512L, 4L * numberOfCandidates), int.MaxValue);
+
+        public int Cap { get; private set; }
+        public double Margin { get; }
+
+        /// <summary>
+        /// The admission events of the traversal so far: the neighbors whose distance passes the threshold of full queues, so they enter the candidate queue.
+        /// A node with an empty posting list counts too, although it stays out of the working set, because a screened traversal would not expand it.
+        /// </summary>
+        public int Admissions;
+
+        /// <summary>The distinct neighbors rejected so far.</summary>
+        public int Rejected { get; private set; }
+
+        /// <summary>
+        /// Starts a traversal of a snapshot whose node ids end at <paramref name="maxNodeId"/>: prepares the query and forgets the rejections of the
+        /// traversal before.
+        /// </summary>
+        public CodeScreen Begin(ReadOnlySpan<byte> tensor, int cap, long maxNodeId)
+        {
+            // Let U be the traversal without the screen, on the same graph and query: a mathematical object of this proof, not a traversal that runs. U reads
+            // no code, so which neighbors it evaluates, in which order and against which thresholds is fixed before the dither is drawn. The screened
+            // traversal S evaluates the neighbors of U in the same order minus the rejected ones, so it follows U until the first neighbor that S rejects
+            // and U admits. Rejecting an admission event takes a bound above its distance by more than the margin, which has probability at most alpha.
+            // S screens an expansion only while the events so far plus its neighbors fit under the cap, and the events so far are those of U up to the first
+            // difference, so every event that S can reject is among the first cap events of U. Those are fixed, so by the union bound S differs from U with
+            // probability at most cap times alpha, which this alpha makes the budget. Once the cap is spent the rest of the traversal runs unscreened.
+            Cap = cap;
+            Admissions = 0;
+            Rejected = 0;
+            _query.Prepare(tensor, FailureBudget / cap);
+
+            foreach (var word in _setWords.ToSpan())
+                _rejected[word] = 0;
+            _setWords.Clear();
+            if (_rejected != null && maxNodeId >> 6 >= _words)
+            {
+                _rejectedScope.Dispose();
+                _rejected = null;
+            }
+
+            _maxNodeId = maxNodeId;
+            return this;
+        }
+
+        /// <summary>True when each of <paramref name="neighbors"/> checks can still stay inside the cap.</summary>
+        public bool Screens(int neighbors) => (long)Admissions + neighbors <= Cap;
+
+        public bool IsRejected(long nodeId) => _rejected != null && (ulong)nodeId <= (ulong)_maxNodeId && (_rejected[nodeId >> 6] & (1UL << (int)(nodeId & 63))) != 0;
+
+        /// <summary>
+        /// Remembers a rejected neighbor for the rest of the traversal: the threshold only tightens while the queues are full, so the rejection holds against
+        /// every later threshold, and the id is never checked or resolved again. An id outside the snapshot is never remembered: the resolution of the node
+        /// reports it.
+        /// </summary>
+        public void Reject(long nodeId)
+        {
+            if ((ulong)nodeId > (ulong)_maxNodeId)
+                return;
+
+            if (_rejected == null)
+            {
+                _words = (_maxNodeId >> 6) + 1;
+                _rejectedScope = _allocator.Allocate(checked((int)_words * sizeof(ulong)), out ByteString bits);
+                bits.ToSpan().Clear();
+                _rejected = (ulong*)bits.Ptr;
+            }
+
+            ref var word = ref _rejected[nodeId >> 6];
+            var bit = 1UL << (int)(nodeId & 63);
+            if ((word & bit) != 0)
+                return;
+
+            if (word == 0)
+                _setWords.Add((int)(nodeId >> 6));
+            word |= bit;
+            Rejected++;
+        }
+
+        /// <summary>
+        /// True when the code <paramref name="row"/> proves that its node is not admitted at <paramref name="threshold"/>: the bound exceeds it by the margin,
+        /// strictly. The caller screens only while the working set is full, and so are the filter's nearest nodes of a filtered traversal, and the threshold
+        /// is the distance of the farthest entry of the two.
+        /// </summary>
+        public bool Rejects(ReadOnlySpan<byte> row, double threshold) => Exceeds(_query.LowerBound(row), threshold, Margin);
+
+        public static bool Exceeds(double bound, double threshold, double margin) => bound > threshold + margin;
+
+        public void Dispose()
+        {
+            _query.Dispose();
+            _setWords.Dispose();
+            if (_rejected != null)
+                _rejectedScope.Dispose();
+            _rejected = null;
+        }
+    }
+
     public partial class SearchState
     {
+        private CodeParameters _codeParameters;
+
+        /// <summary>
+        /// The parameters never change once fixed, so one decode serves the graph: it is held by the <see cref="HnswIndexCache"/> of the graph when one is attached,
+        /// and by this SearchState otherwise. Null when the graph carries none, or holds no parameters yet: nothing remembers their absence.
+        /// </summary>
+        internal CodeParameters CodeParameters
+        {
+            get
+            {
+                if (_carriesCodes == false)
+                    return null;
+
+                if (_codeParameters is null)
+                {
+                    _codeParameters = _nodeCache?.CodeParameters;
+                    if (_codeParameters is null && ReadCodeParameters() is { } read)
+                        _codeParameters = _nodeCache?.PublishCodeParameters(read) ?? read;
+                }
+
+                return _codeParameters;
+            }
+        }
+
         internal unsafe CodeParameters ReadCodeParameters()
         {
             if (IsEmpty)
@@ -375,6 +562,77 @@ public partial class Hnsw
                 return null;
 
             return _codeRows.Read(Llt, nodeId);
+        }
+
+        /// <summary>Starts loading the code row of the node into the processor cache and returns it; null when the snapshot holds none.</summary>
+        private unsafe byte* PrefetchCode(long nodeId)
+        {
+            var row = CodeRow(nodeId);
+            if (row != null && PortableIntrinsics.CanPrefetch)
+            {
+                for (var line = (byte*)((ulong)row & ~63UL); line < row + _codeRowBytes; line += 64)
+                    PortableIntrinsics.PrefetchRead(line);
+            }
+
+            return row;
+        }
+
+        // Reused by every traversal of this SearchState, which runs them one at a time.
+        private CodeScreen _screen;
+
+        /// <summary>The screen of the next traversal, which prepares the query once; null when the graph carries no codes.</summary>
+        internal CodeScreen BeginScreen(ReadOnlySpan<byte> tensor, int numberOfCandidates)
+        {
+            if (_carriesCodes == false || Options.CountOfVectors == 0 || CodeParameters is not { } parameters)
+                return null;
+
+            _screen ??= new CodeScreen(parameters, Llt.Allocator);
+            _screen.Begin(tensor, _forTestingPurposes?.Cap ?? CodeScreen.DefaultCap(numberOfCandidates), Options.CountOfVectors);
+            if (_forTestingPurposes is not null)
+                _forTestingPurposes.LastScreen = _screen;
+            return _screen;
+        }
+
+        /// <summary>
+        /// True when the screen drops an unresolved neighbor: it rejected the id earlier in the traversal, or <paramref name="screening"/> and the code
+        /// <paramref name="row"/> of the id reject it against <paramref name="threshold"/> now.
+        /// </summary>
+        private unsafe bool ScreenRejects(CodeScreen screen, bool screening, long id, byte* row, double threshold)
+        {
+            if (screen.IsRejected(id))
+                return true;
+            if (screening == false)
+                return false;
+
+            // A snapshot that holds no code for the node leaves it unchecked: the resolution of the node reports what is missing.
+            if (_forTestingPurposes is not null)
+                _forTestingPurposes.CodeRowsRead++;
+            if (row == null || screen.Rejects(new ReadOnlySpan<byte>(row, _codeRowBytes), threshold) == false)
+                return false;
+
+            screen.Reject(id);
+            if (_forTestingPurposes is not null)
+                _forTestingPurposes.Rejections++;
+            return true;
+        }
+
+        private TestingStuff _forTestingPurposes;
+
+        internal TestingStuff ForTestingPurposesOnly() => _forTestingPurposes ??= new TestingStuff();
+
+        internal sealed class TestingStuff
+        {
+            // Replaces the cap of the next traversals, to reach it on a small graph.
+            public int? Cap;
+
+            // The screen of the latest traversal, which holds its admission events and its cap.
+            public CodeScreen LastScreen;
+
+            public long CodeRowsRead;
+            public long Rejections;
+
+            // The largest sum of the admission events so far and the neighbors checked, over the screened expansions.
+            public int Commitment;
         }
 
         internal unsafe void WriteCode(long nodeId, CodeParameters parameters, ReadOnlySpan<byte> tensor, Span<double> scratch) =>
