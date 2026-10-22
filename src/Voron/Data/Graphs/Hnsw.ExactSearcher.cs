@@ -63,7 +63,8 @@ public partial class Hnsw
                     _candidates.AddByRefUnsafe() = _searchState.GetNodeIndexById(nodeId);
                 }
 
-                _candidates.Inner.Reverse();
+                if (_hasFilterMatch == false)
+                    _candidates.Inner.Reverse();
                 return true;
             }
 
@@ -98,7 +99,10 @@ public partial class Hnsw
                     return;
 
                 var distance = _searchState.QueryDistance(_vector.Span, nodeIndex, ref _vectorReadCounter);
-                if (_pq.Count < NumberOfCandidates || _hasFilterMatch)
+                // Unfiltered, the queue keeps the nearest candidates with the farthest on top. Filtered, it keeps every node with the nearest on top.
+                if (_hasFilterMatch)
+                    _pq.Enqueue(nodeId, distance);
+                else if (_pq.Count < NumberOfCandidates)
                     _pq.Enqueue(nodeId, -distance);
                 else
                     _pq.EnqueueDequeue(nodeId, -distance);
