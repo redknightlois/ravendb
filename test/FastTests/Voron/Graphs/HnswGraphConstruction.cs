@@ -203,9 +203,27 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
     [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
     public void GraphAboveTheCurrentVersionIsRefusedAndLeftUntouched() => AssertGraphIsRefused(global::Voron.Global.Constants.Graphs.HnswVersion.CurrentVersion + 1);
 
+    // The older version keeps its record locations under another key: the refusal does not depend on the layout.
+    [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
+    public unsafe void GraphInTheLayoutOfTheOlderVersionIsRefused()
+    {
+        const ushort olderVersion = global::Voron.Global.Constants.Graphs.HnswVersion.SinglesWithL2Norm;
+        using (var tx = Env.WriteTransaction())
+        {
+            var tree = tx.CreateTree(TreeName);
+            using (Slice.From(Allocator, "NodeIdToLocation", out var locations))
+                tree.LookupFor<Int64LookupKey>(locations);
+            tree.LookupFor<Int64LookupKey>(Hnsw.NodesByVectorIdSlice);
+            using (tree.DirectAdd(Hnsw.OptionsSlice, sizeof(Hnsw.Options), out var output))
+                *(Hnsw.Options*)output = new Hnsw.Options { Version = olderVersion, VectorSizeBytes = 16 * sizeof(float) + sizeof(float), NumberOfEdges = Edges, CountOfVectors = 50 };
+            tx.Commit();
+        }
+
+        AssertRefused(olderVersion);
+    }
+
     private void AssertGraphIsRefused(int storedVersion)
     {
-        const ushort currentVersion = global::Voron.Global.Constants.Graphs.HnswVersion.CurrentVersion;
         var oldVersion = (ushort)storedVersion;
         Build(RandomVectors(50, seed: 13), commits: 1, tasks: 1, seed: 13, beam: 16);
         using (var tx = Env.WriteTransaction())
@@ -217,12 +235,20 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
         }
 
         var before = StoredBytes();
+        AssertRefused(oldVersion);
+        Assert.Equal(before, StoredBytes());
+    }
+
+    // Every open of the graph throws and names both versions.
+    private void AssertRefused(ushort storedVersion)
+    {
+        const ushort currentVersion = global::Voron.Global.Constants.Graphs.HnswVersion.CurrentVersion;
         var query = MemoryMarshal.AsBytes(RandomVectors(1, seed: 14)[0].AsSpan()).ToArray();
         using var _ = Slice.From(Allocator, TreeName, out var treeName);
 
-        AssertRefused(llt => Hnsw.RegistrationFor(llt, treeName), write: true);
-        AssertRefused(llt => Hnsw.ApproximateNearest(llt, treeName, 8, query, 0f));
-        AssertRefused(llt => Hnsw.ExactNearest(llt, treeName, 8, query, 0f));
+        AssertOpenIsRefused(llt => Hnsw.RegistrationFor(llt, treeName), write: true);
+        AssertOpenIsRefused(llt => Hnsw.ApproximateNearest(llt, treeName, 8, query, 0f));
+        AssertOpenIsRefused(llt => Hnsw.ExactNearest(llt, treeName, 8, query, 0f));
 
         // A Corax searcher reports the refusal on every lookup and disposes cleanly, so the refusal is what a query sees.
         using (var tx = Env.ReadTransaction())
@@ -233,13 +259,11 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
             searcher.Dispose();
         }
 
-        Assert.Equal(before, StoredBytes());
-
-        void AssertRefused(Action<LowLevelTransaction> open, bool write = false)
+        void AssertOpenIsRefused(Action<LowLevelTransaction> open, bool write = false)
         {
             using var tx = write ? Env.WriteTransaction() : Env.ReadTransaction();
             var e = Assert.Throws<NotSupportedException>(() => open(tx.LowLevelTransaction));
-            Assert.Contains(oldVersion.ToString(), e.Message);
+            Assert.Contains(storedVersion.ToString(), e.Message);
             Assert.Contains(currentVersion.ToString(), e.Message);
         }
     }
@@ -428,9 +452,9 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
     private static Dictionary<long, (long Location, byte[] Bytes)> Records(Transaction tx)
     {
         var llt = tx.LowLevelTransaction;
-        var locations = tx.ReadTree(TreeName).LookupFor<Int64LookupKey>(Hnsw.NodeIdToLocationSlice);
+        var locations = Hnsw.RecordLocations(tx.ReadTree(TreeName).LookupFor<Int64LookupKey>(Hnsw.LocationPagesSlice), null);
         var records = new Dictionary<long, (long, byte[])>();
-        for (var id = 1L; locations.TryGetValue(id, out var location); id++)
+        for (var id = 1L; locations.ReadInt64(llt, id) is var location and not 0; id++)
             records[id] = (location, Container.GetReadOnly(llt, new ContainerEntryId(location)).ToArray());
         return records;
     }
