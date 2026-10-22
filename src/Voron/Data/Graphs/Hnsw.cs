@@ -74,6 +74,13 @@ public unsafe partial class Hnsw
             NumberOfCandidates = numberOfCandidates,
             SimilarityMethod = similarityMethod
         };
+        int codeDimensions = CodeDimensions(similarityMethod, vectorSizeBytes);
+        if (codeDimensions > 0)
+        {
+            options.CodeRowsPerBlock = CodeRowsPerBlock(CodeParameters.RowBytesOf(codeDimensions));
+            tree.LookupFor<Int64LookupKey>(CodePagesSlice);
+        }
+
         using (tree.DirectAdd(OptionsSlice, sizeof(Options), out var output))
         {
             Unsafe.Write(output, options);
@@ -121,6 +128,12 @@ public unsafe partial class Hnsw
 
     // A Corax tree can hold a user-named key, but never a value of the size of the options.
     internal static bool IsGraph(Tree tree) => tree.GetDataSize(OptionsSlice) == sizeof(Options);
+
+    /// <summary>
+    /// A graph tree holds raw values beside its nested lookups, so a walker of the graph tree reads a root object header only under these keys.
+    /// </summary>
+    internal static bool IsNestedLookup(Slice key) =>
+        SliceComparer.AreEqual(key, NodeIdToLocationSlice) || SliceComparer.AreEqual(key, NodesByVectorIdSlice) || SliceComparer.AreEqual(key, CodePagesSlice);
 
     /// <summary>
     /// Translates a minimum similarity on the [0, 1] scale into the maximum distance the similarity method reports for
@@ -239,6 +252,10 @@ public unsafe partial class Hnsw
         private Memory<byte> _lastQueryVector;
         public readonly delegate*<ReadOnlySpan<byte>, ReadOnlySpan<byte>, float> SimilarityCalc;
         public readonly bool IsEmpty;
+        // Every cosine graph carries a code for each of its nodes; the other graphs carry none.
+        private readonly bool _carriesCodes;
+        private readonly int _codeRowBytes;
+        private readonly NodeRows _codeRows;
         private readonly HnswIndexCache _nodeCache;
         // Fixed at construction. Lookups gate the shared cache on this so a reader at
         // storage tx R never observes an entry stamped by a later commit.
@@ -344,6 +361,13 @@ public unsafe partial class Hnsw
             // with every commit, while the cache snapshot is frozen at warm-up time. Using the
             // cached value would route the search from a level the entry point never reached.
             Options = ReadOptions(_tree);
+            int codeDimensions = CodeDimensions(Options.SimilarityMethod, Options.VectorSizeBytes);
+            _carriesCodes = codeDimensions > 0;
+            if (_carriesCodes)
+            {
+                _codeRowBytes = CodeParameters.RowBytesOf(codeDimensions);
+                _codeRows = new NodeRows(_tree.LookupFor<Int64LookupKey>(CodePagesSlice), _codeRowBytes, Options.CodeRowsPerBlock);
+            }
             SimilarityCalc = _nodeCache != null ? _nodeCache.SimilarityCalc : GetDistanceKernel(Options);
 
             if (_nodeCache != null)
@@ -1125,6 +1149,9 @@ public unsafe partial class Hnsw
             // LLT thread, once every placement is done.
             internal Action<SearchState> BeforeOlderInLinksRepaired;
 
+            // Draws the code parameters of the graph in place of Random.Shared.
+            internal Random CodeRandom;
+
             // Latched once the matching buffer was actually moved while the worker was parked, so a test
             // can fail loudly if the race window was never exercised.
             internal volatile bool VictimSelected;
@@ -1468,6 +1495,8 @@ public unsafe partial class Hnsw
                     DirtyNodeIds.Add(nodes[i].NodeId);
             }
 
+            WriteCodes();
+
             // flush the local modifications
             _searchState.FlushOptions();
 
@@ -1628,6 +1657,52 @@ public unsafe partial class Hnsw
             return (long)setId | Constants.Graphs.VectorId.PostingList;
         }
 
+
+        // The code of a node is written in the transaction that creates the node. The parameters are fixed by the first commit that creates a node.
+        private void WriteCodes()
+        {
+            var state = _searchState;
+            int dimensions = CodeDimensions(state.Options.SimilarityMethod, state.Options.VectorSizeBytes);
+            if (dimensions == 0 || state.CreatedNodes == 0)
+                return;
+
+            var parameters = state.ReadCodeParameters() ?? FixCodeParameters(dimensions);
+            using var _ = state.Llt.Allocator.Allocate(dimensions * sizeof(double), out ByteString scratch);
+            for (int i = 0; i < state.CreatedNodes; i++)
+            {
+                ref var node = ref state.GetNodeByIndex(state.GetCreatedNodeIndex(i));
+                state.WriteCode(node.NodeId, parameters, node.GetVector(state), scratch.ToSpan<double>());
+            }
+        }
+
+        // The center is the mean of the unit vectors that this commit creates that have a direction; it is zero when there is none.
+        private CodeParameters FixCodeParameters(int dimensions)
+        {
+            var state = _searchState;
+            using var _ = state.Llt.Allocator.Allocate(2 * dimensions * sizeof(double), out ByteString buffer);
+            var center = buffer.ToSpan<double>()[..dimensions];
+            var unit = buffer.ToSpan<double>()[dimensions..];
+            center.Clear();
+            int count = 0;
+            for (int i = 0; i < state.CreatedNodes; i++)
+            {
+                if (CodeParameters.UnitVector(state.GetNodeByIndex(state.GetCreatedNodeIndex(i)).GetVector(state), unit) == false)
+                    continue;
+
+                for (int k = 0; k < center.Length; k++)
+                    center[k] += unit[k];
+                count++;
+            }
+
+            for (int k = 0; k < center.Length; k++)
+                center[k] /= Math.Max(count, 1);
+
+            // Never the level Random: a draw from it would shift the level of every later node.
+            var parameters = CodeParameters.Draw(center, _forTestingPurposes?.CodeRandom ?? Random.Shared);
+            using (state.Tree.DirectAdd(CodeParametersSlice, parameters.StoredBytes, out var destination))
+                parameters.Write(new Span<byte>(destination, parameters.StoredBytes));
+            return parameters;
+        }
 
         // Returns false when the stored node is unchanged.
         bool PersistNode(ref Node node, ref ContextBoundNativeList<byte> byteBuffer)

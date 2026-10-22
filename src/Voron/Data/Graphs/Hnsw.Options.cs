@@ -41,6 +41,9 @@ public partial class Hnsw
         [FieldOffset(32)]
         public ContainerId LastUsedContainerId;
 
+        [FieldOffset(40)] // code rows in each block of a cosine graph, set once when the graph is created; 0 for a graph without codes
+        public int CodeRowsPerBlock;
+
         public int MaxEdgesAtLevel(int level)
         {
             // Upper levels only move a query near its target.

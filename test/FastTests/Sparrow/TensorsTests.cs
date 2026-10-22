@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Numerics.Tensors;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.Arm;
@@ -575,6 +577,57 @@ namespace FastTests.Sparrow
             var actual = Functions.DotProduct(a, b);
             var expected = TensorPrimitives.Dot<float>(a, b);
             Assert.InRange(actual - expected, -1e-4f, 1e-4f);
+        }
+
+        // Every nibble dot path that the processor supports is exact for random bytes and at the extreme nibbles and shorts, below, at and past a vector and
+        // the chunk of its int lanes.
+        [RavenFact(RavenTestCategory.Core)]
+        public void EveryNibbleDotPathIsExact()
+        {
+            var paths = new List<Func<ReadOnlySpan<byte>, ReadOnlySpan<short>, ReadOnlySpan<short>, long>> { Functions.DotProductNibbles, Functions.Serial.DotProductNibbles };
+            if (Avx512BW.IsSupported)
+                paths.Add(Functions.Vectorized512.DotProductNibblesAvx512);
+            if (AvxVnni.IsSupported)
+                paths.Add(Functions.Vectorized256.DotProductNibblesAvxVnni);
+            if (Avx2.IsSupported)
+                paths.Add(Functions.Vectorized256.DotProductNibblesAvx2);
+            if (Sve.IsSupported)
+                paths.Add(Functions.Vectorized128.DotProductNibblesSve);
+            if (Sse2.IsSupported || AdvSimd.IsSupported)
+                paths.Add(Functions.Vectorized128.DotProductNibbles);
+
+            var random = new Random(5);
+            foreach (var length in new[] { 1, 15, 16, 17, 31, 32, 33, 384, 2048, 2049, 25_008 })
+            {
+                var randomNibbles = new byte[length];
+                random.NextBytes(randomNibbles);
+                var full = Enumerable.Repeat(byte.MaxValue, length).ToArray();
+                var top = Enumerable.Repeat(short.MaxValue, length).ToArray();
+                var bottom = Enumerable.Repeat((short)-short.MaxValue, length).ToArray();
+                var rows = new[] { (randomNibbles, RandomShorts(), RandomShorts()), (full, top, top), (full, bottom, bottom), (full, top, bottom), (new byte[length], top, bottom) };
+                foreach (var (nibbles, even, odd) in rows)
+                {
+                    var expected = Enumerable.Range(0, length).Sum(i => (nibbles[i] & 15) * (long)even[i] + (nibbles[i] >> 4) * (long)odd[i]);
+                    Assert.All(paths, dot => Assert.Equal(expected, dot(nibbles, even, odd)));
+                }
+
+                short[] RandomShorts() => Enumerable.Range(0, length).Select(_ => (short)random.Next(-short.MaxValue, short.MaxValue + 1)).ToArray();
+            }
+        }
+
+        // The transform equals the product with the Hadamard matrix, whose entry (i, j) is -1 to the number of bits that i and j share. Integer values keep
+        // every sum exact, so the comparison is exact at every length, below and past a vector.
+        [RavenFact(RavenTestCategory.Core)]
+        public void WalshHadamardTransformIsTheHadamardProduct()
+        {
+            var random = new Random(7);
+            for (var length = 1; length <= 512; length *= 2)
+            {
+                var values = Enumerable.Range(0, length).Select(_ => (double)random.Next(-1000, 1001)).ToArray();
+                var expected = Enumerable.Range(0, length).Select(i => Enumerable.Range(0, length).Sum(j => int.PopCount(i & j) % 2 == 0 ? values[j] : -values[j])).ToArray();
+                Functions.WalshHadamardTransform(values);
+                Assert.Equal(expected, values);
+            }
         }
     }
 }
