@@ -26,22 +26,18 @@ public class VectorSearchWithHnswIndexCache(ITestOutputHelper output) : StorageT
     private const int VectorDimensions = 128;
     private const int VectorByteSize = VectorDimensions * sizeof(float);
 
-    // Queries must return the same matches whether or not a cache is attached, and whether
-    // the cache contains all nodes or just a subset. The partial-cache variant exercises
-    // the mixed code path: cache hits for upper-level nodes, disk loads for the remainder.
+    // Queries must return the same matches whether or not a cache is attached.
     // Binary is excluded because hamming distance at small dimensions produces many nodes at
-    // equal distance, so which ones land in top-K depends on priority-queue tie-breaking —
+    // equal distance, so which ones land in top-K depends on priority-queue tie-breaking,
     // an ambiguity that is unrelated to whether the cache is used.
     [RavenTheory(RavenTestCategory.Vector | RavenTestCategory.Corax)]
-    [InlineData(VectorEmbeddingType.Single, 10_000, 23)] // cache holds every node
-    [InlineData(VectorEmbeddingType.Single, 50, 23)]     // cache holds only upper-level nodes
-    [InlineData(VectorEmbeddingType.Int8, 10_000, 23)]
-    [InlineData(VectorEmbeddingType.Int8, 50, 23)]
-    [InlineDataWithRandomSeed(VectorEmbeddingType.Single, 10_000)]
-    public void ResultsAreIdenticalWithAndWithoutCache(VectorEmbeddingType embedding, int cacheBudget, int baseSeed)
-        => RunParityCheck(embedding, cacheBudget, baseSeed);
+    [InlineData(VectorEmbeddingType.Single, 23)]
+    [InlineData(VectorEmbeddingType.Int8, 23)]
+    [InlineDataWithRandomSeed(VectorEmbeddingType.Single)]
+    public void ResultsAreIdenticalWithAndWithoutCache(VectorEmbeddingType embedding, int baseSeed)
+        => RunParityCheck(embedding, baseSeed);
 
-    private void RunParityCheck(VectorEmbeddingType embedding, int cacheBudget, int baseSeed)
+    private void RunParityCheck(VectorEmbeddingType embedding, int baseSeed)
     {
         using var _ = GetMappings(embedding, out var bsc, out var mapping);
         var metadata = mapping.GetByFieldId(1).Metadata;
@@ -50,7 +46,7 @@ public class VectorSearchWithHnswIndexCache(ITestOutputHelper output) : StorageT
         const int k = 16;
 
         BuildIndex(mapping, docCount, seed: 7);
-        var caches = BuildCaches(metadata.FieldName, cacheBudget);
+        var caches = Caches(metadata.FieldName);
 
         for (int i = 0; i < queryCount; i++)
         {
@@ -60,7 +56,7 @@ public class VectorSearchWithHnswIndexCache(ITestOutputHelper output) : StorageT
 
             using (var searcher = new IndexSearcher(Env, mapping))
             {
-                searcher.AttachVectorNodeCaches(caches);
+                searcher.AttachVectorCaches(caches);
                 cached = TopK(searcher, metadata, NewQueryVector(bsc, seed: baseSeed + i), k);
             }
 
@@ -68,9 +64,8 @@ public class VectorSearchWithHnswIndexCache(ITestOutputHelper output) : StorageT
         }
     }
 
-    // When no cache is attached to an IndexSearcher, queries must still work — it's the
-    // happy-path for indexes that have disabled the cache (CoraxVectorSearchCacheSize=0) or
-    // haven't committed yet so no cache exists. Results must also be meaningful: every returned
+    // When no cache is attached to an IndexSearcher, as for a field that has not committed yet,
+    // queries must still work. Results must also be meaningful: every returned
     // id must map to a real doc and the top-K must agree with an exact scan on most of its
     // entries (HNSW is approximate; we require high recall, not byte-identity).
     [RavenTheory(RavenTestCategory.Vector | RavenTestCategory.Corax)]
@@ -88,7 +83,7 @@ public class VectorSearchWithHnswIndexCache(ITestOutputHelper output) : StorageT
 
         using (var searcher = new IndexSearcher(Env, mapping))
         {
-            // Deliberately do NOT call AttachVectorNodeCaches.
+            // Deliberately do NOT call AttachVectorCaches.
             returned = TopK(searcher, metadata, NewQueryVector(bsc, seed: seed + 1), k: 16);
         }
 
@@ -102,9 +97,8 @@ public class VectorSearchWithHnswIndexCache(ITestOutputHelper output) : StorageT
         Assert.True(Recall(truth, returned) > 0, $"no overlap with exact top-K (seed={seed})");
     }
 
-    // When a cache is attached but empty (e.g. the graph has fewer nodes than the cache
-    // budget could hold but none were persisted yet), queries must fall back to disk loads
-    // and still return meaningful results.
+    // When the attached dictionary holds no cache for the field, queries must still return
+    // meaningful results.
     [RavenTheory(RavenTestCategory.Vector | RavenTestCategory.Corax)]
     [InlineData(19)]
     [InlineDataWithRandomSeed]
@@ -120,7 +114,7 @@ public class VectorSearchWithHnswIndexCache(ITestOutputHelper output) : StorageT
 
         using (var searcher = new IndexSearcher(Env, mapping))
         {
-            searcher.AttachVectorNodeCaches(new Dictionary<Slice, HnswIndexCache>(SliceComparer.Instance));
+            searcher.AttachVectorCaches(new Dictionary<Slice, HnswIndexCache>(SliceComparer.Instance));
             returned = TopK(searcher, metadata, NewQueryVector(bsc, seed: seed + 1), k: 16);
         }
 
@@ -138,10 +132,8 @@ public class VectorSearchWithHnswIndexCache(ITestOutputHelper output) : StorageT
     // so intrinsic recall vs exact is high enough (~0.83) that the 0.75 threshold is a
     // quality gate rather than a "not random ids" sanity check. The parity tests above
     // cover the aggressive-params path with a tight ef.
-    [RavenTheory(RavenTestCategory.Vector | RavenTestCategory.Corax)]
-    [InlineData(10_000)] // cache holds every node
-    [InlineData(50)]     // cache holds only upper-level nodes
-    public void CachedSearchAchievesGoodRecallAgainstExactScan(int cacheBudget)
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Corax)]
+    public void CachedSearchAchievesGoodRecallAgainstExactScan()
     {
         using var _ = GetMappings(VectorEmbeddingType.Single, out var bsc, out var mapping, numberOfEdges: 32, numberOfCandidates: 256);
         var metadata = mapping.GetByFieldId(1).Metadata;
@@ -150,7 +142,7 @@ public class VectorSearchWithHnswIndexCache(ITestOutputHelper output) : StorageT
         const int k = 16;
 
         BuildIndex(mapping, docCount, seed: 7);
-        var caches = BuildCaches(metadata.FieldName, cacheBudget);
+        var caches = Caches(metadata.FieldName);
 
         double totalRecall = 0;
         for (int i = 0; i < queryCount; i++)
@@ -161,7 +153,7 @@ public class VectorSearchWithHnswIndexCache(ITestOutputHelper output) : StorageT
 
             using (var searcher = new IndexSearcher(Env, mapping))
             {
-                searcher.AttachVectorNodeCaches(caches);
+                searcher.AttachVectorCaches(caches);
                 cached = TopK(searcher, metadata, NewQueryVector(bsc, seed: 23 + i), k);
             }
 
@@ -169,8 +161,8 @@ public class VectorSearchWithHnswIndexCache(ITestOutputHelper output) : StorageT
         }
 
         var avgRecall = totalRecall / queryCount;
-        Output.WriteLine($"Average recall@{k} with cacheBudget={cacheBudget}: {avgRecall:F3}");
-        Assert.True(avgRecall >= 0.75, $"HNSW recall@{k} dropped to {avgRecall:F3} (threshold 0.75) with cacheBudget={cacheBudget}");
+        Output.WriteLine($"Average recall@{k}: {avgRecall:F3}");
+        Assert.True(avgRecall >= 0.75, $"HNSW recall@{k} dropped to {avgRecall:F3} (threshold 0.75)");
     }
 
     // Multi-vector queries internally share a SearchState across sub-searches. The cache
@@ -186,7 +178,7 @@ public class VectorSearchWithHnswIndexCache(ITestOutputHelper output) : StorageT
         {
             using var searcher = new IndexSearcher(Env, mapping);
             if (withCache)
-                searcher.AttachVectorNodeCaches(BuildCaches(metadata.FieldName));
+                searcher.AttachVectorCaches(Caches(metadata.FieldName));
 
             // Query vectors are allocated per-run because each IndexSearcher disposal
             // releases the ByteStringContext-backed VectorValue buffers.
@@ -205,9 +197,9 @@ public class VectorSearchWithHnswIndexCache(ITestOutputHelper output) : StorageT
         Assert.Equal(Run(withCache: false), Run(withCache: true));
     }
 
-    // A query opened BEFORE new vectors were committed must see its own snapshot, even when
-    // the HnswIndexCache it was given was built AT OR BEFORE that snapshot. A cache that predates
-    // the query's tx is always valid; the query must never see vectors added after it started.
+    // A query opened BEFORE new vectors were committed must see its own snapshot, even after a
+    // searcher opened after the commit filled the shared cache. The query must never see vectors
+    // added after it started.
     [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Corax)]
     public void QueryAtOlderTxDoesNotSeeVectorsCommittedAfterItStarted()
     {
@@ -215,14 +207,19 @@ public class VectorSearchWithHnswIndexCache(ITestOutputHelper output) : StorageT
         var metadata = mapping.GetByFieldId(1).Metadata;
 
         BuildIndex(mapping, docCount: 200, seed: 41);
-        var caches = BuildCaches(metadata.FieldName); // cache reflects the first 200 vectors
+        var caches = Caches(metadata.FieldName);
 
         // Take a snapshot by creating the IndexSearcher now. Subsequent writes must be
         // invisible to queries issued on this searcher.
         using var snapshotSearcher = new IndexSearcher(Env, mapping);
-        snapshotSearcher.AttachVectorNodeCaches(caches);
+        snapshotSearcher.AttachVectorCaches(caches);
 
         AppendDocuments(mapping, docCount: 200, firstId: 201, seed: 53);
+        using (var newer = new IndexSearcher(Env, mapping))
+        {
+            newer.AttachVectorCaches(caches);
+            TopK(newer, metadata, NewQueryVector(bsc, seed: 59), k: 200);
+        }
 
         var q = NewQueryVector(bsc, seed: 61);
         var ids = TopK(snapshotSearcher, metadata, q, k: 200);
@@ -233,23 +230,28 @@ public class VectorSearchWithHnswIndexCache(ITestOutputHelper output) : StorageT
             Assert.InRange(id, 1L, 200L);
     }
 
-    // A cache built after both commits should yield results equivalent to a fresh searcher
-    // with no cache: the cache sees everything, queries see everything.
+    // A cache that queries filled before a commit serves the queries after it: they agree with a
+    // searcher that has no cache.
     [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Corax)]
-    public void CacheBuiltAfterAllCommitsAgreesWithUncachedSearcher()
+    public void CacheFilledBeforeACommitAgreesWithUncachedSearcherAfterIt()
     {
         using var _ = GetMappings(VectorEmbeddingType.Single, out var bsc, out var mapping);
         var metadata = mapping.GetByFieldId(1).Metadata;
 
         BuildIndex(mapping, docCount: 200, seed: 41);
-        AppendDocuments(mapping, docCount: 200, firstId: 201, seed: 53);
+        var caches = Caches(metadata.FieldName);
+        using (var searcher = new IndexSearcher(Env, mapping))
+        {
+            searcher.AttachVectorCaches(caches);
+            TopK(searcher, metadata, NewQueryVector(bsc, seed: 59), k: 16);
+        }
 
-        var caches = BuildCaches(metadata.FieldName);
+        AppendDocuments(mapping, docCount: 200, firstId: 201, seed: 53);
 
         long[] cached, uncached;
         {
             using var searcher = new IndexSearcher(Env, mapping);
-            searcher.AttachVectorNodeCaches(caches);
+            searcher.AttachVectorCaches(caches);
             cached = TopK(searcher, metadata, NewQueryVector(bsc, seed: 61), k: 16);
         }
         {
@@ -291,15 +293,7 @@ public class VectorSearchWithHnswIndexCache(ITestOutputHelper output) : StorageT
         indexWriter.Commit();
     }
 
-    private Dictionary<Slice, HnswIndexCache> BuildCaches(Slice fieldName, int maxNodes = 10_000)
-    {
-        using var tx = Env.ReadTransaction();
-        var cache = HnswIndexCache.WarmFromScratch(tx.LowLevelTransaction, fieldName, maxNodes);
-        var dict = new Dictionary<Slice, HnswIndexCache>(SliceComparer.Instance);
-        if (cache != null && cache.Count > 0)
-            dict[fieldName] = cache;
-        return dict;
-    }
+    private static Dictionary<Slice, HnswIndexCache> Caches(Slice fieldName) => new(SliceComparer.Instance) { [fieldName] = new HnswIndexCache() };
 
     private static VectorValue NewQueryVector(ByteStringContext bsc, int seed)
     {
