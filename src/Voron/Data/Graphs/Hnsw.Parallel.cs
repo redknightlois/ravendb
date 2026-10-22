@@ -771,15 +771,8 @@ public partial class Hnsw
                 ref var edgesIndexes = ref n.EdgesIndexesPerLevel[level];
                 if (edgesIndexes.Count != edgesList.Count)
                 {
-                    // Mirror is stale: rebuild edgesIndexes AND, in the same pass, force-load any
-                    // edge whose vector is still lazy. This is the only path that introduces
-                    // freshly cache-resolved nodes (CopyNodeFromCache leaves _vectorSpan default),
-                    // so once we walk it, every entry in edgesIndexes references a Node with
-                    // VectorLoaded=true. _vectorSpan never resets, so subsequent calls on this
-                    // (node, level) keep that invariant — letting us skip the per-edge VectorLoaded
-                    // sweep entirely on the mirror-in-sync path. Profile (2026-05-09 split) had
-                    // that sweep at 6.4 s / 15 s of LLT exclusive (43 %) while only ~2 % of calls
-                    // actually triggered the rebuild.
+                    // PERF: A stale list of edge indexes is rebuilt here, and the vector of every edge that does not hold it yet is loaded in the same pass.
+                    // No other path puts a node without its vector in the list, and a loaded vector stays loaded, so a list in sync needs no per-edge check.
                     edgesIndexes.ResetAndEnsureCapacity(_searchState.Llt.Allocator, edgesList.Count);
                     foreach (var nodeId in edgesList)
                     {
