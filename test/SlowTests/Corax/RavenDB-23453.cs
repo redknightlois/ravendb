@@ -13,6 +13,7 @@ using FastTests.Voron;
 using Org.BouncyCastle.Security;
 using Raven.Server.Documents.Indexes.VectorSearch;
 using Sparrow;
+using Sparrow.Server.Collections;
 using Tests.Infrastructure;
 using Voron;
 using Voron.Data.Graphs;
@@ -327,27 +328,6 @@ public class RavenDB_23453(ITestOutputHelper output) : StorageTest(output)
             Assert.Equal(resultsFromFilteredQuery, andWithResults);
         }
     }
-
-    [RavenTheory(RavenTestCategory.Querying | RavenTestCategory.Corax | RavenTestCategory.Vector)]
-    [InlineDataWithRandomSeed]
-    public void ExposedNearestSearchNumberOfCandidatesIsRespected(int seed)
-    {
-        using var mapping = GetMapping();
-        
-        var docs = GetDocs(360).ToList();
-
-        Random random = new(seed);
-        IndexDocuments(Env, mapping, docs, random);
-
-        using (var rTx = Env.ReadTransaction())
-        {
-            using var vec1 = GenerateEmbeddings.FromArray(rTx.Allocator, MemoryMarshal.Cast<float, byte>(docs[0].Vector), VectorOptions.Default);
-            using var search = Hnsw.ApproximateNearest(rTx.LowLevelTransaction, mapping.GetByFieldId(3).FieldName, 16, vec1.GetEmbeddingMemory(), 0, true);
-            
-            Assert.Equal(16, search.NumberOfCandidates); 
-        }
-    }
-
 
     private List<string> EvaluateQuery<TQueryMatch>(IndexSearcher indexSearcher, ref TQueryMatch queryMatch)
         where TQueryMatch : IQueryMatch

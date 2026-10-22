@@ -54,6 +54,78 @@ public class VectorSearchRetrieverTests(ITestOutputHelper output) : StorageTest(
         Assert.Equal(withLargeBuffer.Select(e => (e.Entry, BitConverter.SingleToInt32Bits(e.Distance))), withOneEntryBuffer.Select(e => (e.Entry, BitConverter.SingleToInt32Bits(e.Distance))));
     }
 
+    [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
+    public void FilteredFillDoesNotAllocateInProportionToThePostingList()
+    {
+        using var _ = Slice.From(Allocator, TreeName, out var treeName);
+        var random = new Random(3);
+        // Every entry shares one vector, which makes a large posting list, and the filter admits half of them.
+        var entries = Enumerable.Range(0, 12_000).Select(i => (long)i * 400 + random.Next(1, 400)).ToArray();
+        Build(treeName, random, 8, [(entries, RandomVector(random, 8))]);
+        var filter = new GrowableBitArray(Allocator, entries[^1] + 1);
+        foreach (var entry in entries.Where((_, i) => i % 2 == 0))
+            filter.Add(entry);
+        filter.Count = entries.Length / 2;
+
+        using var tx = Env.ReadTransaction();
+        using (var state = new Hnsw.SearchState(tx.LowLevelTransaction, treeName))
+            Assert.Equal(Constants.Graphs.VectorId.PostingList, state.GetNodeByIndex(state.GetNodeIndexById(1)).PostingListId & Constants.Graphs.VectorId.EnsureIsSingleMask);
+
+        var query = MemoryMarshal.AsBytes(RandomVector(random, 8).AsSpan()).ToArray();
+        var matches = new long[64];
+        var distances = new float[64];
+        long FirstFillAllocations()
+        {
+            using var retriever = Hnsw.ExactNearest(tx.LowLevelTransaction, treeName, 16, query, 0f, filter);
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            Assert.Equal(matches.Length, retriever.Fill(matches, distances, filter));
+            return GC.GetAllocatedBytesForCurrentThread() - before;
+        }
+
+        FirstFillAllocations();
+        Assert.True(FirstFillAllocations() < entries.Length * sizeof(long) / 8);
+    }
+
+    // The working set saturates at the graph's size, so the candidates requested, however large, do not decide the memory.
+    [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
+    public void FilteredSearchAllocatesInProportionToItsMatchesNotToTheRequestedCandidates()
+    {
+        using var name = Slice.From(Allocator, TreeName, out var treeName);
+        const int count = 2000, admitted = 20;
+        var random = new Random(5);
+        Build(treeName, random, 8, Enumerable.Range(1, count).Select(i => (new long[] { i }, RandomVector(random, 8))).ToArray());
+        var filter = new GrowableBitArray(Allocator, count + 1);
+        for (var entry = 1; entry <= count; entry += count / admitted)
+            filter.Add(entry);
+        filter.Count = admitted;
+        var query = MemoryMarshal.AsBytes(RandomVector(random, 8).AsSpan()).ToArray();
+
+        using var tx = Env.ReadTransaction();
+        long[] Drain(Func<Hnsw.VectorSearchRetriever> search, out long allocated)
+        {
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            using var retriever = search();
+            var entries = new long[count];
+            var read = retriever.Fill(entries, new float[count], filter);
+            allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            return entries[..read];
+        }
+
+        Hnsw.VectorSearchRetriever Approximate(int candidates) => Hnsw.ApproximateNearest(tx.LowLevelTransaction, treeName, candidates, query, 0f, filter);
+
+        var exact = Drain(() => Hnsw.ExactNearest(tx.LowLevelTransaction, treeName, count, query, 0f, filter), out _);
+        Assert.Equal(admitted, exact.Length);
+        Drain(() => Approximate(1_000_000), out _);
+        var atMillion = Drain(() => Approximate(1_000_000), out var millionBytes);
+        var atMax = Drain(() => Approximate(int.MaxValue), out var maxBytes);
+
+        // The nearest-first entries are those of the exact search over the admitted entries.
+        Assert.Equal(exact, atMillion);
+        Assert.Equal(exact, atMax);
+        // A queue or a working set sized by the candidates costs at least 8 bytes each, which is 8 MB at a million: the limit allows 1/64 of that.
+        Assert.True(Math.Abs(maxBytes - millionBytes) < 1_000_000L * sizeof(long) / 64, $"{maxBytes} against {millionBytes} bytes");
+    }
+
     private List<(long Entry, float Distance)> Drain(Transaction tx, Slice treeName, byte[] query, GrowableBitArray? filter, int bufferSize)
     {
         using var retriever = Hnsw.ExactNearest(tx.LowLevelTransaction, treeName, 1000, query, 0f, filter);
