@@ -90,6 +90,7 @@ public unsafe partial class Hnsw
 
                     candidatesQ.Enqueue(_startingPointIndex, -lowerBound);
                     if (_flags.HasFlag(NearestEdgesFlags.StartingPointAsEdge) &&
+                        (_hasFilterMatch == false || _alreadyReturnedEdges.Contains(_startingPointIndex) == false) &&
                         ((startingPoint.PostingListId & Constants.Graphs.VectorId.EnsureIsSingleMask) != Constants.Graphs.VectorId.Tombstone
                          || _flags.HasFlag(NearestEdgesFlags.FilterNodesWithEmptyPostingLists) is false))
                     {
