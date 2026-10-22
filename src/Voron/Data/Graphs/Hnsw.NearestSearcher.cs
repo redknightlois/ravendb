@@ -48,7 +48,8 @@ public unsafe partial class Hnsw
                 int level, int numberOfCandidates,
                 ContextBoundNativeList<int> candidates,
                 NearestEdgesFlags flags,
-                bool hasFilterMatch)
+                bool hasFilterMatch,
+                CodeScreen screen)
             {
                 _searchState = searchState;
                 _startingPointIndex = startingPointIndex;
@@ -69,7 +70,7 @@ public unsafe partial class Hnsw
                     _alreadyReturnedEdges = new();
                 }
 
-                _screen = searchState.BeginScreen(vector.Span, _internalNumberOfCandidates, hasFilterMatch);
+                _screen = screen;
             }
 
             private void InitState(out float lowerBound, out int visitedCounter)

@@ -35,10 +35,42 @@ public class HnswPrescreenSearch(ITestOutputHelper output) : StorageTest(output)
             Search(state, query, 16);
             rejections += hook.Rejections;
             Assert.Equal(hook.Rejections, hook.LastScreen.Rejected);
-            // An id that is checked and not rejected is resolved, so a fresh state checks every id at most once.
-            Assert.True(hook.CodeRowsRead <= state.Nodes.Length + hook.Rejections);
+            // An id that is checked and not rejected is resolved, so a fresh state checks such an id at most once.
+            Assert.True(hook.CodeRowsRead <= state.Nodes.Length + hook.Rejections + hook.DescentRejections);
         }
 
+        Assert.NotEqual(0, rejections);
+    }
+
+    // The descent screens with the screen of its query: each of its moves is an admission event, and it remembers none of its rejections.
+    [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
+    public void TheDescentScreensAndCountsItsMoves()
+    {
+        Build(Count);
+        long moves = 0, rejections = 0;
+        using var tx = Env.ReadTransaction();
+        foreach (var query in Gaussians(60, 99))
+        {
+            using var state = new Hnsw.SearchState(tx.LowLevelTransaction, TreeName);
+            var hook = state.ForTestingPurposesOnly();
+            Memory<byte> tensor = Tensor(query);
+            state.OnQueryVector(tensor);
+            using var screen = state.BeginScreen(tensor.Span, 16, hasFilterMatch: false);
+            var path = new ContextBoundNativeList<int>(state.Llt.Allocator);
+            path.EnsureCapacityFor(state.Options.MaxLevel + 1);
+            state.SearchNearestAcrossLevels(tensor.Span, -1, state.Options.MaxLevel, ref path, screen);
+
+            // A level that ends at another node than the level above it moved at least once.
+            var changes = Enumerable.Range(0, state.Options.MaxLevel).Count(level => path[level] != path[level + 1]);
+            Assert.True(screen.Admissions >= changes, $"{screen.Admissions} events for {changes} changes");
+            Assert.Equal(0, screen.Rejected);
+            Assert.False(screen.Descending);
+            moves += changes;
+            rejections += hook.DescentRejections;
+            path.Dispose();
+        }
+
+        Assert.NotEqual(0, moves);
         Assert.NotEqual(0, rejections);
     }
 

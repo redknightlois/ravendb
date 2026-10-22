@@ -769,7 +769,21 @@ public unsafe partial class Hnsw
             NearestEdgesFlags flags,
             bool hasFilterMatch)
         {
-            return new NearestSearcher(this, startingPointIndex, vector, level , numberOfCandidates, candidates, flags, hasFilterMatch);
+            return new NearestSearcher(this, startingPointIndex, vector, level , numberOfCandidates, candidates, flags, hasFilterMatch,
+                BeginScreen(vector.Span, numberOfCandidates, hasFilterMatch));
+        }
+
+        /// <summary>The descent from the entry point and the base-layer traversal from where it ends, with one screen for both.</summary>
+        internal IHnswSearcher ApproximateSearch(Memory<byte> vector, int numberOfCandidates, bool hasFilterMatch)
+        {
+            var nearestNodesByLevel = new ContextBoundNativeList<int>(Llt.Allocator);
+            nearestNodesByLevel.EnsureCapacityFor(Options.MaxLevel + 1);
+            var screen = BeginScreen(vector.Span, numberOfCandidates, hasFilterMatch);
+            SearchNearestAcrossLevels(vector.Span, -1, Options.MaxLevel, ref nearestNodesByLevel, screen);
+            var nearest = nearestNodesByLevel[0];
+            nearestNodesByLevel.Clear();
+            return new NearestSearcher(this, nearest, vector, 0, numberOfCandidates, nearestNodesByLevel,
+                NearestEdgesFlags.StartingPointAsEdge | NearestEdgesFlags.FilterNodesWithEmptyPostingLists, hasFilterMatch, screen);
         }
 
         public IHnswSearcher EmptySearch() => new EmptySearcher();
@@ -777,8 +791,13 @@ public unsafe partial class Hnsw
         public IHnswSearcher ExactSearch(Memory<byte> vector, bool hasFilterMatch, int numberOfCandidates, ContextBoundNativeList<long>? nodesToScan) => new ExactSearcher(this, vector, hasFilterMatch, numberOfCandidates, nodesToScan);
 
 
-        public void SearchNearestAcrossLevels(ReadOnlySpan<byte> vector, int dstIdx, int maxLevel, ref ContextBoundNativeList<int> nearestIndexes)
+        public void SearchNearestAcrossLevels(ReadOnlySpan<byte> vector, int dstIdx, int maxLevel, ref ContextBoundNativeList<int> nearestIndexes) =>
+            SearchNearestAcrossLevels(vector, dstIdx, maxLevel, ref nearestIndexes, null);
+
+        internal void SearchNearestAcrossLevels(ReadOnlySpan<byte> vector, int dstIdx, int maxLevel, ref ContextBoundNativeList<int> nearestIndexes, CodeScreen screen)
         {
+            if (screen is not null)
+                screen.Descending = true;
             var visitCounter = ++_visitsCounter;
             var currentNodeIndex = GetNodeIndexById(EntryPointId);
             var level = maxLevel;
@@ -795,7 +814,7 @@ public unsafe partial class Hnsw
                 {
                     moved = false;
                     Debug.Assert(GetNodeByIndex(currentNodeIndex).GetLevelCount() > level, "n.GetLevelCount() > level");
-                    ResolveEdgeIndexes(currentNodeIndex, level, null, 0, ref nodeIds, ref indexes);
+                    ResolveEdgeIndexes(currentNodeIndex, level, screen, distance, ref nodeIds, ref indexes);
                     for (var i = 0; i < indexes.Count; i++)
                     {
                         var edgeIdx = indexes[i];
@@ -810,6 +829,8 @@ public unsafe partial class Hnsw
                         moved = true;
                         distance = curDist;
                         currentNodeIndex = edgeIdx;
+                        if (screen is not null)
+                            screen.Admissions++;
                     }
                 } while (moved);
 
@@ -820,6 +841,8 @@ public unsafe partial class Hnsw
             indexes.Dispose(Llt.Allocator);
             nodeIds.Dispose(Llt.Allocator);
             nearestIndexes.Inner.Reverse();
+            if (screen is not null)
+                screen.Descending = false;
         }
 
 
@@ -1623,15 +1646,7 @@ public unsafe partial class Hnsw
         if (searchState.Options.CountOfVectors == 0)
             return new VectorSearchRetriever(searchState, searchState.EmptySearch(), vector, minimumSimilarity);
 
-        var nearestNodesByLevel = new ContextBoundNativeList<int>(llt.Allocator);
-        nearestNodesByLevel.EnsureCapacityFor(searchState.Options.MaxLevel + 1);
-
-        searchState.SearchNearestAcrossLevels(vector.Span, -1, searchState.Options.MaxLevel, ref nearestNodesByLevel);
-        var nearest = nearestNodesByLevel[0];
-        nearestNodesByLevel.Clear();
-        var nearestEdgesSearch = searchState.NearestSearch(nearest, vector, 0, numberOfCandidates, nearestNodesByLevel,
-            SearchState.NearestEdgesFlags.StartingPointAsEdge | SearchState.NearestEdgesFlags.FilterNodesWithEmptyPostingLists, hasFilterMatch);
-        return new VectorSearchRetriever(searchState, nearestEdgesSearch, vector, minimumSimilarity);
+        return new VectorSearchRetriever(searchState, searchState.ApproximateSearch(vector, numberOfCandidates, hasFilterMatch), vector, minimumSimilarity);
     }
 
     /// <summary>
@@ -1655,15 +1670,8 @@ public unsafe partial class Hnsw
         if (searchState.Options.CountOfVectors == 0)
             return new VectorSearchRetriever(searchState, searchState.EmptySearch(), vector, minimumSimilarity, ownsSearchState: false, queryVectorScope);
 
-        var nearestNodesByLevel = new ContextBoundNativeList<int>(searchState.Llt.Allocator);
-        nearestNodesByLevel.EnsureCapacityFor(searchState.Options.MaxLevel + 1);
-
-        searchState.SearchNearestAcrossLevels(vector.Span, -1, searchState.Options.MaxLevel, ref nearestNodesByLevel);
-        var nearest = nearestNodesByLevel[0];
-        nearestNodesByLevel.Clear();
-        var nearestEdgesSearch = searchState.NearestSearch(nearest, vector, 0, numberOfCandidates, nearestNodesByLevel,
-            SearchState.NearestEdgesFlags.StartingPointAsEdge | SearchState.NearestEdgesFlags.FilterNodesWithEmptyPostingLists, hasFilterMatch);
-        return new VectorSearchRetriever(searchState, nearestEdgesSearch, vector, minimumSimilarity, ownsSearchState: false, queryVectorScope);
+        return new VectorSearchRetriever(searchState, searchState.ApproximateSearch(vector, numberOfCandidates, hasFilterMatch), vector, minimumSimilarity,
+            ownsSearchState: false, queryVectorScope);
     }
 
     /// <summary>

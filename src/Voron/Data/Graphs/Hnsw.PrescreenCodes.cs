@@ -403,19 +403,23 @@ public partial class Hnsw
     }
 
     /// <summary>
-    /// The prescreen of one unfiltered base-layer traversal: before the node record of a neighbor is resolved, the lower bound of the neighbor's code may reject it.
+    /// The prescreen of one unfiltered query, its descent through the levels and its base-layer traversal: before the node record of a neighbor is resolved, the
+    /// lower bound of the neighbor's code may reject it.
     /// <para>
-    /// Rule. A neighbor is rejected only when the working set is full and its bound exceeds the threshold, the distance of the farthest entry of the working set,
-    /// by <see cref="CodeParameters.Margin"/>, with a strict comparison. The threshold only tightens while the set is full, so the rejection holds against every later
-    /// threshold of the traversal: the neighbor is remembered as rejected and never checked or resolved again in the traversal. A traversal that is restarted with a larger
-    /// working set has a looser threshold, so it drops the screen.
+    /// Rule. A neighbor is rejected only when its bound exceeds the threshold by <see cref="CodeParameters.Margin"/>, with a strict comparison. In the base layer the
+    /// working set must be full, and the threshold is the distance of its farthest entry. The threshold only tightens while the set is full, so the rejection holds
+    /// against every later threshold of the traversal: the neighbor is remembered as rejected and never checked or resolved again in the traversal. A traversal that is
+    /// restarted with a larger working set has a looser threshold, so it drops the screen. In the descent the threshold is the distance of the current node, which is
+    /// tighter than those of the base layer, so a rejection of the descent is not remembered.
     /// </para>
     /// <para>
-    /// Bound. Let U be the traversal without the screen, on the same graph and query. U is a mathematical object of this proof: no such traversal exists in
+    /// Bound. Let U be the query without the screen, on the same graph and query. U is a mathematical object of this proof: no such query exists in
     /// the code. U reads no code, so which neighbors it evaluates, in which order and against which thresholds is fixed before the dither is drawn. The screened
-    /// traversal S evaluates the neighbors of U in the same order minus the rejected ones, so it follows U until the first neighbor that S rejects and U would admit.
-    /// An admission event is a neighbor whose distance is below the threshold of a full working set, so it enters the candidate queue. A node with an empty
-    /// posting list is an event as well, although it stays out of the working set, because S would not expand it.
+    /// query S evaluates the neighbors of U in the same order minus the rejected ones, so it follows U until the first neighbor that S rejects and U would admit.
+    /// An admission event is a move of the descent, or a neighbor whose distance is below the threshold of a full working set, so it enters the candidate queue.
+    /// A node with an empty posting list is an event as well, although it stays out of the working set, because S would not expand it. The descent evaluates a
+    /// node once and its distance only falls, so a neighbor that U does not move to is never closer than a later current node: S, which may check or evaluate it
+    /// again, does not move to it either.
     /// Rejecting an event requires a bound above the distance by more than the margin, which has probability at most alpha over the draw of the dither
     /// (see <see cref="CodeParameters.Margin"/>). S screens the neighbors of one expansion only when the events so far plus the number of the neighbors fit under
     /// <see cref="Cap"/>, and the events so far are those of U up to the first difference, so every event that S can reject is among the first Cap events of U.
@@ -463,12 +467,15 @@ public partial class Hnsw
         /// <summary>The distinct neighbors rejected so far.</summary>
         public int Rejected { get; private set; }
 
+        /// <summary>True while the descent screens: its rejections are not remembered.</summary>
+        public bool Descending;
+
         public bool IsRejected(long nodeId) => _rejected != null && (ulong)nodeId <= (ulong)_maxNodeId && (_rejected[nodeId >> 6] & (1UL << (int)(nodeId & 63))) != 0;
 
         // An id outside the snapshot is never remembered: the resolution of the node reports it.
         public void Reject(long nodeId)
         {
-            if ((ulong)nodeId > (ulong)_maxNodeId)
+            if (Descending || (ulong)nodeId > (ulong)_maxNodeId)
                 return;
 
             if (_rejected == null)
@@ -618,7 +625,11 @@ public partial class Hnsw
                 return false;
 
             screen.Reject(id);
-            if (_forTestingPurposes is not null)
+            if (_forTestingPurposes is null)
+                return true;
+            if (screen.Descending)
+                _forTestingPurposes.DescentRejections++;
+            else
                 _forTestingPurposes.Rejections++;
             return true;
         }
@@ -637,6 +648,8 @@ public partial class Hnsw
 
             public long CodeRowsRead;
             public long Rejections;
+            // The rejections of the descent, which the screen does not remember.
+            public long DescentRejections;
 
             // The largest sum of the admission events so far and the neighbors checked, over the screened expansions.
             public int Commitment;
