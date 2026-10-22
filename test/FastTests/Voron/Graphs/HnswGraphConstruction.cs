@@ -13,6 +13,24 @@ namespace FastTests.Voron.Graphs;
 
 public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(output)
 {
+    private const string TreeName = "test";
+    private const int Edges = 12;
+
+    [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
+    public void InsertionBeamIsSeededFromTheLevelAbove()
+    {
+        var starts = new List<(int Level, int TopLevel, int Start)>();
+        Build(RandomVectors(600, seed: 2), commits: 1, tasks: 1, seed: 2, beam: 16,
+            testing: t => t.OnBeamStarted = (level, topLevel, start) => starts.Add((level, topLevel, start)));
+
+        // The top level starts from the greedy descent node alone; each lower level starts from what the level above returned.
+        Assert.All(starts.Where(s => s.Level == s.TopLevel), s => Assert.Equal(1, s.Start));
+        var lower = starts.Where(s => s.Level < s.TopLevel).ToArray();
+        Assert.NotEmpty(lower);
+        Assert.All(lower, s => Assert.True(s.Start > 0));
+        Assert.Contains(lower, s => s.Start > 1);
+    }
+
     // A re-selection works on the list as it was when the work was dispatched. On the first re-selection of each list, the hook plays the part
     // of concurrent placements that append up to a cap of back-links in the meantime. A list that no later placement appends to ends within its
     // cap only through the re-selection that the merge queues. The test does not depend on how the tasks interleave.
@@ -91,5 +109,40 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
             foreach (var id in done)
                 Assert.True(state.GetNodeByIndex(state.GetNodeIndexById(id)).EdgeCountAtLevel(0) <= state.Options.MaxEdgesAtLevel(0), "a list is over its cap");
         }
+    }
+
+    private IReadOnlyList<byte[]> Build(float[][] vectors, int commits, int tasks, int seed, int beam, Action<Hnsw.Registration.TestingStuff> testing = null)
+    {
+        using var _ = Slice.From(Allocator, TreeName, out var treeName);
+        var random = new Random(seed);
+        var hashes = new List<byte[]>();
+        var perCommit = (vectors.Length + commits - 1) / commits;
+        using (var tx = Env.WriteTransaction())
+        {
+            Hnsw.Create(tx.LowLevelTransaction, treeName, vectors[0].Length * sizeof(float), Edges, beam, VectorEmbeddingType.Single);
+            tx.Commit();
+        }
+
+        for (var from = 0; from < vectors.Length; from += perCommit)
+        {
+            var batch = vectors.Skip(from).Take(perCommit).ToArray();
+            using var tx = Env.WriteTransaction();
+            using var registration = Hnsw.RegistrationFor(tx.LowLevelTransaction, treeName, random);
+            // tasks = min(max(1, new nodes / MaxConcurrentBatches), MaxConcurrentBatches)
+            registration.MaxConcurrentBatches = Math.Max(1, batch.Length / tasks);
+            testing?.Invoke(registration.ForTestingPurposesOnly());
+            for (var i = 0; i < batch.Length; i++)
+                hashes.Add(registration.Register(1 + from + i, MemoryMarshal.Cast<float, byte>(batch[i])).ToSpan().ToArray());
+            registration.Commit(CancellationToken.None);
+            tx.Commit();
+        }
+
+        return hashes;
+    }
+
+    private static float[][] RandomVectors(int count, int seed, int dimensions = 16)
+    {
+        var random = new Random(seed);
+        return Enumerable.Range(0, count).Select(_ => Enumerable.Range(0, dimensions).Select(_ => random.NextSingle() * 2 - 1).ToArray()).ToArray();
     }
 }
