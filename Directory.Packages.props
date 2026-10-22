@@ -131,6 +131,7 @@
     <PackageVersion Include="System.Diagnostics.PerformanceCounter" Version="11.0.0" />
     <PackageVersion Include="System.DirectoryServices.Protocols" Version="11.0.0" />
     <PackageVersion Include="System.Formats.Asn1" Version="11.0.0" />
+    <PackageVersion Include="System.IO.Hashing" Version="11.0.0" />
     <PackageVersion Include="System.Net.ServerSentEvents" Version="11.0.0" />
     <PackageVersion Include="System.Numerics.Tensors" Version="11.0.0" />
     <PackageVersion Include="System.Reflection.Metadata" Version="11.0.0" />
