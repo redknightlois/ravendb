@@ -80,6 +80,48 @@ public class HnswPrescreenCodes(ITestOutputHelper output) : StorageTest(output)
             AssertReEncodes(state, id, parameters);
     }
 
+    // A reader publishes the page of each block that it reads. A commit that appends to a published block keeps its page, and the page of a block
+    // that a rolled back transaction allocated never reaches the cache.
+    [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
+    public void TheCacheMapsEachBlockToItsCommittedPage()
+    {
+        Build(TreeName, [Around(0, 300, 1)]);
+        HnswIndexCache cache;
+        using (var warm = Env.ReadTransaction())
+        {
+            using var name = Slice.From(warm.Allocator, TreeName, out var slice);
+            cache = HnswIndexCache.WarmFromScratch(warm.LowLevelTransaction, slice, maxNodes: 1000);
+        }
+
+        using var _ = cache;
+        AssertEveryCodeReEncodes(cache);
+
+        using (var rolledBack = Env.WriteTransaction())
+        {
+            using (var registration = Hnsw.RegistrationFor(rolledBack.LowLevelTransaction, TreeName, new Random(3)))
+            {
+                var vectors = Around(0, 600, 3);
+                for (var i = 0; i < vectors.Length; i++)
+                    registration.Register(301 + i, MemoryMarshal.AsBytes(vectors[i].AsSpan()));
+                registration.Commit(CancellationToken.None);
+            }
+
+            using var name = Slice.From(rolledBack.Allocator, TreeName, out var slice);
+            using var state = new Hnsw.SearchState(rolledBack.LowLevelTransaction, slice, cache);
+            Assert.False(state.ReadCode(state.Options.CountOfVectors).IsEmpty);
+        }
+
+        // Shifts the pages of the next commit away from those of the rolled back one.
+        using (var tx = Env.WriteTransaction())
+        {
+            tx.LowLevelTransaction.AllocatePage(1);
+            tx.Commit();
+        }
+
+        Register(TreeName, Around(0, 600, 2), 301, new Random(2), new Random(2));
+        AssertEveryCodeReEncodes(cache);
+    }
+
     // The storage report walks every entry of a tree that holds lookups; the code parameters are a raw value among them.
     [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
     public void StorageReportReadsAGraphTreeThatHoldsCodes()
@@ -438,10 +480,11 @@ public class HnswPrescreenCodes(ITestOutputHelper output) : StorageTest(output)
         }
     }
 
-    private void AssertEveryCodeReEncodes()
+    private void AssertEveryCodeReEncodes(HnswIndexCache cache = null)
     {
         using var tx = Env.ReadTransaction();
-        using var state = new Hnsw.SearchState(tx.LowLevelTransaction, TreeName);
+        using var name = Slice.From(tx.Allocator, TreeName, out var slice);
+        using var state = new Hnsw.SearchState(tx.LowLevelTransaction, slice, cache);
         var parameters = state.ReadCodeParameters();
         for (var id = 1L; id <= state.Options.CountOfVectors; id++)
             AssertReEncodes(state, id, parameters);

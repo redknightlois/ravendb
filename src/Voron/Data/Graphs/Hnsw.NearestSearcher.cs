@@ -30,6 +30,8 @@ public unsafe partial class Hnsw
             private readonly HashSet<int> _alreadyReturnedEdges;
             private long _vectorReadCounter = 0;
             private readonly int _startingPointIndex;
+            // Null when the traversal is not screened: a filtered traversal, a graph without codes, or a restarted traversal.
+            private CodeScreen _screen;
 
             // Traversal state carried across MoveNextBatch calls so the caller can consume
             // one batch at a time. _needsRestart triggers a fresh InitState; _isDone short-circuits
@@ -66,6 +68,8 @@ public unsafe partial class Hnsw
                 {
                     _alreadyReturnedEdges = new();
                 }
+
+                _screen = searchState.BeginScreen(vector.Span, _internalNumberOfCandidates, hasFilterMatch);
             }
 
             private void InitState(out float lowerBound, out int visitedCounter)
@@ -136,7 +140,9 @@ public unsafe partial class Hnsw
                     }
 
                     _searchState.GetNodeByIndex(cur).Visited = _visitedCounter;
-                    _searchState.ResolveEdgeIndexes(cur, _level, ref _nodeIds, ref _indexes);
+                    // Only a full working set has a threshold to screen against.
+                    var screen = nearestEdgesQ.Count == _internalNumberOfCandidates ? _screen : null;
+                    _searchState.ResolveEdgeIndexes(cur, _level, screen, -_lowerBound, ref _nodeIds, ref _indexes);
 
                     // Pin loop locals: NativeList field reads through `this` force the JIT to
                     // reload the storage pointer on every candidate.
@@ -170,6 +176,8 @@ public unsafe partial class Hnsw
                         }
                         else if (_lowerBound < nextDist)
                         {
+                            if (_screen is not null)
+                                _screen.Admissions++;
                             candidatesQ.Enqueue(nextIndex, -nextDist);
 
                             if (isDeleted == false || _flags.HasFlag(NearestEdgesFlags.FilterNodesWithEmptyPostingLists) is false)
@@ -202,6 +210,9 @@ public unsafe partial class Hnsw
 
             public void IncreaseNumberOfCandidates(int currentlyAcceptedNodes)
             {
+                // The restarted traversal has a looser threshold than the rejections of the earlier one were made against.
+                _screen?.Dispose();
+                _screen = null;
                 Reset();
                 _internalNumberOfCandidates = ExtendedSize(_internalNumberOfCandidates);
                 // The next MoveNextBatch call will InitState from the starting points again.
@@ -292,6 +303,7 @@ public unsafe partial class Hnsw
 
             public void Dispose()
             {
+                _screen?.Dispose();
                 _candidates.Dispose();
                 _nodeIds.Dispose(_searchState.Llt.Allocator);
                 _indexes.Dispose(_searchState.Llt.Allocator);
