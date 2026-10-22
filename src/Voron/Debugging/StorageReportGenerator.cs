@@ -121,14 +121,15 @@ namespace Voron.Debugging
                 if (treeFlags.HasFlag(TreeFlags.CompactTrees) ||
                     treeFlags.HasFlag(TreeFlags.Lookups))
                 {
+                    var isGraph = Hnsw.IsGraph(tree);
                     using var it = tree.Iterate(false);
                     if (it.Seek(Slices.BeforeAllKeys))
                     {
                         do
                         {
-                            if (SliceComparer.CompareInline(it.CurrentKey, Hnsw.OptionsSlice) == 0 && it.Current->DataSize == Unsafe.SizeOf<Hnsw.Options>())
-                                continue; // Hnsw options, 64 bytes 
-                            
+                            if (isGraph && Hnsw.IsNestedLookup(it.CurrentKey) == false)
+                                continue;
+
                             ReadResult readResult = tree.Read(it.CurrentKey);
                             RootObjectType rootObjectType = (RootObjectType)readResult.Reader.Read<byte>();
                             switch (rootObjectType)

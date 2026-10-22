@@ -113,6 +113,8 @@ namespace Voron.Global
                 public const ushort SinglesWithL2Norm = 7_001;
 
                 // Every node record stores its count of older base-layer in-links as a plain field after the count of levels.
+                // Every float32 graph carries a 4-bit prescreen code for each of its nodes, in blocks addressed by node id that its CodePages lookup locates,
+                // and the parameters of those codes.
                 // A graph at another version is never read: the index that holds it must be reset.
                 public const ushort CurrentVersion = 7_002;
             }

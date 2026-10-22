@@ -28,6 +28,7 @@ using Voron.Data.CompactTrees;
 using Voron.Data.Compression;
 using Voron.Data.Containers;
 using Voron.Data.Fixed;
+using Voron.Data.Graphs;
 using Voron.Data.Lookups;
 using Voron.Data.PostingLists;
 using Voron.Data.RawData;
@@ -1108,11 +1109,15 @@ namespace Voron
                                 if (treeHeader.Flags.HasFlag(TreeFlags.CompactTrees) ||
                                     treeHeader.Flags.HasFlag(TreeFlags.Lookups))
                                 {
+                                    var isGraph = Hnsw.IsGraph(tree);
                                     var it = tree.Iterate(false);
                                     if (it.Seek(Slices.BeforeAllKeys))
                                     {
                                         do
                                         {
+                                            if (isGraph && Hnsw.IsNestedLookup(it.CurrentKey) == false)
+                                                continue;
+
                                             var rootObjectType = (RootObjectType)it.CreateReaderForCurrent().Read<byte>();
                                             switch (rootObjectType)
                                             {

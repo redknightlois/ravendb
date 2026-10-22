@@ -37,6 +37,9 @@ public partial class Hnsw
         [FieldOffset(32)]
         public ContainerId LastUsedContainerId;
 
+        [FieldOffset(40)] // code rows in each block of a float32 graph, set once when the graph is created; 0 for a graph without codes
+        public int CodeRowsPerBlock;
+
         public int MaxLevel => BitOperations.Log2((ulong)CountOfVectors);
 
         public int CurrentMaxLevel(int reduceBy) => BitOperations.Log2((ulong)(CountOfVectors - reduceBy));
