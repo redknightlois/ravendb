@@ -182,7 +182,7 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
 
         AssertRefused(llt => Hnsw.RegistrationFor(llt, treeName), write: true);
         AssertRefused(llt => Hnsw.ApproximateNearest(llt, treeName, 8, query, 0f));
-        AssertRefused(llt => Hnsw.ExactNearest(llt, treeName, 8, query, 0f, hasFilterMatch: false));
+        AssertRefused(llt => Hnsw.ExactNearest(llt, treeName, 8, query, 0f));
         AssertRefused(llt => HnswIndexCache.WarmFromScratch(llt, treeName, maxNodes: 100));
 
         Assert.Equal(before, StoredBytes());
