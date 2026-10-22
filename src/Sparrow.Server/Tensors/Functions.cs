@@ -327,6 +327,14 @@ namespace Sparrow.Server.Tensors
                 TResult fb2 = bMagnitude * bMagnitude * TResult.CreateTruncating(b2);
                 return CosineSimilarityNormalize<TResult, TResult>(fab, fa2, fb2);
             }
+
+            internal static long DotProductNibbles(ReadOnlySpan<byte> nibbles, ReadOnlySpan<short> even, ReadOnlySpan<short> odd)
+            {
+                long dot = 0;
+                for (var i = 0; i < nibbles.Length; i++)
+                    dot += (nibbles[i] & 15) * even[i] + (nibbles[i] >> 4) * odd[i];
+                return dot;
+            }
         }
 
         public static class Vectorized512
@@ -986,6 +994,32 @@ namespace Sparrow.Server.Tensors
 
                 return CosineSimilarityNormalize<TResult, TResult>(fab, fa2, fb2);
             }
+
+            internal static long DotProductNibblesAvx512(ReadOnlySpan<byte> nibbles, ReadOnlySpan<short> even, ReadOnlySpan<short> odd)
+            {
+                ref var l = ref MemoryMarshal.GetReference(nibbles);
+                ref var e = ref MemoryMarshal.GetReference(even);
+                ref var o = ref MemoryMarshal.GetReference(odd);
+                var mask = Vector512.Create((short)15);
+                var i = 0;
+                long dot = 0;
+                while (i + 32 <= nibbles.Length)
+                {
+                    // A step adds at most 4 * 15 * 2^15 to an int lane, so the sixteen lanes of 64 steps sum within an int.
+                    var end = Math.Min(i + 64 * 32, nibbles.Length - 31);
+                    Vector512<int> sum = default;
+                    for (; i < end; i += 32)
+                    {
+                        var bytes = Avx512BW.ConvertToVector512Int16(Vector256.LoadUnsafe(ref l, (nuint)i));
+                        sum += Avx512BW.MultiplyAddAdjacent(bytes & mask, Vector512.LoadUnsafe(ref e, (nuint)i));
+                        sum += Avx512BW.MultiplyAddAdjacent(Vector512.ShiftRightLogical(bytes, 4), Vector512.LoadUnsafe(ref o, (nuint)i));
+                    }
+
+                    dot += Vector512.Sum(sum);
+                }
+
+                return dot + Vectorized256.DotProductNibblesAvx2(nibbles[i..], even[i..], odd[i..]);
+            }
         }
 
         public static class Vectorized128
@@ -1072,6 +1106,66 @@ namespace Sparrow.Server.Tensors
                 float b2Reciprocal = rsqrts.GetElement(1);
 
                 return TResult.CreateTruncating(float.CreateTruncating(ab) * a2Reciprocal * b2Reciprocal);
+            }
+
+            internal static long DotProductNibblesSve(ReadOnlySpan<byte> nibbles, ReadOnlySpan<short> even, ReadOnlySpan<short> odd)
+            {
+                ref var l = ref MemoryMarshal.GetReference(nibbles);
+                ref var e = ref MemoryMarshal.GetReference(even);
+                ref var o = ref MemoryMarshal.GetReference(odd);
+                var mask = new Vector<ushort>(15);
+                var half = Vector<short>.Count;
+                var i = 0;
+                // A step adds at most 16 * 15 * 2^15 to a long lane, so no span overflows it.
+                Vector<long> sum = default;
+                for (; i + Vector<byte>.Count <= nibbles.Length; i += Vector<byte>.Count)
+                {
+                    var bytes = Vector.LoadUnsafe(ref l, (nuint)i);
+                    var low = Vector.WidenLower(bytes);
+                    var high = Vector.WidenUpper(bytes);
+                    var step = Sve.DotProduct(Vector<long>.Zero, Vector.AsVectorInt16(low & mask), Vector.LoadUnsafe(ref e, (nuint)i));
+                    step = Sve.DotProduct(step, Vector.AsVectorInt16(high & mask), Vector.LoadUnsafe(ref e, (nuint)(i + half)));
+                    step = Sve.DotProduct(step, Vector.AsVectorInt16(Vector.ShiftRightLogical(low, 4)), Vector.LoadUnsafe(ref o, (nuint)i));
+                    step = Sve.DotProduct(step, Vector.AsVectorInt16(Vector.ShiftRightLogical(high, 4)), Vector.LoadUnsafe(ref o, (nuint)(i + half)));
+                    sum += step;
+                }
+
+                return Vector.Sum(sum) + Serial.DotProductNibbles(nibbles[i..], even[i..], odd[i..]);
+            }
+
+            internal static long DotProductNibbles(ReadOnlySpan<byte> nibbles, ReadOnlySpan<short> even, ReadOnlySpan<short> odd)
+            {
+                ref var l = ref MemoryMarshal.GetReference(nibbles);
+                ref var e = ref MemoryMarshal.GetReference(even);
+                ref var o = ref MemoryMarshal.GetReference(odd);
+                var mask = Vector128.Create((ushort)15);
+                var i = 0;
+                long dot = 0;
+                while (i + 16 <= nibbles.Length)
+                {
+                    // A step adds at most 8 * 15 * 2^15 to an int lane, so the four lanes of 128 steps sum within an int.
+                    var end = Math.Min(i + 128 * 16, nibbles.Length - 15);
+                    Vector128<int> sum = default;
+                    for (; i < end; i += 16)
+                    {
+                        var (low, high) = Vector128.Widen(Vector128.LoadUnsafe(ref l, (nuint)i));
+                        var step = MultiplyAdd(Vector128<int>.Zero, (low & mask).AsInt16(), Vector128.LoadUnsafe(ref e, (nuint)i));
+                        step = MultiplyAdd(step, (high & mask).AsInt16(), Vector128.LoadUnsafe(ref e, (nuint)(i + 8)));
+                        step = MultiplyAdd(step, Vector128.ShiftRightLogical(low, 4).AsInt16(), Vector128.LoadUnsafe(ref o, (nuint)i));
+                        step = MultiplyAdd(step, Vector128.ShiftRightLogical(high, 4).AsInt16(), Vector128.LoadUnsafe(ref o, (nuint)(i + 8)));
+                        sum += step;
+                    }
+
+                    dot += Vector128.Sum(sum);
+                }
+
+                return dot + Serial.DotProductNibbles(nibbles[i..], even[i..], odd[i..]);
+
+                [MethodImpl(MethodImplOptions.AggressiveInlining)]
+                static Vector128<int> MultiplyAdd(Vector128<int> sum, Vector128<short> left, Vector128<short> right) =>
+                    Sse2.IsSupported
+                        ? sum + Sse2.MultiplyAddAdjacent(left, right)
+                        : AdvSimd.MultiplyWideningUpperAndAdd(AdvSimd.MultiplyWideningLowerAndAdd(sum, left.GetLower(), right.GetLower()), left, right);
             }
         }
 
@@ -1249,6 +1343,117 @@ namespace Sparrow.Server.Tensors
                 TResult fa2 = TResult.CreateTruncating(a2) * aMagnitude * aMagnitude;
                 TResult fb2 = TResult.CreateTruncating(b2) * bMagnitude * bMagnitude;
                 return CosineSimilarityNormalize<TResult, TResult>(fab, fa2, fb2);
+            }
+
+            internal static long DotProductNibblesAvxVnni(ReadOnlySpan<byte> nibbles, ReadOnlySpan<short> even, ReadOnlySpan<short> odd)
+            {
+                ref var l = ref MemoryMarshal.GetReference(nibbles);
+                ref var e = ref MemoryMarshal.GetReference(even);
+                ref var o = ref MemoryMarshal.GetReference(odd);
+                var mask = Vector256.Create((short)15);
+                var i = 0;
+                long dot = 0;
+                while (i + 16 <= nibbles.Length)
+                {
+                    // A step adds at most 4 * 15 * 2^15 to an int lane, so the eight lanes of 128 steps sum within an int.
+                    var end = Math.Min(i + 128 * 16, nibbles.Length - 15);
+                    Vector256<int> sum = default;
+                    for (; i < end; i += 16)
+                    {
+                        var bytes = Avx2.ConvertToVector256Int16(Vector128.LoadUnsafe(ref l, (nuint)i));
+                        var evenProducts = Avx2.MultiplyAddAdjacent(bytes & mask, Vector256.LoadUnsafe(ref e, (nuint)i));
+                        sum += AvxVnni.MultiplyWideningAndAdd(evenProducts, Vector256.ShiftRightLogical(bytes, 4), Vector256.LoadUnsafe(ref o, (nuint)i));
+                    }
+
+                    dot += Vector256.Sum(sum);
+                }
+
+                return dot + Serial.DotProductNibbles(nibbles[i..], even[i..], odd[i..]);
+            }
+
+            internal static long DotProductNibblesAvx2(ReadOnlySpan<byte> nibbles, ReadOnlySpan<short> even, ReadOnlySpan<short> odd)
+            {
+                ref var l = ref MemoryMarshal.GetReference(nibbles);
+                ref var e = ref MemoryMarshal.GetReference(even);
+                ref var o = ref MemoryMarshal.GetReference(odd);
+                var mask = Vector256.Create((short)15);
+                var i = 0;
+                long dot = 0;
+                while (i + 16 <= nibbles.Length)
+                {
+                    // A step adds at most 4 * 15 * 2^15 to an int lane, so the eight lanes of 128 steps sum within an int.
+                    var end = Math.Min(i + 128 * 16, nibbles.Length - 15);
+                    Vector256<int> sum = default;
+                    for (; i < end; i += 16)
+                    {
+                        var bytes = Avx2.ConvertToVector256Int16(Vector128.LoadUnsafe(ref l, (nuint)i));
+                        sum += Avx2.MultiplyAddAdjacent(bytes & mask, Vector256.LoadUnsafe(ref e, (nuint)i));
+                        sum += Avx2.MultiplyAddAdjacent(Vector256.ShiftRightLogical(bytes, 4), Vector256.LoadUnsafe(ref o, (nuint)i));
+                    }
+
+                    dot += Vector256.Sum(sum);
+                }
+
+                return dot + Serial.DotProductNibbles(nibbles[i..], even[i..], odd[i..]);
+            }
+        }
+
+        /// <summary>
+        /// The dot product of 4-bit unsigned values, packed two to a byte, with shorts: the low nibble of byte i multiplies <paramref name="even"/>[i] and
+        /// the high nibble <paramref name="odd"/>[i]. The sum is exact, so every path returns the same value.
+        /// </summary>
+        // PERF: The bytes widen to shorts; a mask takes the low nibbles and a shift the high ones, and each multiplies consecutive shorts of its half, with
+        // no shuffle. No multiply-add accumulates onto the running sum, which waits on one add per step and not on the latency of a multiply-add.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static long DotProductNibbles(ReadOnlySpan<byte> nibbles, ReadOnlySpan<short> even, ReadOnlySpan<short> odd)
+        {
+            Debug.Assert(even.Length == nibbles.Length && odd.Length == nibbles.Length, "even.Length == nibbles.Length && odd.Length == nibbles.Length");
+
+            if (Avx512BW.IsSupported)
+                return Vectorized512.DotProductNibblesAvx512(nibbles, even, odd);
+            if (AvxVnni.IsSupported)
+                return Vectorized256.DotProductNibblesAvxVnni(nibbles, even, odd);
+            if (Avx2.IsSupported)
+                return Vectorized256.DotProductNibblesAvx2(nibbles, even, odd);
+            if (Sve.IsSupported)
+                return Vectorized128.DotProductNibblesSve(nibbles, even, odd);
+            if (Sse2.IsSupported || AdvSimd.IsSupported)
+                return Vectorized128.DotProductNibbles(nibbles, even, odd);
+            return Serial.DotProductNibbles(nibbles, even, odd);
+        }
+
+        /// <summary>Applies the Walsh-Hadamard transform, without normalization, in place to <paramref name="values"/>, whose length is a power of two.</summary>
+        public static void WalshHadamardTransform(Span<double> values)
+        {
+            Debug.Assert(BitOperations.IsPow2(values.Length), "BitOperations.IsPow2(values.Length)");
+
+            ref var x = ref MemoryMarshal.GetReference(values);
+            for (var len = 1; len < values.Length; len <<= 1)
+            {
+                for (var i = 0; i < values.Length; i += 2 * len)
+                {
+                    var j = i;
+                    // PERF: The butterflies of a level do not depend on each other, so a level at least as wide as a vector runs a vector of them at a time.
+                    // Each output is the same sum or difference, so the result is identical bit for bit.
+                    if (Vector.IsHardwareAccelerated && len >= Vector<double>.Count)
+                    {
+                        for (; j < i + len; j += Vector<double>.Count)
+                        {
+                            var a = Vector.LoadUnsafe(ref x, (nuint)j);
+                            var b = Vector.LoadUnsafe(ref x, (nuint)(j + len));
+                            (a + b).StoreUnsafe(ref x, (nuint)j);
+                            (a - b).StoreUnsafe(ref x, (nuint)(j + len));
+                        }
+                    }
+
+                    for (; j < i + len; j++)
+                    {
+                        var a = values[j];
+                        var b = values[j + len];
+                        values[j] = a + b;
+                        values[j + len] = a - b;
+                    }
+                }
             }
         }
 
