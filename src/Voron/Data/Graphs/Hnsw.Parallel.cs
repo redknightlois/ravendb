@@ -177,7 +177,7 @@ public partial class Hnsw
                     continue;
 
                 var olderId = EntryPointId;
-                foreach (var id in node.EdgesPerLevel[0].ToSpan())
+                foreach (var id in node.Edges(0))
                 {
                     if (id >= node.NodeId)
                         continue;
@@ -186,7 +186,7 @@ public partial class Hnsw
                 }
 
                 var nodeId = node.NodeId;
-                _searchState.GetNodeById(olderId).EdgesPerLevel[0].Add(_searchState.Llt.Allocator, nodeId);
+                _searchState.GetNodeById(olderId).UpdateEdges(0).Add(_searchState.Llt.Allocator, nodeId);
                 _searchState.GetNodeByIndex(nodeIndex).CountOlderInLink(olderId, 1);
             }
         }
@@ -305,7 +305,7 @@ public partial class Hnsw
                 {
                     //  scoping n here, to avoid "leaking" the reference and async issues
                     ref var n = ref _searchState.GetNodeByIndex(currentNodeIndex);
-                    n.EdgesPerLevel.SetCapacity(_searchState.Llt.Allocator, nodeRandomLevel + 1);
+                    n.EnsureLevels(_searchState.Llt.Allocator, nodeRandomLevel + 1);
                     insertedVector = n.GetVectorUnmanagedSpan(_searchState);
                     AddEdgesFromInFlightNodes(ref n, createdNodeIndex);
                 }
@@ -410,7 +410,7 @@ public partial class Hnsw
 
                     PortableExceptions.ThrowIf<InvalidOperationException>(_candidates.Count == 0, "Cannot add a node to the graph without any edges");
                     ref var node = ref _searchState.GetNodeByIndex(currentNodeIndex);
-                    ref var list = ref node.EdgesPerLevel[level];
+                    ref var list = ref node.UpdateEdges(level);
                     // important - we cannot reset here, since we have added edges from the in flight nodes in AddEdgesFromInFlightNodes()
                     list.EnsureCapacityFor(_searchState.Llt.Allocator, _candidates.Count);
                     _requiresEdgeFiltering.Clear();
@@ -426,9 +426,9 @@ public partial class Hnsw
                                 edge.CountOlderInLink(node.NodeId, 1);
                         }
 
-                        ref var edgeList = ref edge.EdgesPerLevel[level];
-                        if (edgeList.ToSpan().Contains(node.NodeId))
+                        if (edge.Edges(level).Contains(node.NodeId))
                             continue;
+                        ref var edgeList = ref edge.UpdateEdges(level);
                         edgeList.Add(_searchState.Llt.Allocator, node.NodeId);
                         if (level == 0)
                             node.CountOlderInLink(edge.NodeId, 1);
@@ -476,7 +476,7 @@ public partial class Hnsw
                 {
                     while (runner.IsCancelled is false && parent._listsToSelect.TryDequeue(out var overfull))
                     {
-                        if (_searchState.GetNodeByIndex(overfull.Node).EdgesPerLevel[overfull.Level].Count <= _searchState.Options.MaxEdgesAtLevel(overfull.Level))
+                        if (_searchState.GetNodeByIndex(overfull.Node).Edges(overfull.Level).Length <= _searchState.Options.MaxEdgesAtLevel(overfull.Level))
                             continue;
 
                         _requiresEdgeFiltering.Clear();
@@ -524,7 +524,7 @@ public partial class Hnsw
                 parent._forTestingPurposes?.BeforeEdgesReplaced?.Invoke(_searchState, nodeIndex, level);
                 _liveIndexes.Clear();
                 ref Node live = ref _searchState.GetNodeByIndex(nodeIndex);
-                var ids = live.EdgesPerLevel[level].ToSpan();
+                var ids = live.Edges(level);
                 // PERF: An index list that holds as many entries as the id list mirrors it, so the live list is read without a lookup per id.
                 if (live.EdgesIndexesPerLevel.Count > level && live.EdgesIndexesPerLevel[level].Count == ids.Length)
                 {
@@ -553,7 +553,7 @@ public partial class Hnsw
                     KeepLastOlderInLinks(nodeIndex);
 
                 ref Node node = ref _searchState.GetNodeByIndex(nodeIndex);
-                ref var list = ref node.EdgesPerLevel[level];
+                ref var list = ref node.UpdateEdges(level);
                 list.ResetAndEnsureCapacity(_searchState.Llt.Allocator, _candidates.Count);
                 foreach (var idx in _candidates)
                 {
@@ -609,10 +609,10 @@ public partial class Hnsw
                 for (int i = 0; i < used; i++)
                 {
                     ref var edge = ref _searchState.GetNodeByIndex(_indexes[i]);
-                    int sharedLevels = Math.Min(edge.EdgesPerLevel.Count, n.EdgesPerLevel.Count);
+                    int sharedLevels = Math.Min(edge.CountOfLevels, n.CountOfLevels);
                     for (int level = 0; level < sharedLevels; level++)
                     {
-                        n.EdgesPerLevel[level].Add(_searchState.Llt.Allocator, edge.NodeId);
+                        n.UpdateEdges(level).Add(_searchState.Llt.Allocator, edge.NodeId);
                     }
                     if (sharedLevels > 0)
                         edge.CountOlderInLink(n.NodeId, 1);
@@ -725,7 +725,7 @@ public partial class Hnsw
                     for (int i = 0; i < indexes.Count; i++)
                     {
                         var nextIndex = indexes[i];
-                        Debug.Assert(searchState.Nodes[nextIndex].EdgesPerLevel.Count > Level); 
+                        Debug.Assert(searchState.Nodes[nextIndex].CountOfLevels > Level); 
                    
                         float nextDist = -searchState.Distance(_vector, vectors[i]);
                         if (nearestEdgesQ.Count < numberOfCandidates)
@@ -825,19 +825,17 @@ public partial class Hnsw
 
                 ref var n = ref _searchState.GetNodeByIndex(currentNodeIndex);
 
-                // The slow path runs RegisterForPreloading first, which sizes both lists.
-                // The all-in-memory fast path skips that step, so we must guarantee the slot
-                // exists before we ref into it. SetCapacity is a no-op when already sized.
-                n.EdgesPerLevel.SetCapacity(_searchState.Llt.Allocator, level + 1);
+                // RegisterForPreloading sizes both lists on the slow path; the all-in-memory fast path skips it, so both are sized here. Sizing a list that is already sized does nothing.
+                n.EnsureLevels(_searchState.Llt.Allocator, level + 1);
                 n.EdgesIndexesPerLevel.SetCapacity(_searchState.Llt.Allocator, level + 1);
 
-                ref var edgesList = ref n.EdgesPerLevel[level];
+                var edgesList = n.Edges(level);
                 ref var edgesIndexes = ref n.EdgesIndexesPerLevel[level];
-                if (edgesIndexes.Count != edgesList.Count)
+                if (edgesIndexes.Count != edgesList.Length)
                 {
                     // PERF: A stale list of edge indexes is rebuilt here, and the vector of every edge that does not hold it yet is loaded in the same pass.
                     // Every other path that fills the list loads the vectors of its nodes before the list is read, and a loaded vector stays loaded, so a list in sync needs no per-edge check.
-                    edgesIndexes.ResetAndEnsureCapacity(_searchState.Llt.Allocator, edgesList.Count);
+                    edgesIndexes.ResetAndEnsureCapacity(_searchState.Llt.Allocator, edgesList.Length);
                     foreach (var nodeId in edgesList)
                     {
                         int idx = _searchState.GetNodeIndexById(nodeId);
@@ -1162,17 +1160,17 @@ public partial class Hnsw
                 if (n.VectorLoaded is false)
                     batch.Add(n.NodeId);
                 
-                n.EdgesPerLevel.SetCapacity(searchState.Llt.Allocator, Level + 1);
+                n.EnsureLevels(searchState.Llt.Allocator, Level + 1);
                 n.EdgesIndexesPerLevel.SetCapacity(searchState.Llt.Allocator, Level + 1);
 
-                ref var edgesList = ref n.EdgesPerLevel[Level];
+                var edgesList = n.Edges(Level);
                 ref var edgesIndexes = ref n.EdgesIndexesPerLevel[Level];
                 // turns out that the checks for the node id -> index are really expensive
                 // so we try to cache them
-                if (edgesIndexes.Count != edgesList.Count)
+                if (edgesIndexes.Count != edgesList.Length)
                 {
-                    edgesIndexes.ResetAndEnsureCapacity(searchState.Llt.Allocator, edgesList.Count);
-                    for (int i = 0; i < edgesList.Count; i++)
+                    edgesIndexes.ResetAndEnsureCapacity(searchState.Llt.Allocator, edgesList.Length);
+                    for (int i = 0; i < edgesList.Length; i++)
                     {
                         var nodeId = edgesList[i];
                         if (searchState.TryGetNodeById(nodeId, out var nodeIndex))

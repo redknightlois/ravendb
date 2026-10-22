@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using Sparrow;
 using Sparrow.Compression;
+using Sparrow.Server;
 using Sparrow.Server.Utils;
 using Voron.Data.Containers;
 using Voron.Global;
@@ -20,7 +21,7 @@ public partial class Hnsw
         // PERF: Hot fields read by the search inner loop are colocated at the start of the struct so a
         // single cache line covers PostingListId (tombstone check), _vectorSpan (kernel input),
         // Visited (RW per candidate), and the QueryDistance memo. VectorId / NodeId follow to keep
-        // line 0 saturated; the resolve-only fields (EdgesPerLevel / EdgesIndexesPerLevel) land on line 1.
+        // line 0 saturated; the resolve-only fields (edges and their indexes) land on line 1.
         public long PostingListId;
         internal UnmanagedSpan _vectorSpan;
         public int Visited;
@@ -33,11 +34,51 @@ public partial class Hnsw
         public long VectorId;
         public long NodeId;
 
-        public NativeList<NativeList<long>> EdgesPerLevel;
+        // Changed after the load only through the methods that mark the node changed, so a commit persists every node whose edges it changed.
+        private NativeList<NativeList<long>> _edgesPerLevel;
         public NativeList<NativeList<int>> EdgesIndexesPerLevel;
 
         // Number of distinct nodes with a smaller id whose base-layer list holds this node.
         internal int OlderInLinks;
+
+        // The values of the stored record that the node was loaded from. A commit rewrites only the nodes that differ from it.
+        private bool _stored;
+        private bool _edgesUpdated;
+        private int _storedOlderInLinks;
+        private long _storedPostingListId;
+
+        internal bool DiffersFromStoredRecord => _stored == false || _edgesUpdated || OlderInLinks != _storedOlderInLinks || PostingListId != _storedPostingListId;
+
+        public int CountOfLevels => EncodedRecord != null ? EncodedLevelCount : _edgesPerLevel.Count;
+
+        public ReadOnlySpan<long> Edges(int level)
+        {
+            Debug.Assert(EncodedRecord == null, "The edges of the node were not decoded");
+            return _edgesPerLevel[level].ToSpan();
+        }
+
+        internal ref NativeList<long> UpdateEdges(int level)
+        {
+            _edgesUpdated = true;
+            return ref _edgesPerLevel[level];
+        }
+
+        internal void EnsureLevels(ByteStringContext allocator, int count)
+        {
+            if (_edgesPerLevel.Count >= count)
+                return;
+            _edgesUpdated = true;
+            _edgesPerLevel.SetCapacity(allocator, count);
+        }
+
+        internal void Load(long vectorId, long postingListId, int olderInLinks, NativeList<NativeList<long>> edgesPerLevel)
+        {
+            VectorId = vectorId;
+            PostingListId = _storedPostingListId = postingListId;
+            OlderInLinks = _storedOlderInLinks = olderInLinks;
+            _edgesPerLevel = edgesPerLevel;
+            _stored = true;
+        }
 
         internal void CountOlderInLink(long fromNodeId, int change)
         {
@@ -51,13 +92,10 @@ public partial class Hnsw
         internal bool NeedsOlderInLinkFrom(long fromNodeId) => fromNodeId < NodeId && OlderInLinks == 0;
 
         // Set when a read transaction loaded only the header of the node: the stored record, in a page of the transaction, that
-        // EdgesPerLevel is decoded from when a search first reads the edges of the node.
+        // its edges are decoded from when a search first reads them.
         internal byte* EncodedRecord;
         internal int EncodedRecordLength;
         internal int EncodedLevelCount;
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal int GetLevelCount() => EncodedRecord != null ? EncodedLevelCount : EdgesPerLevel.Count;
 
         public bool VectorLoaded => _vectorSpan.Length > 0;
 
@@ -98,13 +136,13 @@ public partial class Hnsw
 
         public Span<byte> Encode(ref ContextBoundNativeList<byte> buffer)
         {
-            int countOfLevels = EdgesPerLevel.Count;
+            int countOfLevels = _edgesPerLevel.Count;
 
             // posting list id, vector id, count of levels, older in-link count
             var maxSize = 4 * VariableSizeEncoding.MaximumSizeOf<long>();
             for (int i = 0; i < countOfLevels; i++)
             {
-                maxSize += EdgesPerLevel[i].Count * VariableSizeEncoding.MaximumSizeOf<long>();
+                maxSize += _edgesPerLevel[i].Count * VariableSizeEncoding.MaximumSizeOf<long>();
             }
 
             buffer.EnsureCapacityFor(maxSize);
@@ -118,7 +156,7 @@ public partial class Hnsw
 
             for (int i = 0; i < countOfLevels; i++)
             {
-                Span<long> span = EdgesPerLevel[i].ToSpan();
+                Span<long> span = _edgesPerLevel[i].ToSpan();
                 int len = Sorting.SortAndRemoveDuplicates(span);
                 span = span[..len];
                 long prev = 0;

@@ -228,7 +228,7 @@ public unsafe partial class Hnsw
         private void DecodeEdges(ref Node node)
         {
             var reader = new NodeReader(Llt.Allocator, new Span<byte>(node.EncodedRecord, node.EncodedRecordLength));
-            reader.LoadEdgesInto(ref node);
+            reader.LoadInto(ref node);
             node.EncodedRecord = null;
         }
 
@@ -474,7 +474,7 @@ public unsafe partial class Hnsw
             // Fast path: the resolved indexes for this level are already cached on the node.
             // The slow path (miss) is in a NoInlining helper so only this copy is inlined into
             // callers inside the search loop.
-            int edgeCount = node.EdgesPerLevel[level].Count;
+            int edgeCount = node.Edges(level).Length;
             if (node.EdgesIndexesPerLevel.Count > level &&
                 node.EdgesIndexesPerLevel[level].Count == edgeCount)
             {
@@ -490,7 +490,7 @@ public unsafe partial class Hnsw
         internal void AssertEdgeIndexesMatchEdges(int nodeIndex, int level)
         {
             ref var node = ref GetNodeByIndex(nodeIndex);
-            var ids = node.EdgesPerLevel[level].ToSpan();
+            var ids = node.Edges(level);
             foreach (var index in node.EdgesIndexesPerLevel[level].ToSpan())
                 Debug.Assert(ids.Contains(_nodes[index].NodeId), "The index list of a level has the count of the id list, but not the same edges.");
         }
@@ -499,7 +499,7 @@ public unsafe partial class Hnsw
         private void ResolveEdgeIndexesSlow(int nodeIndex, int level, CodeScreen screen, double threshold, ref NativeList<long> nodeIds, ref NativeList<int> indexes)
         {
             ref var node = ref GetNodeByIndex(nodeIndex);
-            nodeIds.ResetAndCopyFrom(Llt.Allocator, node.EdgesPerLevel[level].ToSpan());
+            nodeIds.ResetAndCopyFrom(Llt.Allocator, node.Edges(level));
             int edgeCount = nodeIds.Count;
             LoadNodeIndexes(ref nodeIds, ref indexes, screen, threshold);
 
@@ -796,7 +796,7 @@ public unsafe partial class Hnsw
             var level = maxLevel;
             ref var entry = ref GetNodeByIndex(currentNodeIndex);
             EnsureEdgesDecoded(ref entry);
-            entry.EdgesPerLevel.SetCapacity(Llt.Allocator, maxLevel + 1);
+            entry.EnsureLevels(Llt.Allocator, maxLevel + 1);
             var distance = Distance(vector, dstIdx, currentNodeIndex);
             var indexes = new NativeList<int>();
             var nodeIds = new NativeList<long>();
@@ -807,7 +807,7 @@ public unsafe partial class Hnsw
                 do
                 {
                     moved = false;
-                    Debug.Assert(GetNodeByIndex(currentNodeIndex).GetLevelCount() > level, "n.GetLevelCount() > level");
+                    Debug.Assert(GetNodeByIndex(currentNodeIndex).CountOfLevels > level, "n.CountOfLevels > level");
                     // A node is evaluated once and the distance only falls, so a neighbor that the descent without the screen does not move to is never closer
                     // than a later current node: the screened descent, which may check or evaluate it again, does not move to it either.
                     ResolveEdgeIndexes(currentNodeIndex, level, screen, distance, ref nodeIds, ref indexes);
@@ -1606,22 +1606,28 @@ public unsafe partial class Hnsw
             return parameters;
         }
 
+        // PERF: A node that matches the record it was loaded from is skipped, and a stored record that already holds the encoded bytes is not modified,
+        // so the commit copies and writes no page for either.
         void PersistNode(ref Node node, ref ContextBoundNativeList<byte> byteBuffer)
         {
+            if (node.DiffersFromStoredRecord == false)
+                return;
+
             var encoded = node.Encode(ref byteBuffer);
             if (_searchState.TryGetLocationForNode(node.NodeId, out var locationId))
             {
-                if (Container.GetReadOnly(_searchState.Llt, new ContainerEntryId(locationId)).SequenceEqual(encoded))
+                var id = new ContainerEntryId(locationId);
+                Container.Get(_searchState.Llt, id, out var stored);
+                if (stored.ToSpan().SequenceEqual(encoded))
                     return;
 
-                var existing = Container.GetMutable(_searchState.Llt, new ContainerEntryId(locationId));
-                if (existing.Length == encoded.Length)
+                if (stored.Length == encoded.Length)
                 {
-                    encoded.CopyTo(existing);
+                    encoded.CopyTo(Container.GetMutable(_searchState.Llt, id));
                     return;
                 }
 
-                Container.Delete(_searchState.Llt, _searchState.Options.Container, new ContainerEntryId(locationId));
+                Container.Delete(_searchState.Llt, _searchState.Options.Container, id);
             }
 
             var allocatedId = Container.Allocate(_searchState.Llt, _searchState.Options.Container, encoded.Length, out var storage);

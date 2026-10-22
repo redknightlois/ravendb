@@ -50,9 +50,7 @@ public partial class Hnsw
         /// </summary>
         public void LoadHeaderInto(ref Node node)
         {
-            node.VectorId = VectorId;
-            node.PostingListId = PostingListId;
-            node.OlderInLinks = OlderInLinks;
+            node.Load(VectorId, PostingListId, OlderInLinks, default);
             if (CountOfLevels == 0)
                 return;
             node.EncodedRecord = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(_buffer));
@@ -62,19 +60,13 @@ public partial class Hnsw
 
         public void LoadInto(ref Node node)
         {
-            node.VectorId = VectorId;
-            node.PostingListId = PostingListId;
-            node.OlderInLinks = OlderInLinks;
-            LoadEdgesInto(ref node);
-        }
-
-        public void LoadEdgesInto(ref Node node)
-        {
-            node.EdgesPerLevel.EnsureCapacityFor(_allocator, CountOfLevels);
+            var edgesPerLevel = new NativeList<NativeList<long>>();
+            edgesPerLevel.EnsureCapacityFor(_allocator, CountOfLevels);
             for (var level = 0; level < CountOfLevels; level++)
             {
-                node.EdgesPerLevel.AddUnsafe(ReadEdges());
+                edgesPerLevel.AddUnsafe(ReadEdges());
             }
+            node.Load(VectorId, PostingListId, OlderInLinks, edgesPerLevel);
         }
 
         /// <summary>Replaces the content of <paramref name="edges"/> with the edge ids of the next level, without allocating native memory.</summary>
