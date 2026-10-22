@@ -653,7 +653,7 @@ namespace Raven.Server.Config.Categories
         public int CoraxVectorDefaultNumberOfEdges { get; protected set; }
         
         [Description("The default number of candidates (potential neighboring vectors) that RavenDB evaluates during vector indexing. In the bottom layer of the graph, RavenDB evaluates at least twice the number of edges.")]
-        [DefaultValue(16)]
+        [DefaultValue(64)]
         [IndexUpdateType(IndexUpdateType.Reset)]
         [ConfigurationEntry("Indexing.Corax.VectorSearch.DefaultNumberOfCandidatesForIndexing", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
         public int CoraxVectorDefaultNumberOfCandidatesForIndexing { get; protected set; }
