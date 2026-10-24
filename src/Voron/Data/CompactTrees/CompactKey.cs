@@ -41,12 +41,12 @@ public sealed unsafe class CompactKey : IDisposable
     private const int MappingTableSize = 64;
     private const int MappingTableMask = MappingTableSize - 1;
 
-    private long[] _keyMappingCache = new long[2 * MappingTableMask];
+    private long[] _keyMappingCache;
     private ref long KeyMappingCache(int i) => ref _keyMappingCache[i];
     private ref long KeyMappingCacheIndex(int i) => ref _keyMappingCache[MappingTableSize + i];
 
 
-    private byte[] _storage = new byte[2 * Constants.CompactTree.MaximumKeySize];
+    private byte[] _storage;
 
     // The storage data will be used in an arena fashion. If there is no enough, we just create a bigger one and
     // copy the content back. 
@@ -84,8 +84,9 @@ public sealed unsafe class CompactKey : IDisposable
         _currentIdx = 0;
         MaxLength = 0;
 
-        _storage = GetPoolFrom(SharedBytesPools).Rent(2 * Constants.CompactTree.MaximumKeySize);
-        _keyMappingCache = GetPoolFrom(SharedKeyMappingPools).Rent(2 * MappingTableSize);
+        // PERF: The buffers are rented once and kept until Reset returns them, so a key reused in a loop allocates nothing.
+        _storage ??= GetPoolFrom(SharedBytesPools).Rent(2 * Constants.CompactTree.MaximumKeySize);
+        _keyMappingCache ??= GetPoolFrom(SharedKeyMappingPools).Rent(2 * MappingTableSize);
     }
 
     public void Reset()
