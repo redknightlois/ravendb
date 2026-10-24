@@ -329,6 +329,34 @@ public class RavenDB_23453(ITestOutputHelper output) : StorageTest(output)
         }
     }
 
+    [RavenTheory(RavenTestCategory.Querying | RavenTestCategory.Corax | RavenTestCategory.Vector)]
+    [InlineDataWithRandomSeed(false)]
+    [InlineDataWithRandomSeed(true)]
+    public void FilterDoesNotRankVectorSearch(bool multiVector, int seed)
+    {
+        using var mapping = GetMapping();
+        var docs = GetDocs(360).ToList();
+        IndexDocuments(Env, mapping, docs, new Random(seed));
+
+        using var indexSearcher = new IndexSearcher(Env, mapping);
+        var numerical = mapping.GetByFieldId(2).Metadata.ChangeScoringMode(true);
+        var filter = indexSearcher.Or(indexSearcher.BetweenQuery(numerical, 15L, 16L), indexSearcher.Boost(indexSearcher.BetweenQuery(numerical, 17L, 18L), 100));
+        float[][] vectors = multiVector ? [docs[0].Vector, docs[180].Vector] : [docs[0].Vector];
+        var values = vectors.Select(v => GenerateEmbeddings.FromArray(indexSearcher.Transaction.Allocator, MemoryMarshal.Cast<float, byte>(v), VectorOptions.Default)).ToArray();
+        var field = mapping.GetByFieldId(3).Metadata.ChangeScoringMode(true);
+        IQueryMatch vecSearch = multiVector
+            ? indexSearcher.MultiVectorSearch(field, values, 0.75f, 16, isExact: true, false, filter, 0)
+            : indexSearcher.VectorSearch(field, values[0], 0.75f, 16, isExact: true, false, filter, 0);
+        var query = indexSearcher.OrderBy(vecSearch, [new OrderMetadata(true, MatchCompareFieldType.Score)], defaultNullsSortMode: NullsSortMode.NullsSmallest);
+        var distances = EvaluateQuery(indexSearcher, ref query)
+            .Select(id => vectors.Min(v => 1 - System.Numerics.Tensors.TensorPrimitives.CosineSimilarity(docs.Single(d => d.Id == id).Vector, v)))
+            .ToList();
+
+        Assert.Equal(multiVector ? 32 : 16, distances.Count);
+        for (var i = 1; i < distances.Count; i++)
+            Assert.True(distances[i - 1] <= distances[i] + 1e-5f);
+    }
+
     private List<string> EvaluateQuery<TQueryMatch>(IndexSearcher indexSearcher, ref TQueryMatch queryMatch)
         where TQueryMatch : IQueryMatch
     {
