@@ -305,10 +305,6 @@ public struct VectorSearchMatch : IPostFilterMatch
             ref var matchesRef = ref MemoryMarshal.GetReference(matches);
             ref var scoresRef = ref MemoryMarshal.GetReference(scores);
             ref var distanceRef = ref MemoryMarshal.GetReference(_distances.Results);
-            if (_filterQuery != null)
-                _filterQuery.Score(matches, scores, boostFactor);
-
-
             for (var i = 0; i < matches.Length; ++i)
             {
                 var match = Unsafe.Add(ref matchesRef, i);
