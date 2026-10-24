@@ -223,12 +223,6 @@ public struct MultiVectorSearchMatch : IQueryMatch
         
         if (_singleVectorSearchDoNotSort == false)
         {
-            if (_filterQuery != null)
-            {
-                ref var filterQuery = ref _filterQuery;
-                filterQuery.Score(matches, scores, boostFactor);
-            }
-
             for (int i = 0; i < matches.Length; ++i)
             {
                 var match = matches[i];
