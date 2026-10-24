@@ -15,8 +15,9 @@ public unsafe partial class Hnsw
     /// <summary>
     /// The working set of a filtered traversal: the ball expected to hold <paramref name="numberOfCandidates"/> of the filter's nodes, with the filter's entry
     /// count <paramref name="filterCount"/> standing in for its node count. Saturates at the graph's size. Entries that share a node or have none make the
-    /// ball too small, and a filter whose entries reach fewer than <paramref name="numberOfCandidates"/> nodes makes the traversal read every reachable node;
-    /// counting the filter's nodes instead takes a pass over its entries.
+    /// ball too small. A traversal that can list the filter's nodes stops once it has read as many vectors as the filter has entries and scans those nodes
+    /// instead, so a filter whose entries reach fewer than <paramref name="numberOfCandidates"/> nodes costs a pass over its entries, not a read of every
+    /// reachable node.
     /// </summary>
     public static int FilteredBeam(int numberOfCandidates, long filterCount, long countOfVectors) =>
         (int)Math.Min(Math.Min(countOfVectors, int.MaxValue), Math.Max(numberOfCandidates, (long)Math.Ceiling((double)numberOfCandidates * countOfVectors / Math.Max(1, filterCount))));
@@ -44,14 +45,19 @@ public unsafe partial class Hnsw
             private ContextBoundNativeList<long> _filterScratch;
             private FastPForDecoder _filterDecoder;
             private readonly int _numberOfCandidates;
+            private readonly Func<ContextBoundNativeList<long>> _filterNodes;
+            private readonly long _readLimit = long.MaxValue;
+            private ContextBoundNativeList<long> _scanNodes;
+            private ExactSearcher _scan;
 
-            public long CandidatesProcessed { get => _vectorReadCounter; }
+            public long CandidatesProcessed { get => _vectorReadCounter + (_scan?.CandidatesProcessed ?? 0); }
 
             public NearestSearcher(SearchState searchState, int startingPointIndex, Memory<byte> vector,
                 int level, int numberOfCandidates,
                 ContextBoundNativeList<int> candidates,
                 NearestEdgesFlags flags,
-                GrowableBitArray? filter)
+                GrowableBitArray? filter,
+                Func<ContextBoundNativeList<long>> filterNodes)
             {
                 _searchState = searchState;
                 _startingPointIndex = startingPointIndex;
@@ -65,6 +71,9 @@ public unsafe partial class Hnsw
                     _filterScratch = new ContextBoundNativeList<long>(searchState.Llt.Allocator);
                     _filterDecoder = new(searchState.Llt.Allocator);
                     _internalNumberOfCandidates = FilteredBeam(numberOfCandidates, f.Count, searchState.Options.CountOfVectors);
+                    _filterNodes = filterNodes;
+                    if (filterNodes is not null)
+                        _readLimit = f.Count;
                 }
 
                 _candidates = candidates;
@@ -132,11 +141,18 @@ public unsafe partial class Hnsw
                 var candidatesQ = _searchState._candidatesQ;
                 var visitedCounter = InitState();
                 var threshold = Threshold();
+                var stopped = false;
 
                 while (candidatesQ.TryDequeue(out var cur, out var curDistance))
                 {
                     if (-curDistance < threshold)
                         break;
+
+                    if (_vectorReadCounter > _readLimit)
+                    {
+                        stopped = true;
+                        break;
+                    }
 
                     _searchState.GetNodeByIndex(cur).Visited = visitedCounter;
                     var isFull = threshold > float.NegativeInfinity;
@@ -176,7 +192,12 @@ public unsafe partial class Hnsw
                 ProcessResults();
                 // The queues belong to the SearchState, and the next traversal on it starts from them empty.
                 candidatesQ.Clear();
-                return _candidates;
+                if (stopped == false)
+                    return _candidates;
+
+                _scanNodes = _filterNodes();
+                _scan = new ExactSearcher(_searchState, _vector, _numberOfCandidates, null, _scanNodes);
+                return _scan.Search();
             }
 
             private void ProcessResults()
@@ -221,6 +242,8 @@ public unsafe partial class Hnsw
 
             public void Dispose()
             {
+                _scan?.Dispose();
+                _scanNodes.Dispose();
                 if (_filter is not null)
                 {
                     _filterScratch.Dispose();

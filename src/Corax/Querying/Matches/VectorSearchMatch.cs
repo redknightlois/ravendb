@@ -108,10 +108,9 @@ public struct VectorSearchMatch : IQueryMatch
             }
         }
         
-        _scanningQuery = IndexSearcher.VectorSearchUtils.ShouldScan(_indexSearcher, _filterMatchesCount, _isExact, _filterQuery, _scanningThreshold, _numberOfCandidates);
-        var llt = _indexSearcher._transaction.LowLevelTransaction;
+        var searchState = _indexSearcher.GetOrCreateVectorSearchState(_metadata.FieldName);
+        _scanningQuery = IndexSearcher.VectorSearchUtils.ShouldScan(_indexSearcher, _filterMatchesCount, _isExact, _filterQuery, _scanningThreshold, _numberOfCandidates, searchState.Options.CountOfVectors);
         var vector = _vectorToSearch.GetEmbeddingMemory();
-        var fieldName = _metadata.FieldName;
         
         ContextBoundNativeList<long> nodesIdsToScan = default;
         if (_scanningQuery)
@@ -127,16 +126,14 @@ public struct VectorSearchMatch : IQueryMatch
             
             _nodesIdsToScan = nodesIdsToScan;
         }
-        
-        
-        var searchState = _indexSearcher.GetOrCreateVectorSearchState(fieldName);
 
         var filter = _filterQuery != null ? _filterResults : null;
         _vectorSearchRetriever = _isExact switch
         {
             _ when _scanningQuery => Hnsw.ExactNearest(searchState, _numberOfCandidates, vector, _minimumMatch, nodesToScan: nodesIdsToScan),
             true => Hnsw.ExactNearest(searchState, _numberOfCandidates, vector, _minimumMatch, filter),
-            _ => Hnsw.ApproximateNearest(searchState, _numberOfCandidates, vector, _minimumMatch, filter),
+            _ => Hnsw.ApproximateNearest(searchState, _numberOfCandidates, vector, _minimumMatch, filter,
+                filter is { } f ? IndexSearcher.VectorSearchUtils.FilterNodes(_indexSearcher, _metadata, f) : null),
         };
         
 
