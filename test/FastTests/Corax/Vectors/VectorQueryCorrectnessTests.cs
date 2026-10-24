@@ -84,6 +84,24 @@ public class VectorQueryCorrectnessTests(ITestOutputHelper output) : StorageTest
         });
     }
 
+    [RavenFact(RavenTestCategory.Vector | RavenTestCategory.Corax)]
+    public void FilteredSearchReadsInProportionToTheFilterWhenItsEntriesHaveNoVector()
+    {
+        var random = new Random(7);
+        using var _ = GetMappings(out var mapping, out var getVector);
+        // The filter holds 400 entries and only the last 3 have a vector, so it reaches fewer nodes than the requested candidates.
+        var docs = Enumerable.Range(0, 1500).Select(_ => ("b", new[] { Gaussian(random) }))
+            .Concat(Enumerable.Range(0, 397).Select(_ => ("a", Array.Empty<float[]>())))
+            .Concat(Enumerable.Range(0, 3).Select(_ => ("a", new[] { Gaussian(random) })))
+            .ToArray();
+        var ids = Index(mapping, getVector, docs);
+
+        using var indexSearcher = new IndexSearcher(Env, mapping);
+        var (entries, processed) = Run(indexSearcher, mapping, getVector(Gaussian(random)), indexSearcher.TermQuery("Tag", "a"));
+        Assert.Equal(ids[^3..].Order(), entries.Order());
+        Assert.True(long.Parse(processed) < 2 * 400, processed);
+    }
+
     private static (List<long> Entries, string Processed) Run(IndexSearcher indexSearcher, IndexFieldsMapping mapping, VectorValue query, IQueryMatch filter)
     {
         var match = indexSearcher.VectorSearch(mapping.GetByFieldId(1).Metadata, query, 0f, 10, false, true, filter, 0);

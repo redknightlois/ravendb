@@ -20,9 +20,10 @@ public partial class IndexSearcher
 {
     internal static class VectorSearchUtils
     {
-        public static bool ShouldScan(IndexSearcher indexSearcher, long filterMatchesCount, bool isExact, IQueryMatch filterQuery, int scanningThreshold, int numberOfCandidates)
+        // PERF: A slot of the graph search's working set costs about as much as scanning five of the filter's nodes, so the scan wins when the filter holds no more than five times that working set.
+        public static bool ShouldScan(IndexSearcher indexSearcher, long filterMatchesCount, bool isExact, IQueryMatch filterQuery, int scanningThreshold, int numberOfCandidates, long countOfVectors)
         {
-            var shouldScan = filterQuery != null && (filterMatchesCount < scanningThreshold || isExact || filterMatchesCount * 0.5 < numberOfCandidates);
+            var shouldScan = filterQuery != null && (filterMatchesCount < scanningThreshold || isExact || filterMatchesCount <= 5L * Hnsw.FilteredBeam(numberOfCandidates, filterMatchesCount, countOfVectors));
             if (indexSearcher._testingConfiguration is {DisableVectorSearchScanning: true})
                 return false;
              
@@ -96,6 +97,9 @@ public partial class IndexSearcher
             
             return nodesIdsToScan.Count > 0;
         }
+
+        public static Func<ContextBoundNativeList<long>> FilterNodes(IndexSearcher indexSearcher, FieldMetadata metadata, GrowableBitArray filterResults) =>
+            () => TryConvertDocumentsIdsToNodesIds(indexSearcher, metadata, filterResults, out var nodes) ? nodes : default;
     }
 
 
