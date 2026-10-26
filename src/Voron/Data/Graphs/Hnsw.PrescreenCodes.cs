@@ -435,18 +435,26 @@ public partial class Hnsw
         public double LowerBound(ReadOnlySpan<byte> row)
         {
             Debug.Assert(row.Length == _parameters.RowBytes, "row.Length == _parameters.RowBytes");
+            var bound = Distance(row, _slack, out var scale) - scale * _errorFactor;
+            return double.IsFinite(bound) ? bound : double.NegativeInfinity;
+        }
+
+        /// <summary>The cosine distance that the code <paramref name="row"/> estimates, without the slack and the error term of <see cref="LowerBound"/>; NaN when the query or the node has no direction.</summary>
+        public double Estimate(ReadOnlySpan<byte> row) => Distance(row, 0, out _);
+
+        // NaN when the query or the node has no direction; the slack is added to the dot of the code and the query.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private double Distance(ReadOnlySpan<byte> row, double slack, out float scale)
+        {
             var codeBytes = _parameters.CodeBytes;
-            var scale = CodeParameters.Scale(row, codeBytes);
+            scale = CodeParameters.Scale(row, codeBytes);
             if (_coordinates.HasValue == false || float.IsNaN(scale))
-                return double.NegativeInfinity;
+                return double.NaN;
 
             var halves = MemoryMarshal.Cast<byte, short>(_coordinates.ToSpan());
-            var dot = Dot(row[..codeBytes], halves[..codeBytes], halves[codeBytes..]) * _unit + _slack;
-
+            var dot = Dot(row[..codeBytes], halves[..codeBytes], halves[codeBytes..]) * _unit + slack;
             var centerTerm = BinaryPrimitives.ReadSingleLittleEndian(row[(codeBytes + sizeof(float))..]);
-            var estimate = 1 - (_offset + centerTerm + scale * (dot - _zeroTerm));
-            var bound = estimate - scale * _errorFactor;
-            return double.IsFinite(bound) ? bound : double.NegativeInfinity;
+            return 1 - (_offset + centerTerm + scale * (dot - _zeroTerm));
         }
 
         // The exact sum of the levels times the shorts, so every path returns the same value.
@@ -642,6 +650,11 @@ public partial class Hnsw
     /// Cap. The larger of 512 and four events per working-set slot: a larger working set admits more neighbors before it settles. A query that spends the cap
     /// loses part of the saving, never correctness.
     /// </para>
+    /// <para>
+    /// Steering. A query without a filter does not screen. Its descent moves to the neighbor with the lowest <see cref="Estimate"/>, and its base-layer traversal
+    /// orders its candidates and its working set by <see cref="Estimate"/> and ranks the final working set by exact distances. The bound above covers the
+    /// filtered traversals and their descent.
+    /// </para>
     /// </summary>
     internal sealed unsafe class CodeScreen : IDisposable
     {
@@ -651,11 +664,11 @@ public partial class Hnsw
         private readonly CodeQuery _query;
         private readonly ByteStringContext _allocator;
         private readonly long _maxNodeId;
-        // PERF: One bit per node id of the snapshot, so remembering an id is one bit test and set, with no hashing. Allocated and zeroed at the first
-        // rejection of the traversal: 125 KB per million nodes. The zeroing grows with the graph, not with the rejections; a bitmap kept across traversals
-        // that clears only the words it set replaces it when the zeroing shows in the query time.
-        private ulong* _rejected;
-        private ByteStringContext<ByteStringMemoryCache>.InternalScope _rejectedScope;
+        // PERF: One bit per node id of the snapshot, so a mark is one bit test and set, with no hashing. Allocated and zeroed at the first mark of the
+        // traversal: the neighbors a screened traversal rejected, or those a steered traversal checked. 125 KB per million nodes. The zeroing grows with the
+        // graph, not with the marks; a bitmap kept across traversals that clears only the words it set replaces it when the zeroing shows in the query time.
+        private ulong* _marks;
+        private ByteStringContext<ByteStringMemoryCache>.InternalScope _marksScope;
 
         public CodeScreen(CodeParameters parameters, ReadOnlySpan<byte> tensor, int cap, long maxNodeId, ByteStringContext allocator)
         {
@@ -683,28 +696,37 @@ public partial class Hnsw
         /// <summary>True while the descent screens: its rejections are not remembered.</summary>
         public bool Descending;
 
-        public bool IsRejected(long nodeId) => _rejected != null && (ulong)nodeId <= (ulong)_maxNodeId && (_rejected[nodeId >> 6] & (1UL << (int)(nodeId & 63))) != 0;
-
         // An id outside the snapshot is never remembered: the resolution of the node reports it.
         public void Reject(long nodeId)
         {
-            if (Descending || (ulong)nodeId > (ulong)_maxNodeId)
-                return;
+            if (Descending == false && (ulong)nodeId <= (ulong)_maxNodeId && Mark(nodeId))
+                Rejected++;
+        }
 
-            if (_rejected == null)
+        public bool IsMarked(long nodeId) => _marks != null && (ulong)nodeId <= (ulong)_maxNodeId && (_marks[nodeId >> 6] & (1UL << (int)(nodeId & 63))) != 0;
+
+        /// <summary>Marks the id; false when it was marked already. An id outside the snapshot is never marked, so it always reads as new: the resolution of the node reports it.</summary>
+        public bool Mark(long nodeId)
+        {
+            if ((ulong)nodeId > (ulong)_maxNodeId)
+                return true;
+
+            if (_marks == null)
             {
-                _rejectedScope = _allocator.Allocate(checked((int)((_maxNodeId >> 6) + 1) * sizeof(ulong)), out ByteString bits);
+                _marksScope = _allocator.Allocate(checked((int)((_maxNodeId >> 6) + 1) * sizeof(ulong)), out ByteString bits);
                 bits.ToSpan().Clear();
-                _rejected = (ulong*)bits.Ptr;
+                _marks = (ulong*)bits.Ptr;
             }
 
-            ref var word = ref _rejected[nodeId >> 6];
+            ref var word = ref _marks[nodeId >> 6];
             var bit = 1UL << (int)(nodeId & 63);
             if ((word & bit) != 0)
-                return;
+                return false;
             word |= bit;
-            Rejected++;
+            return true;
         }
+
+        public double Estimate(ReadOnlySpan<byte> row) => _query.Estimate(row);
 
         /// <summary>True when the code <paramref name="row"/> proves that its node is not admitted at <paramref name="threshold"/>.</summary>
         public bool Rejects(ReadOnlySpan<byte> row, double threshold) => Exceeds(_query.LowerBound(row), threshold, Margin);
@@ -714,9 +736,9 @@ public partial class Hnsw
         public void Dispose()
         {
             _query.Dispose();
-            if (_rejected != null)
-                _rejectedScope.Dispose();
-            _rejected = null;
+            if (_marks != null)
+                _marksScope.Dispose();
+            _marks = null;
         }
     }
 
@@ -798,7 +820,7 @@ public partial class Hnsw
         /// </summary>
         private unsafe bool ScreenRejects(CodeScreen screen, bool screening, long id, byte* row, double threshold)
         {
-            if (screen.IsRejected(id))
+            if (screen.IsMarked(id))
                 return true;
             if (screening == false)
                 return false;
