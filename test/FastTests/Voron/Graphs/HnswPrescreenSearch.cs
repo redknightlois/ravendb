@@ -33,7 +33,7 @@ public class HnswPrescreenSearch(ITestOutputHelper output) : StorageTest(output)
         {
             using var state = new Hnsw.SearchState(tx.LowLevelTransaction, TreeName);
             var hook = state.ForTestingPurposesOnly();
-            Search(state, query, 16);
+            Screened(state, query, 16);
             rejections += hook.Rejections;
             Assert.Equal(hook.Rejections, hook.LastScreen.Rejected);
             // An id that is checked and not rejected is resolved, so a fresh state checks such an id at most once.
@@ -125,7 +125,7 @@ public class HnswPrescreenSearch(ITestOutputHelper output) : StorageTest(output)
         {
             using var state = new Hnsw.SearchState(tx.LowLevelTransaction, TreeName);
             state.ForTestingPurposesOnly().Cap = cap;
-            Search(state, query, 16);
+            Screened(state, query, 16);
 
             var hook = state.ForTestingPurposesOnly();
             Assert.Equal(cap, hook.LastScreen.Cap);
@@ -189,17 +189,17 @@ public class HnswPrescreenSearch(ITestOutputHelper output) : StorageTest(output)
         }
 
         Assert.Equal(inside.Length, screen.Rejected);
-        Assert.All(inside, id => Assert.True(screen.IsRejected(id)));
-        Assert.All(new[] { 2, 62, 66, max - 1, max + 1, -1 }, id => Assert.False(screen.IsRejected(id)));
+        Assert.All(inside, id => Assert.True(screen.IsMarked(id)));
+        Assert.All(new[] { 2, 62, 66, max - 1, max + 1, -1 }, id => Assert.False(screen.IsMarked(id)));
 
         foreach (var larger in new[] { false, true })
         {
             var next = larger ? 4 * max : max;
             screen.Begin(tensor, Hnsw.CodeScreen.DefaultCap(16), next);
             Assert.Equal(0, screen.Rejected);
-            Assert.All(inside, id => Assert.False(screen.IsRejected(id)));
+            Assert.All(inside, id => Assert.False(screen.IsMarked(id)));
             screen.Reject(next);
-            Assert.True(screen.IsRejected(next));
+            Assert.True(screen.IsMarked(next));
             Assert.Equal(1, screen.Rejected);
         }
     }
@@ -343,15 +343,15 @@ public class HnswPrescreenSearch(ITestOutputHelper output) : StorageTest(output)
         for (var i = 1; i <= queries; i++)
         {
             var before = GC.GetAllocatedBytesForCurrentThread();
-            var rows = Query(queryBytes[i]);
+            var screened = Query(queryBytes[i]);
             allocated += GC.GetAllocatedBytesForCurrentThread() - before;
-            // The working set filled and the screen checked codes, so the setup ran inside the measured region.
-            Assert.NotEqual(0, rows);
+            // The query set up a screen, so the setup ran inside the measured region.
+            Assert.True(screened);
         }
 
         return allocated;
 
-        long Query(byte[] query)
+        bool Query(byte[] query)
         {
             using var state = new Hnsw.SearchState(read.LowLevelTransaction, slice, cache);
             var hook = state.ForTestingPurposesOnly();
@@ -360,7 +360,7 @@ public class HnswPrescreenSearch(ITestOutputHelper output) : StorageTest(output)
             {
             }
 
-            return hook.CodeRowsRead;
+            return hook.LastScreen is not null;
         }
     }
 
@@ -405,7 +405,7 @@ public class HnswPrescreenSearch(ITestOutputHelper output) : StorageTest(output)
         {
             using var searching = new Hnsw.SearchState(tx.LowLevelTransaction, TreeName);
             var hook = searching.ForTestingPurposesOnly();
-            Search(searching, gaussian, 16);
+            Screened(searching, gaussian, 16);
             rejections += hook.Rejections;
         }
 
@@ -434,11 +434,65 @@ public class HnswPrescreenSearch(ITestOutputHelper output) : StorageTest(output)
         {
             using var state = new Hnsw.SearchState(read.LowLevelTransaction, TreeName);
             var hook = state.ForTestingPurposesOnly();
-            Search(state, query, 16);
+            Screened(state, query, 16);
             mostEvents = Math.Max(mostEvents, hook.LastScreen.Admissions);
         }
 
         Assert.True(mostEvents > live, $"{mostEvents} events");
+    }
+
+    // A traversal without a filter is steered in the descent and at the base layer: the descent rejects nothing, where the screened descent of the same queries
+    // rejects, and the traversal returns live vectors only, since a removed vector leaves the working set when it is expanded, ranked by exact distances.
+    [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
+    public void ASteeredTraversalRanksLiveVectorsByExactDistances()
+    {
+        const int live = 100;
+        var hashes = Build(Count);
+        using (var tx = Env.WriteTransaction())
+        {
+            using var registration = Hnsw.RegistrationFor(tx.LowLevelTransaction, TreeName, new Random(1));
+            for (var i = 0; i < Count - live; i++)
+                registration.Remove(1 + i, hashes[i]);
+            registration.Commit(CancellationToken.None);
+            tx.Commit();
+        }
+
+        using var read = Env.ReadTransaction();
+        var shared = 0;
+        long steeredRejections = 0, screenedRejections = 0;
+        var queries = Gaussians(40, 8);
+        foreach (var query in queries)
+        {
+            using (var screenedState = new Hnsw.SearchState(read.LowLevelTransaction, TreeName))
+            {
+                var screenedHook = screenedState.ForTestingPurposesOnly();
+                Screened(screenedState, query, 16);
+                screenedRejections += screenedHook.DescentRejections;
+            }
+
+            using var state = new Hnsw.SearchState(read.LowLevelTransaction, TreeName);
+            var hook = state.ForTestingPurposesOnly();
+            var steered = Pairs(Search(state, query, 16));
+            steeredRejections += hook.DescentRejections;
+            var exact = Pairs(Read(Hnsw.ExactNearest(state, live, MemoryMarshal.AsBytes(query.AsSpan()).ToArray(), 0f)));
+            Assert.Equal(live, exact.Length);
+            Assert.Equal(16, steered.Length);
+            var rank = exact.Select((pair, index) => (pair, index)).ToDictionary(x => x.pair.Entry, x => (x.pair.Bits, Index: x.index));
+            Assert.All(steered, pair => Assert.Equal(rank[pair.Entry].Bits, pair.Bits));
+            var order = steered.Select(pair => rank[pair.Entry].Index).ToArray();
+            Assert.Equal(order.Order(), order);
+            shared += steered.Select(pair => pair.Entry).Intersect(exact.Take(16).Select(pair => pair.Entry)).Count();
+        }
+
+        Assert.True(shared >= 0.9 * 16 * queries.Length, $"{shared} of {16 * queries.Length}");
+        Assert.Equal(0, steeredRejections);
+        Assert.NotEqual(0, screenedRejections);
+    }
+
+    private static (long Entry, int Bits)[] Pairs(string found)
+    {
+        var parts = found.Split('|');
+        return parts[0].Length == 0 ? [] : parts[0].Split(',').Zip(parts[1].Split(','), (entry, bits) => (long.Parse(entry), int.Parse(bits))).ToArray();
     }
 
     [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
@@ -462,13 +516,13 @@ public class HnswPrescreenSearch(ITestOutputHelper output) : StorageTest(output)
         // A query without direction has no bound, so it is screened and never rejects.
         using var zero = new Hnsw.SearchState(tx.LowLevelTransaction, TreeName);
         var zeroHook = zero.ForTestingPurposesOnly();
-        Search(zero, new float[Dimensions], 64);
+        Screened(zero, new float[Dimensions], 64);
         Assert.NotNull(zeroHook.LastScreen);
         Assert.NotEqual(0, zeroHook.CodeRowsRead);
         Assert.Equal(0, zeroHook.Rejections);
     }
 
-    // An int8 graph carries codes, so its traversals are screened; a binary graph carries none.
+    // An int8 graph carries codes, so its traversals are screened or steered; a binary graph carries none.
     [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
     public void Int8TraversalsAreScreenedAndBinaryTraversalsAreNot()
     {
@@ -488,8 +542,14 @@ public class HnswPrescreenSearch(ITestOutputHelper output) : StorageTest(output)
         {
             using var state = new Hnsw.SearchState(read.LowLevelTransaction, "int8");
             var hook = state.ForTestingPurposesOnly();
-            Assert.Equal(16, Search(state, Int8(query), 16).Split('|')[0].Split(',').Length);
+            Assert.Equal(16, Screened(state, Int8(query), 16).Split('|')[0].Split(',').Length);
             rejections += hook.Rejections;
+
+            using var steered = new Hnsw.SearchState(read.LowLevelTransaction, "int8");
+            var steeredHook = steered.ForTestingPurposesOnly();
+            Assert.Equal(16, Search(steered, Int8(query), 16).Split('|')[0].Split(',').Length);
+            Assert.NotNull(steeredHook.LastScreen);
+            Assert.Equal(0, steeredHook.Rejections);
         }
 
         Assert.NotEqual(0, rejections);
@@ -546,26 +606,47 @@ public class HnswPrescreenSearch(ITestOutputHelper output) : StorageTest(output)
         }
     }
 
-    // The entries and the bits of the distances, in the order returned.
+    // The base layer of a traversal without a filter is steered by the codes. A filter that holds every entry screens it.
+    private string Screened(Hnsw.SearchState state, float[] query, int ef) => Screened(state, MemoryMarshal.AsBytes(query.AsSpan()).ToArray(), ef);
+
+    private string Screened(Hnsw.SearchState state, byte[] query, int ef)
+    {
+        var filter = new RoaringBitmap(Allocator);
+        for (var entry = 1; entry <= Count; entry++)
+            filter.Add(entry);
+        filter.PrepareForReading();
+        return Search(state, query, ef, filter);
+    }
+
     private string Search(Hnsw.SearchState state, float[] query, int ef, RoaringBitmap? filter = null) =>
         Search(state, MemoryMarshal.AsBytes(query.AsSpan()).ToArray(), ef, filter);
 
-    private string Search(Hnsw.SearchState state, byte[] query, int ef, RoaringBitmap? filter = null)
-    {
-        using var retriever = Hnsw.ApproximateNearest(state, ef, query, 0f, filter);
-        var admitted = filter.GetValueOrDefault();
-        var entries = new List<long>();
-        var bits = new List<int>();
-        var matches = new long[256];
-        var distances = new float[256];
-        int read;
-        while ((read = filter.HasValue ? retriever.Fill(matches, distances, ref admitted) : retriever.Fill(matches, distances)) > 0)
-        {
-            entries.AddRange(matches.Take(read));
-            bits.AddRange(distances.Take(read).Select(BitConverter.SingleToInt32Bits));
-        }
+    private string Search(Hnsw.SearchState state, byte[] query, int ef, RoaringBitmap? filter = null) =>
+        Read(Hnsw.ApproximateNearest(state, ef, query, 0f, filter), filter);
 
-        return string.Join(',', entries) + '|' + string.Join(',', bits);
+    // The entries and the bits of the distances, in the order returned.
+    private static string Read(Hnsw.VectorSearchRetriever retriever, RoaringBitmap? filter = null)
+    {
+        try
+        {
+            var admitted = filter.GetValueOrDefault();
+            var entries = new List<long>();
+            var bits = new List<int>();
+            var matches = new long[256];
+            var distances = new float[256];
+            int read;
+            while ((read = filter.HasValue ? retriever.Fill(matches, distances, ref admitted) : retriever.Fill(matches, distances)) > 0)
+            {
+                entries.AddRange(matches.Take(read));
+                bits.AddRange(distances.Take(read).Select(BitConverter.SingleToInt32Bits));
+            }
+
+            return string.Join(',', entries) + '|' + string.Join(',', bits);
+        }
+        finally
+        {
+            retriever.Dispose();
+        }
     }
 
     private IReadOnlyList<byte[]> Build(int count, bool create = true) => Build(Gaussians(count, 1), create);
