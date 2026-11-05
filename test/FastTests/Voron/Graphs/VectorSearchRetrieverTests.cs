@@ -54,6 +54,36 @@ public class VectorSearchRetrieverTests(ITestOutputHelper output) : StorageTest(
         Assert.Equal(withLargeBuffer.Select(e => (e.Entry, BitConverter.SingleToInt32Bits(e.Distance))), withOneEntryBuffer.Select(e => (e.Entry, BitConverter.SingleToInt32Bits(e.Distance))));
     }
 
+    // One node in twenty: a walk reads more of the filter's members than its working set keeps. One node in two: it reads many more than
+    // requested and returns the nearest of them.
+    [RavenTheory(RavenTestCategory.Voron | RavenTestCategory.Vector)]
+    [InlineData(20)]
+    [InlineData(2)]
+    public void FilteredSearchReturnsTheNearestRequestedMatches(int stride)
+    {
+        using var name = Slice.From(Allocator, TreeName, out var treeName);
+        const int count = 2000, requested = 10;
+        var random = new Random(1);
+        Build(treeName, random, 16, Enumerable.Range(1, count).Select(i => (new long[] { i }, RandomVector(random, 16))).ToArray());
+        var filter = new GrowableBitArray(Allocator, count + 1);
+        for (var entry = 1; entry <= count; entry += stride)
+            filter.Add(entry);
+        filter.Count = count / stride;
+        var query = MemoryMarshal.AsBytes(RandomVector(random, 16).AsSpan()).ToArray();
+
+        using var tx = Env.ReadTransaction();
+        using var retriever = Hnsw.ApproximateNearest(tx.LowLevelTransaction, treeName, requested, query, 0f, filter);
+        var entries = new long[count];
+        var returned = new List<long>();
+        for (int read; (read = retriever.Fill(entries, new float[count], filter)) > 0;)
+            returned.AddRange(entries[..read]);
+
+        Assert.Equal(requested, returned.Count);
+        Assert.All(returned, entry => Assert.True(filter.Contains(entry)));
+        var nearest = Drain(tx, treeName, query, filter, count).Take(requested).Select(e => e.Entry);
+        Assert.True(returned.Intersect(nearest).Count() >= requested / 2, "the search returns at least half of the nearest filter members");
+    }
+
     private List<(long Entry, float Distance)> Drain(Transaction tx, Slice treeName, byte[] query, GrowableBitArray? filter, int bufferSize)
     {
         using var retriever = Hnsw.ExactNearest(tx.LowLevelTransaction, treeName, 1000, query, 0f, filter);
