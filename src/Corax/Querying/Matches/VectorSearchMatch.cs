@@ -136,7 +136,7 @@ public struct VectorSearchMatch : IQueryMatch
         {
             _ when _scanningQuery => Hnsw.ExactNearest(searchState, _numberOfCandidates, vector, _minimumMatch, nodesToScan: nodesIdsToScan),
             true => Hnsw.ExactNearest(searchState, _numberOfCandidates, vector, _minimumMatch, filter),
-                _ => Hnsw.ApproximateNearest(searchState, _numberOfCandidates, vector, _minimumMatch, _filterQuery != null),
+            _ => Hnsw.ApproximateNearest(searchState, _numberOfCandidates, vector, _minimumMatch, filter),
         };
         
 
@@ -249,11 +249,7 @@ public struct VectorSearchMatch : IQueryMatch
             distances.Truncate(matchesCount);
             matches.Truncate(matchesCount);
         }
-        else if (_vectorSearchRetriever.IsSortedByDistance == false)
-        {
-            distances.Results.Sort(matches.Results);
-        }
-        
+
         Dispose();
     }
     

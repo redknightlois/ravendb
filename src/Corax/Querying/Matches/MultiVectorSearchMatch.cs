@@ -160,7 +160,7 @@ public struct MultiVectorSearchMatch : IQueryMatch
             {
                 _ when _scanningQuery => Hnsw.ExactNearest(sharedSearchState, _numberOfCandidates, vector, _minimumMatch, nodesToScan: _nodesIdsToScan),
                 true => Hnsw.ExactNearest(sharedSearchState, _numberOfCandidates, vector, _minimumMatch, filter),
-                false => Hnsw.ApproximateNearest(sharedSearchState, _numberOfCandidates, vector, _minimumMatch, _filterQuery != null),
+                false => Hnsw.ApproximateNearest(sharedSearchState, _numberOfCandidates, vector, _minimumMatch, filter),
             };
 
             if (i == 0)
