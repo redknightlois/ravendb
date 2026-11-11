@@ -11,6 +11,7 @@ using Sparrow.Binary;
 using Sparrow.Compression;
 using Sparrow.Platform;
 using Sparrow.Server;
+using Sparrow.Server.Collections;
 using Sparrow.Server.Tensors;
 using Sparrow.Server.Utils;
 using Voron.Data.BTrees;
@@ -160,6 +161,9 @@ public unsafe partial class Hnsw
         // storage tx R never observes an entry stamped by a later commit.
         private readonly long _readerTxId;
         private ByteStringContext<ByteStringMemoryCache>.InternalScope? _queryNormalizationScope;
+        // Created by the first filter check that reads a small posting list.
+        private ContextBoundNativeList<long> _filterScratch;
+        private FastPForDecoder _filterDecoder;
 
         public Span<Node> Nodes => _nodes.ToSpan();
         public Tree Tree => _tree;
@@ -647,6 +651,55 @@ public unsafe partial class Hnsw
             ++_queryVectorVersion;
         }
 
+        /// <summary>True when the posting list holds an entry of <paramref name="filter"/>.</summary>
+        internal bool HasEntryInFilter(long postingListId, GrowableBitArray filter)
+        {
+            var rawPostingListId = postingListId & Constants.Graphs.VectorId.ContainerType;
+            switch (postingListId & Constants.Graphs.VectorId.EnsureIsSingleMask)
+            {
+                case Constants.Graphs.VectorId.Tombstone: // empty
+                    return false;
+                case Constants.Graphs.VectorId.Single: // single item posting list
+                    return filter.Contains(Registration.InternalEntryIdToEntryId(rawPostingListId));
+                case Constants.Graphs.VectorId.SmallPostingList: // small posting list
+                    if (_filterScratch.HasContext == false)
+                    {
+                        _filterScratch = new ContextBoundNativeList<long>(Llt.Allocator);
+                        _filterDecoder = new FastPForDecoder(Llt.Allocator);
+                    }
+
+                    ReadPostingList(new ContainerEntryId(rawPostingListId), ref _filterScratch, ref _filterDecoder, out _);
+                    var found = ContainsAny(_filterScratch.ToSpan(), filter);
+                    _filterScratch.Clear();
+                    return found;
+                case Constants.Graphs.VectorId.PostingList: // large posting list
+                    var setStateSpan = Container.GetReadOnly(Llt, new(rawPostingListId));
+                    var iterator = new PostingList(Llt, Slices.Empty, MemoryMarshal.AsRef<PostingListState>(setStateSpan)).Iterate();
+                    Span<long> chunk = stackalloc long[256];
+                    while (iterator.Fill(chunk, out var total) || total > 0)
+                    {
+                        if (ContainsAny(chunk[..total], filter))
+                            return true;
+                    }
+
+                    return false;
+                default:
+                    throw new ArgumentOutOfRangeException("Impossible scenario, we have only 4 options, but got: " + postingListId);
+            }
+        }
+
+        private static bool ContainsAny(Span<long> rawEntries, GrowableBitArray filter)
+        {
+            Registration.InternalEntryIdToEntryId(rawEntries);
+            foreach (var entry in rawEntries)
+            {
+                if (filter.Contains(entry))
+                    return true;
+            }
+
+            return false;
+        }
+
         public void ReadPostingList(ContainerEntryId rawPostingListId, ref ContextBoundNativeList<long> listBuffer, ref FastPForDecoder pforDecoder, out int postingListSize)
         {
             ReadPostingList(Llt, rawPostingListId, ref listBuffer, ref pforDecoder, out postingListSize);
@@ -693,7 +746,7 @@ public unsafe partial class Hnsw
 
         public IHnswSearcher EmptySearch() => new EmptySearcher();
         
-        public IHnswSearcher ExactSearch(Memory<byte> vector, bool hasFilterMatch, int numberOfCandidates, ContextBoundNativeList<long>? nodesToScan) => new ExactSearcher(this, vector, hasFilterMatch, numberOfCandidates, nodesToScan);
+        public IHnswSearcher ExactSearch(Memory<byte> vector, int numberOfCandidates, GrowableBitArray? filter, ContextBoundNativeList<long>? nodesToScan) => new ExactSearcher(this, vector, numberOfCandidates, filter, nodesToScan);
 
 
         public void SearchFilteredNearest<TNodes>(ref ContextBoundNativeList<int> nearestIndexes, TNodes nodesFromFilter, int candidatesRequested, int maximumNumberOfNodesVisitedWithoutFindingBetterCandidate)
@@ -946,6 +999,12 @@ public unsafe partial class Hnsw
            {
                scope.Dispose();
                _queryNormalizationScope = null;
+           }
+
+           if (_filterScratch.HasContext)
+           {
+               _filterScratch.Dispose();
+               _filterDecoder.Dispose();
            }
        }
 
@@ -1531,10 +1590,10 @@ public unsafe partial class Hnsw
         return new Registration(llt, name, random);
     }
     
-    public static VectorSearchRetriever ExactNearest(LowLevelTransaction llt, Slice name, int numberOfCandidates, Memory<byte> vector, float minimumSimilarity, bool hasFilterMatch, ContextBoundNativeList<long>? nodesToScan = null)
+    public static VectorSearchRetriever ExactNearest(LowLevelTransaction llt, Slice name, int numberOfCandidates, Memory<byte> vector, float minimumSimilarity, GrowableBitArray? filter = null, ContextBoundNativeList<long>? nodesToScan = null)
     {
         var searchState = new SearchState(llt, name, ref vector);
-        var results = searchState.ExactSearch(vector, hasFilterMatch, numberOfCandidates, nodesToScan);
+        var results = searchState.ExactSearch(vector, numberOfCandidates, filter, nodesToScan);
         return new VectorSearchRetriever(searchState,  results, vector, minimumSimilarity);
     }
 
@@ -1606,11 +1665,11 @@ public unsafe partial class Hnsw
     /// Exact nearest neighbor search using a caller-owned SearchState.
     /// The caller is responsible for disposing the SearchState.
     /// </summary>
-    public static VectorSearchRetriever ExactNearest(SearchState searchState, int numberOfCandidates, Memory<byte> vector, float minimumSimilarity, bool hasFilterMatch, ContextBoundNativeList<long>? nodesToScan = null)
+    public static VectorSearchRetriever ExactNearest(SearchState searchState, int numberOfCandidates, Memory<byte> vector, float minimumSimilarity, GrowableBitArray? filter = null, ContextBoundNativeList<long>? nodesToScan = null)
     {
         TryNormalizeQueryVector(searchState.Options, searchState.Llt.Allocator, ref vector, out var queryVectorScope);
         searchState.OnQueryVector(vector);
-        var results = searchState.ExactSearch(vector, hasFilterMatch, numberOfCandidates, nodesToScan);
+        var results = searchState.ExactSearch(vector, numberOfCandidates, filter, nodesToScan);
         return new VectorSearchRetriever(searchState, results, vector, minimumSimilarity, ownsSearchState: false, queryVectorScope);
     }
 
