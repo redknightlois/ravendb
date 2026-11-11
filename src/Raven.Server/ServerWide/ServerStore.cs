@@ -155,6 +155,7 @@ namespace Raven.Server.ServerWide
         public readonly StorageSpaceMonitor StorageSpaceMonitor;
         public readonly ServerLimitsMonitor ServerLimitsMonitor;
         public readonly GcThreadContentionDetector GcThreadContentionDetector;
+        public readonly StorageDeviceMonitor StorageDeviceMonitor;
         public readonly SecretProtection Secrets;
         public readonly AsyncManualResetEvent InitializationCompleted;
         public readonly GlobalIndexingScratchSpaceMonitor GlobalIndexingScratchSpaceMonitor;
@@ -224,6 +225,8 @@ namespace Raven.Server.ServerWide
             ServerLimitsMonitor = new ServerLimitsMonitor(this, NotificationCenter, _notificationsStorage);
 
             GcThreadContentionDetector = new GcThreadContentionDetector(this, NotificationCenter);
+
+            StorageDeviceMonitor = new StorageDeviceMonitor(this);
 
             DatabaseInfoCache = new DatabaseInfoCache(this);
 
@@ -2872,6 +2875,7 @@ namespace Raven.Server.ServerWide
                         (nameof(StorageSpaceMonitor), StorageSpaceMonitor),
                         (nameof(ServerLimitsMonitor), ServerLimitsMonitor),
                         (nameof(GcThreadContentionDetector), GcThreadContentionDetector),
+                        (nameof(StorageDeviceMonitor), StorageDeviceMonitor),
                         (nameof(NotificationCenter), NotificationCenter),
                         (nameof(LicenseManager), LicenseManager),
                         (nameof(DatabasesLandlord), DatabasesLandlord),
@@ -3507,7 +3511,9 @@ namespace Raven.Server.ServerWide
                 || _leaderRequestExecutor.Url.Equals(leaderUrl, StringComparison.OrdinalIgnoreCase) == false)
             {
                 var newExecutor = CreateNewClusterRequestExecutor(leaderUrl);
-                Interlocked.Exchange(ref _leaderRequestExecutor, newExecutor);
+                var oldExecutor = Interlocked.Exchange(ref _leaderRequestExecutor, newExecutor);
+                // the old executor may still be in use, its finalizer disposes it
+                oldExecutor?.ForgetAbout();
             }
 
             return _leaderRequestExecutor;

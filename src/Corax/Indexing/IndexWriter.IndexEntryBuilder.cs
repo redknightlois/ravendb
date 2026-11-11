@@ -36,6 +36,9 @@ public partial class IndexWriter
 
         public void Boost(float boost)
         {
+            if (float.IsNaN(boost) || float.IsPositiveInfinity(boost))
+                throw new ArgumentOutOfRangeException(nameof(boost), boost, "Document boost cannot be NaN or positive infinity.");
+
             _parent.BoostEntry(_entryId, boost);
         }
 
@@ -297,10 +300,8 @@ public partial class IndexWriter
             PortableExceptions.ThrowIfNot<InvalidOperationException>(field.HasVector, $"Field ({fieldId} , '{field.Name}') didn't have vector options but tried to write a vector. Vector length: {value.Length}");
 
             var vectorWriter = field.GetVectorIndexer(_parent._transaction.LowLevelTransaction, value.Length, random);
-            var vectorHash = vectorWriter.Register((long)_entryId, value);
-
-            //We're storing the vector hash for removal purposes
-            RegisterTerm(field, vectorHash.ToSpan(), StoredFieldType.Raw);
+            var vectorReference = vectorWriter.Register((long)_entryId, value);
+            RegisterTerm(field, vectorReference.ToSpan(), StoredFieldType.Raw);
         }
 
         public void Write(int fieldId, string path, ReadOnlySpan<byte> value)

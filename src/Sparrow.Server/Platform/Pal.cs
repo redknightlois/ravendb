@@ -10,7 +10,7 @@ namespace Sparrow.Server.Platform
 {
     public static unsafe class Pal
     {
-        public const int PAL_VER = 70900; // Should match auto generated rc from rvn_get_pal_ver() @ src/rvngetpalver.c
+        public const int PAL_VER = 70907; // Should match auto generated rc from rvn_get_pal_ver() @ src/rvngetpalver.c
 
         static Pal()
         {
@@ -67,6 +67,7 @@ namespace Sparrow.Server.Platform
                                                                        $"Arch: {RuntimeInformation.OSArchitecture}, OSDesc: {RuntimeInformation.OSDescription}");
             }
 
+            PalConfiguration.RequestedWriteMode = PalConfiguration.WriteMode;
             if (PalConfiguration.WriteMode == RvnWriteMode.Auto)
             {
                 // set the actual write mode
@@ -538,7 +539,6 @@ namespace Sparrow.Server.Platform
             VectoredFileIo,
             FileIo,
             IoRing,
-            Mmap,
         }
         
         [StructLayout(LayoutKind.Sequential)]

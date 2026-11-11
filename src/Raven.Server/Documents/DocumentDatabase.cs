@@ -50,6 +50,7 @@ using Raven.Server.ServerWide.Commands.PeriodicBackup;
 using Raven.Server.ServerWide.Context;
 using Raven.Server.Smuggler.Documents;
 using Raven.Server.Smuggler.Documents.Data;
+using Raven.Server.Storage;
 using Raven.Server.Utils;
 using Raven.Server.Utils.IoMetrics;
 using Sparrow;
@@ -67,6 +68,7 @@ using Voron;
 using Voron.Data.Tables;
 using Voron.Exceptions;
 using Voron.Impl.Backup;
+using Voron.Impl.Journal;
 using Constants = Raven.Client.Constants;
 using MountPointUsage = Raven.Client.ServerWide.Operations.MountPointUsage;
 using Size = Raven.Client.Util.Size;
@@ -1067,6 +1069,15 @@ namespace Raven.Server.Documents
             }
             DisposeProgress("Disposed all running TCP connections");
 
+            DisposeProgress("Disposing TxMerger");
+            exceptionAggregator.Execute(() =>
+            {
+                TxMerger?.Dispose();
+            });
+            DisposeProgress("Disposed TxMerger");
+
+            ForTestingPurposes?.AfterTxMergerDispose?.Invoke();
+
             // must acquire the lock in order to prevent concurrent access to index files
             if (lockTaken == false)
             {
@@ -1115,19 +1126,6 @@ namespace Raven.Server.Documents
             DisposeProgress("Disposed IndexStore");
 
             DisposeBackgroundWorkers(exceptionAggregator);
-            
-            DisposeProgress("Disposing TxMerger");
-            exceptionAggregator.Execute(() =>
-            {
-                // Note that we want to dispose the TxMerger *after* we disposed
-                // of all the indexes, since index commit on dispose should be 
-                // handled by the transaction merge (branches -> root relations)
-                // and write to the database journal
-                TxMerger?.Dispose();
-            });
-            DisposeProgress("Disposed TxMerger");
-
-            ForTestingPurposes?.AfterTxMergerDispose?.Invoke();
 
             DisposeProgress("Disposing ReplicationLoader");
             exceptionAggregator.Execute(() =>
@@ -2261,7 +2259,31 @@ namespace Raven.Server.Documents
             if (ioChange.MeterItem.RateOfWritesInMbPerSec > 1)
                 return;
 
+            _serverStore.StorageDeviceMonitor.RecordSlowWrite(FindDeviceOf(ioChange.FileName), ioChange);
             NotificationCenter.SlowWrites.Add(ioChange);
+        }
+
+        // rare path (slow writes only): the environment whose directory holds the file, the most specific one wins (indexes live under the database)
+        private DeviceWriteBudget FindDeviceOf(string fileName)
+        {
+            StringComparison comparison = PlatformDetails.RunningOnWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            DeviceWriteBudget best = null;
+            int bestLength = -1;
+            foreach (StorageEnvironmentWithType env in GetAllStoragesEnvironment())
+            {
+                StorageEnvironmentOptions options = env.Environment?.Options;
+                string directory = options?.BasePath?.FullPath;
+                if (directory == null || directory.Length <= bestLength || fileName.StartsWith(directory, comparison) == false)
+                    continue;
+
+                // a journal in a Journals directory linked to another disk is not a write to the data file's device
+                bool journalElsewhere = options.JournalPath?.FullPath is { } journals && fileName.StartsWith(journals, comparison) &&
+                                        StorageDeviceMonitor.GetDrives(options).JournalsElsewhere != null;
+                best = journalElsewhere ? null : options.DeviceWriteBudget;
+                bestLength = directory.Length;
+            }
+
+            return best;
         }
 
         public long GetEnvironmentsHash()

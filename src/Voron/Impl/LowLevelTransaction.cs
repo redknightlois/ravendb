@@ -712,6 +712,29 @@ namespace Voron.Impl
             return GetPageInternalFromDataFile(pageNumber);
         }
 
+        /// <summary>
+        /// The page, valid until the transaction ends or modifies it. Unlike <see cref="GetPage"/>, it skips the checks that read the page header
+        /// once the page in the data file is known good, and takes every other page from <see cref="GetPage"/>.
+        /// </summary>
+        public byte* GetPagePointer(long pageNumber)
+        {
+            if (IsValid == false)
+                ThrowObjectDisposed();
+
+            var inScratch = _getPageMethod switch
+            {
+                GetPageMethod.WriteScratchFirst => _scratchPagesInUse.ContainsKey(pageNumber),
+                GetPageMethod.ReadScratchFirst => _scratchPagesForReads.ContainsKey(pageNumber),
+                _ => false
+            };
+            // The 32-bit pager maps an overflow page by the size in its header.
+            if (inScratch || _env.Options.RunningOn32Bits || _env.IsPageValidated(pageNumber) == false)
+                return GetPage(pageNumber).Pointer;
+
+            // PERF: A page known good comes straight from the mapping. Its header, usually on another cache line than the bytes the caller reads, is not read.
+            return DataPager.AcquirePagePointer(DataPagerState, ref PagerTransactionState, pageNumber);
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private Page GetPageInternalFromDataFile(long pageNumber)
         {
@@ -1407,6 +1430,9 @@ namespace Voron.Impl
         }
 
         internal bool IsAsyncCommit => _asyncCommitNextTransaction != null;
+
+        // number of merged operations this transaction carries, set by the transaction merger (0 = not merged), io-metrics only
+        public int BatchOperations { get; set; }
 
         internal long CommitDurabilityGateTransactionId =>
             WrittenToJournalNumber == -1 ? CurrentStateRecord.TransactionId - 1 : CurrentStateRecord.TransactionId;

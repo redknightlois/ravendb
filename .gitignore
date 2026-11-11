@@ -78,6 +78,7 @@ src/Raven.Quill.WhatsAppBridge/dist/
 src/Raven.Studio/junit.xml
 junit.xml
 src/Raven.Studio/node_modules/
+src/Raven.Studio/storybook-static/
 src/Raven.Studio/test.log
 src/Raven.Studio/wwwroot/App/**/*.js
 src/Raven.Studio/wwwroot/App/**/*.js.map
@@ -134,6 +135,7 @@ temp
 .vscode
 /test/Tryouts/Databases/*
 BenchmarkDotNet.Artifacts/
+.bdn/
 /src/Raven.Server/*.DotSettings
 /src/Raven.Pal/osxcross
 /src/Raven.Pal/*.nativecodeanalysis.xml

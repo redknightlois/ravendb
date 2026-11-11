@@ -177,6 +177,10 @@ public sealed class CoraxAndQueries : CoraxBooleanQueryBase
                 if (query.Operation is UnaryMatchOperation.NotEquals)
                     continue;
 
+                // MultiUnaryMatch scores only its anchor, so a scored clause cannot become a filter.
+                if (query.Field.HasBoost)
+                    return false;
+
                 if (query.Operation is UnaryMatchOperation.Equals && query.Count < minimumCount)
                 {
                     pos = idX;
@@ -185,7 +189,9 @@ public sealed class CoraxAndQueries : CoraxBooleanQueryBase
             }
 
 
-            return minimumCount < 32 * 1024; // 32K items seems ok
+            // PERF: The scan walks the matches of the smallest equality term and checks the other items on the entry of each match, instead of
+            // intersecting the matches of every item. It reads one entry per match, so it needs another item to check and a term with fewer than 32K matches.
+            return queries.Length > 1 && minimumCount < 32 * 1024;
         }
 
         return IsBoosting ? indexSearcher.Boost(match, Boosting.Value) : match;

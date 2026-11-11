@@ -29,7 +29,6 @@ public struct VectorSearchMatch : IQueryMatch
     
     // Number of documents to be directly scanned instead of ANN / Exact on HNSW.
     private readonly int _scanningThreshold;
-    private readonly Random _random;
     private bool _scanningQuery;
 
     
@@ -70,8 +69,7 @@ public struct VectorSearchMatch : IQueryMatch
         in bool isExact, 
         in bool singleVectorSearchDoNotSort, 
         IQueryMatch filterQuery,
-        int scanningThreshold = ScanningThreshold,
-        Random random = null)
+        int scanningThreshold = ScanningThreshold)
     {
         _singleVectorSearchDoNotSort = singleVectorSearchDoNotSort;
         _filterQuery = filterQuery;
@@ -85,7 +83,6 @@ public struct VectorSearchMatch : IQueryMatch
         _vectorToSearch = vectorToSearch;
         _filterQueryLoaded = filterQuery is null;
         _scanningThreshold = scanningThreshold;
-        _random = random;
         _isEmpty = false;
     }
 
@@ -111,10 +108,9 @@ public struct VectorSearchMatch : IQueryMatch
             }
         }
         
-        _scanningQuery = IndexSearcher.VectorSearchUtils.ShouldScan(_indexSearcher, _filterMatchesCount, _isExact, _filterQuery, _scanningThreshold, _numberOfCandidates);
-        var llt = _indexSearcher._transaction.LowLevelTransaction;
+        var searchState = _indexSearcher.GetOrCreateVectorSearchState(_metadata.FieldName);
+        _scanningQuery = IndexSearcher.VectorSearchUtils.ShouldScan(_indexSearcher, _filterMatchesCount, _isExact, _filterQuery, _scanningThreshold, _numberOfCandidates, searchState.Options.CountOfVectors);
         var vector = _vectorToSearch.GetEmbeddingMemory();
-        var fieldName = _metadata.FieldName;
         
         ContextBoundNativeList<long> nodesIdsToScan = default;
         if (_scanningQuery)
@@ -130,16 +126,14 @@ public struct VectorSearchMatch : IQueryMatch
             
             _nodesIdsToScan = nodesIdsToScan;
         }
-        
-        
-        var searchState = _indexSearcher.GetOrCreateVectorSearchState(fieldName);
 
+        var filter = _filterQuery != null ? _filterResults : null;
         _vectorSearchRetriever = _isExact switch
         {
-            _ when _scanningQuery => Hnsw.ExactNearest(searchState, _numberOfCandidates, vector, _minimumMatch, hasFilterMatch: false, nodesIdsToScan),
-            true => Hnsw.ExactNearest(searchState, _numberOfCandidates, vector, _minimumMatch, _filterQuery != null),
-            false when _filterQuery != null => Hnsw.ApproximateFilteredNearest(searchState, _numberOfCandidates, vector, _minimumMatch, new IndexSearcher.VectorSearchUtils.RandomNodesFromFilterEnumerator(_indexSearcher, _metadata, _filterResults!.Value, _random)),
-                _ => Hnsw.ApproximateNearest(searchState, _numberOfCandidates, vector, _minimumMatch, _filterQuery != null),
+            _ when _scanningQuery => Hnsw.ExactNearest(searchState, _numberOfCandidates, vector, _minimumMatch, nodesToScan: nodesIdsToScan),
+            true => Hnsw.ExactNearest(searchState, _numberOfCandidates, vector, _minimumMatch, filter),
+            _ => Hnsw.ApproximateNearest(searchState, _numberOfCandidates, vector, _minimumMatch, filter,
+                filter is { } f ? IndexSearcher.VectorSearchUtils.FilterNodes(_indexSearcher, _metadata, f) : null),
         };
         
 
@@ -210,7 +204,7 @@ public struct VectorSearchMatch : IQueryMatch
             return 0;
         }
         
-        Sorting.SortAndMinOnDuplicates(matches[..read], distancesBuffer[..read]);
+        read = Sorting.SortAndMinOnDuplicates(matches[..read], distancesBuffer[..read]);
         distancesBuffer[..read].Sort(matches[..read]);
         return read;
     }
@@ -252,11 +246,7 @@ public struct VectorSearchMatch : IQueryMatch
             distances.Truncate(matchesCount);
             matches.Truncate(matchesCount);
         }
-        else if (_vectorSearchRetriever.IsSortedByDistance == false)
-        {
-            distances.Results.Sort(matches.Results);
-        }
-        
+
         Dispose();
     }
     
@@ -274,10 +264,6 @@ public struct VectorSearchMatch : IQueryMatch
             ref var matchesRef = ref MemoryMarshal.GetReference(matches);
             ref var scoresRef = ref MemoryMarshal.GetReference(scores);
             ref var distanceRef = ref MemoryMarshal.GetReference(_distances.Results);
-            if (_filterQuery != null)
-                _filterQuery.Score(matches, scores, boostFactor);
-            
-            
             for (var i = 0; i < matches.Length; ++i)
             {
                 var match = Unsafe.Add(ref matchesRef, i);
@@ -338,6 +324,8 @@ public struct VectorSearchMatch : IQueryMatch
         : DuplicatesOccurrence.NotPossible;
     
     public long Count { get; private set; }
+
+    internal bool ReturnsResultsByDistance => _singleVectorSearchDoNotSort;
 
     public SkipSortingResult AttemptToSkipSorting()
     {

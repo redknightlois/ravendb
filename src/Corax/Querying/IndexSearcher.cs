@@ -37,13 +37,14 @@ public sealed unsafe partial class IndexSearcher : IDisposable
     private const long BitmapOrFillDensityDivisor = 32;
     internal const int BitmapAndFillSingleBatchThreshold = 4096;
     internal const int BitmapDrainBufferSize = 4096;
+    private const int DocumentBoostLookupRatio = 32;
     
     internal readonly Transaction _transaction;
     private Dictionary<string, Slice> _dynamicFieldNameMapping;
 
     private readonly IndexFieldsMapping _fieldMapping;
     private Dictionary<Slice, Hnsw.SearchState> _vectorSearchStateCache;
-    private IReadOnlyDictionary<Slice, HnswIndexCache> _vectorNodeCaches;
+    private IReadOnlyDictionary<Slice, HnswIndexCache> _vectorCaches;
     private HashSet<long> _nullTermsMarkers;
     private HashSet<long> _nonExistingTermsMarkers;
     private long[] _vectorFieldsMarkers;
@@ -443,6 +444,25 @@ public sealed unsafe partial class IndexSearcher : IDisposable
         return covered >= NumberOfEntries;
     }
 
+    /// <summary>
+    /// The number of terms a pass over the terms of the field visits, as <see cref="TextualAggregation"/> does: one per
+    /// distinct value, plus one for null when any entry holds a null. <see cref="GetTermAmountInField"/> adds the number
+    /// of entries holding a null instead.
+    /// </summary>
+    public long GetNumberOfDistinctTermsInField(in FieldMetadata field)
+    {
+        var fieldTree = _fieldsTree?.CompactTreeFor(field.FieldName);
+        if (fieldTree == null)
+            return 0;
+
+        var numberOfTerms = fieldTree.NumberOfEntries;
+
+        if (TryGetPostingListForNull(field, out var nullPostingListId) && GetPostingList(nullPostingListId)?.State.NumberOfEntries > 0)
+            numberOfTerms++;
+
+        return numberOfTerms;
+    }
+
     public bool TryGetTermsOfField(in FieldMetadata field, out ExistsTermProvider<Lookup<CompactKeyLookup>.ForwardIterator> existsTermProvider)
     {
         return TryGetTermsOfField<Lookup<CompactKeyLookup>.ForwardIterator>(field, out existsTermProvider);
@@ -524,6 +544,53 @@ public sealed unsafe partial class IndexSearcher : IDisposable
         return _transaction.FixedTreeFor(Constants.DocumentBoostSlice, sizeof(float));
     }
 
+    internal void BoostDocuments(Span<long> matches, Span<float> scores, bool sortedById)
+    {
+        var tree = GetDocumentBoostTree();
+        if (tree.NumberOfEntries == 0 || matches.IsEmpty)
+            return;
+
+        Debug.Assert(sortedById == false || IsSortedById(matches), "Matches flagged as sorted by id are not sorted by id.");
+
+        if (tree.NumberOfEntries > (long)matches.Length * DocumentBoostLookupRatio || sortedById == false)
+        {
+            for (var i = 0; i < matches.Length; i++)
+            {
+                var boost = (float*)tree.ReadPtr(matches[i], out _);
+                if (boost != null)
+                    scores[i] *= *boost;
+            }
+
+            return;
+        }
+
+        using var iterator = tree.Iterate();
+        if (iterator.Seek(matches[0]) == false)
+            return;
+
+        var position = 0;
+        do
+        {
+            position = Bm25Relevance.FindLowerBound(matches, position, iterator.CurrentKey, gallop: true);
+            if (position == matches.Length)
+                return;
+
+            if (matches[position] == iterator.CurrentKey)
+                scores[position] *= *(float*)iterator.ValuePtr(out _);
+        } while (iterator.MoveNext());
+
+        static bool IsSortedById(Span<long> matches)
+        {
+            for (var i = 1; i < matches.Length; i++)
+            {
+                if (matches[i - 1] > matches[i])
+                    return false;
+            }
+
+            return true;
+        }
+    }
+
 
     public FieldMetadata FieldMetadataBuilder(string fieldName, int fieldId = Constants.IndexSearcher.NonAnalyzer, Analyzer analyzer = null,
         FieldIndexingMode fieldIndexingMode = default, bool hasBoost = false)
@@ -591,27 +658,24 @@ public sealed unsafe partial class IndexSearcher : IDisposable
     internal Hnsw.SearchState GetOrCreateVectorSearchState(Slice fieldName)
     {
         _vectorSearchStateCache ??= new(SliceComparer.Instance);
-        ref var state = ref CollectionsMarshal.GetValueRefOrAddDefault(_vectorSearchStateCache, fieldName, out bool exists);
-        if (exists == false)
-        {
-            // Look for a shared HnswIndexCache for this field
-            HnswIndexCache nodeCache = null;
-            _vectorNodeCaches?.TryGetValue(fieldName, out nodeCache);
-            state = new Hnsw.SearchState(_transaction.LowLevelTransaction, fieldName, nodeCache);
-        }
+        if (_vectorSearchStateCache.TryGetValue(fieldName, out var state))
+            return state;
+
+        HnswIndexCache cache = null;
+        _vectorCaches?.TryGetValue(fieldName, out cache);
+        // Cached only once constructed: a constructor that throws leaves no entry for Dispose or a later lookup to find.
+        state = new Hnsw.SearchState(_transaction.LowLevelTransaction, fieldName, cache);
+        _vectorSearchStateCache.Add(fieldName, state);
         return state;
     }
 
     /// <summary>
-    /// Attach a per-field dictionary of HNSW node caches to this IndexSearcher. Each
-    /// SearchState created by <see cref="GetOrCreateVectorSearchState"/> looks up its field's
-    /// cache here and uses it for node lookups instead of reading them through Voron.
-    /// The dictionary is read by query code only and must not be mutated while the
-    /// IndexSearcher is alive.
+    /// Attaches the <see cref="HnswIndexCache"/> of each vector field, which every SearchState that <see cref="GetOrCreateVectorSearchState"/> creates for
+    /// that field shares. The dictionary must not be mutated while the IndexSearcher is alive.
     /// </summary>
-    public void AttachVectorNodeCaches(IReadOnlyDictionary<Slice, HnswIndexCache> caches)
+    public void AttachVectorCaches(IReadOnlyDictionary<Slice, HnswIndexCache> caches)
     {
-        _vectorNodeCaches = caches;
+        _vectorCaches = caches;
     }
 
     public void Dispose()
