@@ -82,24 +82,6 @@ public class VectorSearchRetrieverTests(ITestOutputHelper output) : StorageTest(
         Assert.True(returned.Intersect(nearest).Count() >= requested / 2, "the search returns at least half of the nearest filter members");
     }
 
-    // The filter holds more than 1024 matches and none of them has a vector, so no walk holds a match and the search stops at the read budget of
-    // large filters: half the filter's matches, at most a fifth of the graph.
-    [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
-    public void FilteredSearchWithoutMatchesInTheGraphStopsAtTheReadBudget()
-    {
-        using var name = Slice.From(Allocator, TreeName, out var treeName);
-        const int count = 4000, matches = 1200;
-        var random = new Random(1);
-        Build(treeName, random, 16, Enumerable.Range(1, count).Select(i => (new long[] { i }, RandomVector(random, 16))).ToArray());
-        var filter = Filter(Enumerable.Range(count + 1, matches).Select(entry => (long)entry));
-        var query = MemoryMarshal.AsBytes(RandomVector(random, 16).AsSpan()).ToArray();
-
-        using var tx = Env.ReadTransaction();
-        using var retriever = Hnsw.ApproximateNearest(tx.LowLevelTransaction, treeName, 10, query, 0f, filter);
-        Assert.Equal(0, retriever.Fill(new long[count], new float[count], ref filter));
-        Assert.InRange(retriever.CandidatesProcessed, Math.Min(matches / 2, count / 5), count - 1);
-    }
-
     [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
     public void FilteredFillDoesNotAllocateInProportionToThePostingList()
     {
@@ -127,6 +109,43 @@ public class VectorSearchRetrieverTests(ITestOutputHelper output) : StorageTest(
 
         FirstFillAllocations();
         Assert.True(FirstFillAllocations() < entries.Length * sizeof(long) / 8);
+    }
+
+    // The working set saturates at the graph's size, so the candidates requested, however large, do not decide the memory.
+    [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
+    public void FilteredSearchAllocatesInProportionToItsMatchesNotToTheRequestedCandidates()
+    {
+        using var name = Slice.From(Allocator, TreeName, out var treeName);
+        const int count = 2000, admitted = 20;
+        var random = new Random(5);
+        Build(treeName, random, 8, Enumerable.Range(1, count).Select(i => (new long[] { i }, RandomVector(random, 8))).ToArray());
+        var filter = Filter(Enumerable.Range(0, admitted).Select(i => 1L + i * (count / admitted)));
+        var query = MemoryMarshal.AsBytes(RandomVector(random, 8).AsSpan()).ToArray();
+
+        using var tx = Env.ReadTransaction();
+        long[] Drain(Func<Hnsw.VectorSearchRetriever> search, out long allocated)
+        {
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            using var retriever = search();
+            var entries = new long[count];
+            var read = retriever.Fill(entries, new float[count], ref filter);
+            allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            return entries[..read];
+        }
+
+        Hnsw.VectorSearchRetriever Approximate(int candidates) => Hnsw.ApproximateNearest(tx.LowLevelTransaction, treeName, candidates, query, 0f, filter);
+
+        var exact = Drain(() => Hnsw.ExactNearest(tx.LowLevelTransaction, treeName, count, query, 0f, filter), out _);
+        Assert.Equal(admitted, exact.Length);
+        Drain(() => Approximate(1_000_000), out _);
+        var atMillion = Drain(() => Approximate(1_000_000), out var millionBytes);
+        var atMax = Drain(() => Approximate(int.MaxValue), out var maxBytes);
+
+        // The nearest-first entries are those of the exact search over the admitted entries.
+        Assert.Equal(exact, atMillion);
+        Assert.Equal(exact, atMax);
+        // A queue or a working set sized by the candidates costs at least 8 bytes each, which is 8 MB at a million: the limit allows 1/64 of that.
+        Assert.True(Math.Abs(maxBytes - millionBytes) < 1_000_000L * sizeof(long) / 64, $"{maxBytes} against {millionBytes} bytes");
     }
 
     // A binary query is searched as given, so an earlier search with the same query vector leaves the distances it read cached in the state.
