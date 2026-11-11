@@ -4,6 +4,7 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Corax.Querying.Matches;
+using Corax.Querying.Matches.Meta;
 using FastTests.Voron.FixedSize;
 using Sparrow.Server.Utils;
 using Sparrow.Server.Utils.VxSort;
@@ -119,5 +120,45 @@ public class VectorSearchMatchTests(ITestOutputHelper output) : NoDisposalNeeded
         Assert.Equal(resultTransformation.Length, result);
         Assert.Equal(resultTransformation.Select(t => t.Key), matches[..result]);
         Assert.Equal(resultTransformation.Select(t => t.Value), distances[..result]);
+    }
+
+    [RavenFact(RavenTestCategory.Vector)]
+    public void IntersectionMatchesTheSetIntersection()
+    {
+        var random = new Random(1337);
+
+        // Below, at and past a block of 4 ids and a window of 16 ids, so the tails left to the scalar merge vary.
+        int[] lengthsAroundBlocksAndWindows = { 0, 1, 3, 4, 7, 16, 33, 200 };
+        // Similar lengths compare blocks; a longer list of at least twice the length is looked up in windows.
+        int[] longerToShorterRatios = { 1, 2, 3, 40 };
+        // In windows, half present stores every id unless the result overwrites the longer list, and few or nearly all present store only the found ids.
+        // On similar lengths, nearly all present runs the scalar merge.
+        double[] fewHalfOrNearlyAllIdsPresent = { 0.01, 0.5, 0.97 };
+
+        foreach (int shorterLength in lengthsAroundBlocksAndWindows)
+        foreach (int ratio in longerToShorterRatios)
+        foreach (double density in fewHalfOrNearlyAllIdsPresent)
+        {
+            int longerLength = shorterLength * ratio + random.Next(0, 5);
+            long span = (long)(longerLength / density) + 1;
+            long[] shorter = Ids(shorterLength), longer = Ids(longerLength);
+            var expected = shorter.Intersect(longer).ToArray();
+
+            foreach (var (left, right) in new[] { (shorter, longer), (longer, shorter) })
+            {
+                // The result overwrites the shorter list in one order and the longer list in the other.
+                var inPlace = left.ToArray();
+                int count = MergeHelper.And(inPlace, inPlace, right);
+                Assert.Equal(expected, inPlace[..count]);
+            }
+
+            long[] Ids(int count)
+            {
+                var ids = new HashSet<long>();
+                while (ids.Count < count)
+                    ids.Add(random.NextInt64(1, span + 1));
+                return ids.Order().ToArray();
+            }
+        }
     }
 }
