@@ -88,6 +88,51 @@ public class Int8VectorSimilarityTests : RavenTestBase
         Assert.Equal(new byte[] { 127 }.Concat(BitConverter.GetBytes(0.5f)), int8);
     }
 
+    // Lengths cross the vector steps and the scalar tail; ties, NaN, an infinity and negative zero sit in both.
+    [RavenFact(RavenTestCategory.Vector)]
+    public void QuantizationMatchesItsScalarDefinitionAtEveryLength()
+    {
+        var random = new Random(5);
+        foreach (var length in new[] { 1, 3, 4, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 1536, 1537 })
+        {
+            float[][] vectors =
+            [
+                Enumerable.Range(0, length).Select(_ => random.NextSingle() * 2 - 1).ToArray(),
+                Enumerable.Range(0, length).Select(k => k == 0 ? 127f : k % 9 == 4 ? -0f : (k % 9 - 4) * 0.5f).ToArray(),
+                Enumerable.Range(0, length).Select(k => k == length / 2 ? float.NaN : random.NextSingle()).ToArray(),
+                Enumerable.Range(0, length).Select(k => k == length - 1 ? float.PositiveInfinity : -random.NextSingle()).ToArray(),
+                new float[length]
+            ];
+            foreach (var vector in vectors)
+            {
+                Assert.Equal(ExpectedInt8(vector), MemoryMarshal.Cast<sbyte, byte>(VectorQuantizer.ToInt8(vector)).ToArray());
+                Assert.Equal(ExpectedInt8(vector), EmbeddingsHelper.CreateEmbeddingValue(vector.ToArray(), VectorEmbeddingType.Int8).ToArray());
+                Assert.Equal(ExpectedInt1(vector), VectorQuantizer.ToInt1(vector));
+                Assert.Equal(ExpectedInt1(vector), EmbeddingsHelper.CreateEmbeddingValue(vector.ToArray(), VectorEmbeddingType.Binary).ToArray());
+            }
+        }
+
+        static byte[] ExpectedInt8(float[] vector)
+        {
+            var max = vector.Aggregate(float.MinValue, (current, component) => Math.Max(current, Math.Abs(component)));
+            var scale = 127f / max;
+            var hasScale = scale > 0 && float.IsInfinity(scale) == false;
+            return vector.Select(component => hasScale ? (byte)Convert.ToSByte(component * scale) : (byte)0).Concat(BitConverter.GetBytes(hasScale ? max : 0f)).ToArray();
+        }
+
+        static byte[] ExpectedInt1(float[] vector)
+        {
+            var bits = new byte[(vector.Length + 7) / 8];
+            for (var i = 0; i < vector.Length; i++)
+            {
+                if (vector[i] >= 0)
+                    bits[i / 8] |= (byte)(0b_1000_0000 >> (i % 8));
+            }
+
+            return bits;
+        }
+    }
+
     [RavenTheory(RavenTestCategory.Indexes | RavenTestCategory.Vector)]
     [RavenData(SearchEngineMode = RavenSearchEngineMode.Corax, DatabaseMode = RavenDatabaseMode.Single)]
     public void AllZeroVectorIsIndexedAndDoesNotChangeTheOtherResults(Options options)
