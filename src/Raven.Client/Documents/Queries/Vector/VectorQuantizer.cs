@@ -12,7 +12,7 @@ public static class VectorQuantizer
     internal static bool TryToInt8(ReadOnlySpan<float> rawEmbedding, ReadOnlySpan<sbyte> destination, out int usedBytes)
     {
         usedBytes = 0;
-        if (destination.Length < rawEmbedding.Length)
+        if (destination.Length < rawEmbedding.Length + sizeof(float))
             return false;
         ref var sourceRef = ref MemoryMarshal.GetReference(rawEmbedding);
         var maxComponent = float.MinValue;
