@@ -5,9 +5,11 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using Raven.Client.Documents.Queries.Vector;
 using Raven.Server.Config;
+using Raven.Server.Documents.AI.Embeddings;
 using Tests.Infrastructure;
 using Voron.Data.Graphs;
 using Xunit;
+using VectorEmbeddingType = Raven.Client.Documents.Indexes.Vector.VectorEmbeddingType;
 
 namespace FastTests.Corax.Vectors;
 
@@ -75,6 +77,15 @@ public class Int8VectorSimilarityTests : RavenTestBase
 
         Assert.Equal(new sbyte[] { 127, -64, 0 }, int8[..3]);
         Assert.Equal(1f, MemoryMarshal.Cast<sbyte, float>(int8.AsSpan(3))[0]);
+    }
+
+    // In place, one component leaves four bytes, one fewer than the component and its magnitude.
+    [RavenFact(RavenTestCategory.Vector)]
+    public void SingleComponentVectorConvertsToInt8InPlace()
+    {
+        var int8 = EmbeddingsHelper.CreateEmbeddingValue(new[] { 0.5f }, VectorEmbeddingType.Int8).ToArray();
+
+        Assert.Equal(new byte[] { 127 }.Concat(BitConverter.GetBytes(0.5f)), int8);
     }
 
     [RavenTheory(RavenTestCategory.Indexes | RavenTestCategory.Vector)]
