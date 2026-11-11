@@ -192,8 +192,8 @@ public unsafe partial class Hnsw
         public readonly LowLevelTransaction Llt;
         // _visitsCounter versions Node.Visited; every traversal start bumps it so the visited
         // set is reset in O(1). _queryVectorVersion versions Node.QueryDistanceVersion; it is
-        // bumped when the query vector changes and when a filtered search starts, so a node's
-        // cached distance survives across the traversals in between. Both start at 1 so
+        // bumped by OnQueryVector only when the query vector changes, so a node's cached distance
+        // survives across traversals that reuse the same query vector. Both start at 1 so
         // freshly-loaded nodes (fields default to 0) never spuriously match.
         private int _visitsCounter = 1;
         private int _queryVectorVersion = 1;
@@ -775,11 +775,11 @@ public unsafe partial class Hnsw
             ContextBoundNativeList<int> candidates,
             NearestEdgesFlags flags)
         {
-            return new NearestSearcher(this, startingPointIndex, vector, level , numberOfCandidates, candidates, flags, null);
+            return new NearestSearcher(this, startingPointIndex, vector, level , numberOfCandidates, candidates, flags, null, null);
         }
 
         /// <summary>The descent from the entry point and the base-layer traversal from where it ends.</summary>
-        internal IHnswSearcher ApproximateSearch(Memory<byte> vector, int numberOfCandidates, RoaringBitmap? filter)
+        internal IHnswSearcher ApproximateSearch(Memory<byte> vector, int numberOfCandidates, RoaringBitmap? filter, Func<ContextBoundNativeList<long>> filterNodes = null)
         {
             var nearestNodesByLevel = new ContextBoundNativeList<int>(Llt.Allocator);
             nearestNodesByLevel.EnsureCapacityFor(Options.MaxLevel + 1);
@@ -787,7 +787,7 @@ public unsafe partial class Hnsw
             var nearest = nearestNodesByLevel[0];
             nearestNodesByLevel.Clear();
             return new NearestSearcher(this, nearest, vector, 0, numberOfCandidates, nearestNodesByLevel,
-                NearestEdgesFlags.StartingPointAsEdge | NearestEdgesFlags.FilterNodesWithEmptyPostingLists, filter);
+                NearestEdgesFlags.StartingPointAsEdge | NearestEdgesFlags.FilterNodesWithEmptyPostingLists, filter, filterNodes);
         }
 
         public IHnswSearcher EmptySearch() => new EmptySearcher();
@@ -1617,7 +1617,8 @@ public unsafe partial class Hnsw
     /// so repeated traversals avoid the node-index resolution and container reads already paid
     /// for on the first pass.
     /// </summary>
-    public static VectorSearchRetriever ApproximateNearest(SearchState searchState, int numberOfCandidates, Memory<byte> vector, float minimumSimilarity, RoaringBitmap? filter = null)
+    public static VectorSearchRetriever ApproximateNearest(SearchState searchState, int numberOfCandidates, Memory<byte> vector, float minimumSimilarity, RoaringBitmap? filter = null,
+        Func<ContextBoundNativeList<long>> filterNodes = null)
     {
         if (searchState.IsEmpty)
             return EmptyRetriever(searchState, vector, minimumSimilarity);
@@ -1631,7 +1632,7 @@ public unsafe partial class Hnsw
         if (searchState.Options.CountOfVectors == 0)
             return new VectorSearchRetriever(searchState, searchState.EmptySearch(), vector, minimumSimilarity, ownsSearchState: false, queryVectorScope);
 
-        return new VectorSearchRetriever(searchState, searchState.ApproximateSearch(vector, numberOfCandidates, filter), vector, minimumSimilarity,
+        return new VectorSearchRetriever(searchState, searchState.ApproximateSearch(vector, numberOfCandidates, filter, filterNodes), vector, minimumSimilarity,
             ownsSearchState: false, queryVectorScope);
     }
 
