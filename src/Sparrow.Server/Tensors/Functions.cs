@@ -116,6 +116,13 @@ namespace Sparrow.Server.Tensors
                         MemoryMarshal.Cast<T, sbyte>(a), TResult.One,
                         MemoryMarshal.Cast<T, sbyte>(b), TResult.One);
                 }
+
+                if (a.Length >= Vector128<sbyte>.Count && (AdvInstructionSet.X86.IsSupportedSse || AdvInstructionSet.Arm.IsSupported))
+                {
+                    return Vectorized128.CosineSimilarityIntegers(
+                        MemoryMarshal.Cast<T, sbyte>(a), TResult.One,
+                        MemoryMarshal.Cast<T, sbyte>(b), TResult.One);
+                }
             }
 
             if (a.Length >= Vector512<T>.Count && AdvInstructionSet.IsAcceleratedVector256)
@@ -162,6 +169,13 @@ namespace Sparrow.Server.Tensors
                 if (a.Length >= Vector128<sbyte>.Count && AdvInstructionSet.Arm.IsSupported && Dp.IsSupported)
                 {
                     return Vectorized128.CosineSimilarityIntegersNeon(
+                        MemoryMarshal.Cast<T, sbyte>(a), aMagnitude,
+                        MemoryMarshal.Cast<T, sbyte>(b), bMagnitude);
+                }
+
+                if (a.Length >= Vector128<sbyte>.Count && (AdvInstructionSet.X86.IsSupportedSse || AdvInstructionSet.Arm.IsSupported))
+                {
+                    return Vectorized128.CosineSimilarityIntegers(
                         MemoryMarshal.Cast<T, sbyte>(a), aMagnitude,
                         MemoryMarshal.Cast<T, sbyte>(b), bMagnitude);
                 }
@@ -212,6 +226,60 @@ namespace Sparrow.Server.Tensors
 
         public static class Serial
         {
+            public static long HammingBitDistance(ReadOnlySpan<byte> xAsByte, ReadOnlySpan<byte> yAsByte)
+            {
+                ref byte xRef = ref MemoryMarshal.GetReference(xAsByte);
+                ref byte yRef = ref MemoryMarshal.GetReference(yAsByte);
+
+                const int Word = sizeof(ulong);
+                const int N = Word * 3;     
+
+                ulong count1 = 0;
+                ulong count2 = 0;
+                ulong count3 = 0;
+
+                int offset = 0;
+                int length = xAsByte.Length;
+
+                // Process all full 24-byte blocks
+                while (offset + N <= length)
+                {
+                    int byteOffset = offset;
+                    ulong xBits1 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.AddByteOffset(ref xRef, byteOffset));
+                    ulong yBits1 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.AddByteOffset(ref yRef, byteOffset));
+                    count1 += ulong.PopCount(xBits1 ^ yBits1);
+
+                    byteOffset = (offset + Word);
+                    ulong xBits2 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.AddByteOffset(ref xRef, byteOffset));
+                    ulong yBits2 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.AddByteOffset(ref yRef, byteOffset));
+                    count2 += ulong.PopCount(xBits2 ^ yBits2);
+
+                    byteOffset = (offset + 2 * Word);
+                    ulong xBits3 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.AddByteOffset(ref xRef, byteOffset));
+                    ulong yBits3 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.AddByteOffset(ref yRef, byteOffset));
+                    count3 += ulong.PopCount(xBits3 ^ yBits3);
+
+                    offset += N;
+                }
+
+                ulong count = count1 + count2 + count3;
+
+                for (; offset + Word <= length; offset += Word)
+                {
+                    ulong xBits = Unsafe.ReadUnaligned<ulong>(ref Unsafe.AddByteOffset(ref xRef, offset));
+                    ulong yBits = Unsafe.ReadUnaligned<ulong>(ref Unsafe.AddByteOffset(ref yRef, offset));
+                    count += ulong.PopCount(xBits ^ yBits);
+                }
+
+                for (int i = offset; i < length; i++)
+                {
+                    var xor = Unsafe.Add(ref xRef, i) ^ Unsafe.Add(ref yRef, i);
+                    count += (ulong)int.PopCount(xor);
+                }
+
+                return (long)count;
+            }
+
             [MethodImpl(MethodImplOptions.AggressiveOptimization | MethodImplOptions.AggressiveInlining)]
             internal static TResult CosineSimilarityNormalize<T, TResult>(T ab, T a2, T b2)
                 where T : unmanaged, IRootFunctions<T>, INumber<T>
@@ -1084,6 +1152,113 @@ namespace Sparrow.Server.Tensors
                 return CosineSimilarityNormalize<TResult, TResult>(fab, fa2, fb2);
             }
             
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            internal static TResult CosineSimilarityIntegers<TResult>(ReadOnlySpan<sbyte> a, TResult aMagnitude, ReadOnlySpan<sbyte> b, TResult bMagnitude)
+                where TResult : unmanaged, IFloatingPoint<TResult>, IRootFunctions<TResult>, INumber<TResult>
+            {
+                if (Sse2.IsSupported == false && AdvSimd.IsSupported == false)
+                    throw new NotSupportedException("This method should not be called on the current architecture");
+
+                ref sbyte aRef = ref MemoryMarshal.GetReference(a);
+                ref sbyte bRef = ref MemoryMarshal.GetReference(b);
+
+                // A step adds at most 2^16 to an int lane, so spans up to 512 KB sum within an int.
+                Vector128<int> abVec = default, a2Vec = default, b2Vec = default;
+                int i = 0;
+                for (; i + Vector128<sbyte>.Count <= a.Length; i += Vector128<sbyte>.Count)
+                {
+                    var (aLo, aHi) = Vector128.Widen(Vector128.LoadUnsafe(ref aRef, (nuint)i));
+                    var (bLo, bHi) = Vector128.Widen(Vector128.LoadUnsafe(ref bRef, (nuint)i));
+                    abVec += MultiplyAddAdjacent(aLo, bLo) + MultiplyAddAdjacent(aHi, bHi);
+                    a2Vec += MultiplyAddAdjacent(aLo, aLo) + MultiplyAddAdjacent(aHi, aHi);
+                    b2Vec += MultiplyAddAdjacent(bLo, bLo) + MultiplyAddAdjacent(bHi, bHi);
+                }
+
+                int ab = Vector128.Sum(abVec), a2 = Vector128.Sum(a2Vec), b2 = Vector128.Sum(b2Vec);
+                for (; i < a.Length; i++)
+                {
+                    ab += a[i] * b[i];
+                    a2 += a[i] * a[i];
+                    b2 += b[i] * b[i];
+                }
+
+                if (a2 == 0 && b2 == 0)
+                    return TResult.CreateTruncating(double.NaN); // Both zero vectors: nan
+                if (ab == 0)
+                    return TResult.Zero; // Orthogonal or one zero: distance = 1, similarity 0
+
+                TResult fab = TResult.CreateTruncating(ab) * aMagnitude * bMagnitude;
+                TResult fa2 = TResult.CreateTruncating(a2) * aMagnitude * aMagnitude;
+                TResult fb2 = TResult.CreateTruncating(b2) * bMagnitude * bMagnitude;
+                return CosineSimilarityNormalize<TResult, TResult>(fab, fa2, fb2);
+
+                [MethodImpl(MethodImplOptions.AggressiveInlining)]
+                static Vector128<int> MultiplyAddAdjacent(Vector128<short> left, Vector128<short> right) =>
+                    Sse2.IsSupported
+                        ? Sse2.MultiplyAddAdjacent(left, right)
+                        : AdvSimd.MultiplyWideningUpperAndAdd(AdvSimd.MultiplyWideningLower(left.GetLower(), right.GetLower()), left, right);
+            }
+
+            internal static long HammingBitDistanceAdvSimd(ReadOnlySpan<byte> x, ReadOnlySpan<byte> y)
+            {
+                if (AdvSimd.IsSupported == false)
+                    throw new NotSupportedException("This method should not be called on the current architecture");
+
+                ref byte xRef = ref MemoryMarshal.GetReference(x);
+                ref byte yRef = ref MemoryMarshal.GetReference(y);
+
+                // A step adds at most 128 to a uint lane, so no span overflows it. Four blocks per step keep the adds independent.
+                const int Block = 16;
+                Vector128<uint> counts = default;
+                int i = 0;
+                for (; i + 4 * Block <= x.Length; i += 4 * Block)
+                {
+                    var c0 = AdvSimd.PopCount(Vector128.LoadUnsafe(ref xRef, (nuint)i) ^ Vector128.LoadUnsafe(ref yRef, (nuint)i));
+                    var c1 = AdvSimd.PopCount(Vector128.LoadUnsafe(ref xRef, (nuint)(i + Block)) ^ Vector128.LoadUnsafe(ref yRef, (nuint)(i + Block)));
+                    var c2 = AdvSimd.PopCount(Vector128.LoadUnsafe(ref xRef, (nuint)(i + 2 * Block)) ^ Vector128.LoadUnsafe(ref yRef, (nuint)(i + 2 * Block)));
+                    var c3 = AdvSimd.PopCount(Vector128.LoadUnsafe(ref xRef, (nuint)(i + 3 * Block)) ^ Vector128.LoadUnsafe(ref yRef, (nuint)(i + 3 * Block)));
+                    counts = AdvSimd.AddPairwiseWideningAndAdd(counts, AdvSimd.AddPairwiseWidening((c0 + c1) + (c2 + c3)));
+                }
+
+                for (; i + Block <= x.Length; i += Block)
+                {
+                    var bits = Vector128.LoadUnsafe(ref xRef, (nuint)i) ^ Vector128.LoadUnsafe(ref yRef, (nuint)i);
+                    counts = AdvSimd.AddPairwiseWideningAndAdd(counts, AdvSimd.AddPairwiseWidening(AdvSimd.PopCount(bits)));
+                }
+
+                return (long)Vector128.Sum(AdvSimd.AddPairwiseWidening(counts)) + Serial.HammingBitDistance(x[i..], y[i..]);
+            }
+
+            internal static unsafe long HammingBitDistanceSve(ReadOnlySpan<byte> x, ReadOnlySpan<byte> y)
+            {
+                if (Sve.IsSupported == false)
+                    throw new NotSupportedException("This method should not be called on the current architecture");
+
+                // SVE counts the bits of whole 64-bit lanes, so the counts add without widening. Four accumulators keep the adds independent.
+                int n = Vector<byte>.Count;
+                Vector<ulong> c0 = default, c1 = default, c2 = default, c3 = default;
+                int i = 0;
+                fixed (byte* xPtr = x, yPtr = y)
+                {
+                    for (; i + 4 * n <= x.Length; i += 4 * n)
+                    {
+                        c0 += Sve.PopCount(Vector.AsVectorUInt64(Vector.Load(xPtr + i) ^ Vector.Load(yPtr + i)));
+                        c1 += Sve.PopCount(Vector.AsVectorUInt64(Vector.Load(xPtr + i + n) ^ Vector.Load(yPtr + i + n)));
+                        c2 += Sve.PopCount(Vector.AsVectorUInt64(Vector.Load(xPtr + i + 2 * n) ^ Vector.Load(yPtr + i + 2 * n)));
+                        c3 += Sve.PopCount(Vector.AsVectorUInt64(Vector.Load(xPtr + i + 3 * n) ^ Vector.Load(yPtr + i + 3 * n)));
+                    }
+
+                    // The predicated loads read zeros past the end of the spans.
+                    for (; i < x.Length; i += n)
+                    {
+                        var active = Sve.CreateWhileLessThanMaskByte(i, x.Length);
+                        c0 += Sve.PopCount(Vector.AsVectorUInt64(Sve.LoadVector(active, xPtr + i) ^ Sve.LoadVector(active, yPtr + i)));
+                    }
+                }
+
+                return (long)Vector.Sum((c0 + c1) + (c2 + c3));
+            }
+
             [MethodImpl(MethodImplOptions.AggressiveOptimization | MethodImplOptions.AggressiveInlining)]
             internal static TResult CosineSimilarityNormalizeNeon<T, TResult>(T ab, T a2, T b2)
                 where T : unmanaged, IRootFunctions<T>, INumber<T>
@@ -1171,6 +1346,28 @@ namespace Sparrow.Server.Tensors
 
         public static class Vectorized256
         {
+            internal static long HammingBitDistanceAvx2(ReadOnlySpan<byte> x, ReadOnlySpan<byte> y)
+            {
+                if (Avx2.IsSupported == false)
+                    throw new NotSupportedException("This method should not be called on the current architecture");
+
+                ref byte xRef = ref MemoryMarshal.GetReference(x);
+                ref byte yRef = ref MemoryMarshal.GetReference(y);
+
+                // Muła, Kurz and Lemire, "Faster Population Counts Using AVX2 Instructions": a shuffle looks up the bit count of each nibble and a sum of absolute differences folds the bytes into longs.
+                var nibbleCounts = Vector256.Create((byte)0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4, 0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4);
+                var lowNibble = Vector256.Create((byte)15);
+                Vector256<ulong> counts = default;
+                int i = 0;
+                for (; i + Vector256<byte>.Count <= x.Length; i += Vector256<byte>.Count)
+                {
+                    var bits = Vector256.LoadUnsafe(ref xRef, (nuint)i) ^ Vector256.LoadUnsafe(ref yRef, (nuint)i);
+                    var bytes = Avx2.Shuffle(nibbleCounts, bits & lowNibble) + Avx2.Shuffle(nibbleCounts, Vector256.ShiftRightLogical(bits.AsUInt16(), 4).AsByte() & lowNibble);
+                    counts += Avx2.SumAbsoluteDifferences(bytes, Vector256<byte>.Zero).AsUInt64();
+                }
+
+                return (long)Vector256.Sum(counts) + Serial.HammingBitDistance(x[i..], y[i..]);
+            }
 
             [MethodImpl(MethodImplOptions.AggressiveOptimization | MethodImplOptions.AggressiveInlining)]
             internal static TResult CosineSimilarityNormalizeSse<T, TResult>(T ab, T a2, T b2)
@@ -1468,49 +1665,14 @@ namespace Sparrow.Server.Tensors
             var xAsByte = MemoryMarshal.Cast<T, byte>(x);
             var yAsByte = MemoryMarshal.Cast<T, byte>(y);
 
-            ref byte xRef = ref MemoryMarshal.GetReference(xAsByte);
-            ref byte yRef = ref MemoryMarshal.GetReference(yAsByte);
-
-            const int Word = sizeof(ulong);
-            const int N = Word * 3;     
-
-            ulong count1 = 0;
-            ulong count2 = 0;
-            ulong count3 = 0;
-
-            int offset = 0;
-            int length = xAsByte.Length;
-
-            // Process all full 24-byte blocks
-            while (offset + N <= length)
-            {
-                int byteOffset = offset;
-                ulong xBits1 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.AddByteOffset(ref xRef, byteOffset));
-                ulong yBits1 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.AddByteOffset(ref yRef, byteOffset));
-                count1 += ulong.PopCount(xBits1 ^ yBits1);
-
-                byteOffset = (offset + Word);
-                ulong xBits2 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.AddByteOffset(ref xRef, byteOffset));
-                ulong yBits2 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.AddByteOffset(ref yRef, byteOffset));
-                count2 += ulong.PopCount(xBits2 ^ yBits2);
-
-                byteOffset = (offset + 2 * Word);
-                ulong xBits3 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.AddByteOffset(ref xRef, byteOffset));
-                ulong yBits3 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.AddByteOffset(ref yRef, byteOffset));
-                count3 += ulong.PopCount(xBits3 ^ yBits3);
-
-                offset += N;
-            }
-
-            ulong count = count1 + count2 + count3;
-
-            for (int i = offset; i < length; i++)
-            {
-                var xor = Unsafe.Add(ref xRef, i) ^ Unsafe.Add(ref yRef, i);
-                count += (ulong)int.PopCount(xor);
-            }
-
-            return (long)count;
+            // PERF: AArch64 counts bits only in vector registers. x64 exposes no vector popcount, so AVX2 looks up the count of each nibble with a shuffle.
+            if (AdvInstructionSet.Arm.IsSupported && Sve.IsSupported)
+                return Vectorized128.HammingBitDistanceSve(xAsByte, yAsByte);
+            if (AdvInstructionSet.Arm.IsSupported)
+                return Vectorized128.HammingBitDistanceAdvSimd(xAsByte, yAsByte);
+            if (AdvInstructionSet.X86.IsSupportedAvx256)
+                return Vectorized256.HammingBitDistanceAvx2(xAsByte, yAsByte);
+            return Serial.HammingBitDistance(xAsByte, yAsByte);
         }
     }
 }
