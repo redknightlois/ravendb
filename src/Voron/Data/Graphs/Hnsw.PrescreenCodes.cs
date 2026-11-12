@@ -392,9 +392,9 @@ public partial class Hnsw
     }
 
     /// <summary>
-    /// The prescreen of the base-layer traversals of one SearchState, one traversal at a time: before the node record of a neighbor is resolved, the lower
-    /// bound of the neighbor's code may reject it. A screened traversal differs from the one that reads no code with probability at most
-    /// <see cref="FailureBudget"/>. Its buffers come from the allocator it is created with, so it must be disposed before the allocator is.
+    /// The prescreen of the queries of one SearchState, one query at a time, through its descent and its base-layer traversal: before the node record of a
+    /// neighbor is resolved, the lower bound of the neighbor's code may reject it. A screened query differs from the one that reads no code with probability
+    /// at most <see cref="FailureBudget"/>. Its buffers come from the allocator it is created with, so it must be disposed before the allocator is.
     /// </summary>
     internal sealed unsafe class CodeScreen : IDisposable
     {
@@ -425,8 +425,9 @@ public partial class Hnsw
         public double Margin { get; }
 
         /// <summary>
-        /// The admission events of the traversal so far: the neighbors whose distance passes the threshold of full queues, so they enter the candidate queue.
-        /// A node with an empty posting list counts too, although it stays out of the working set, because a screened traversal would not expand it.
+        /// The admission events of the query so far: the moves of the descent, and the neighbors whose distance passes the threshold of full queues, so they
+        /// enter the candidate queue. A node with an empty posting list counts too, although it stays out of the working set, because a screened query would not
+        /// expand it.
         /// </summary>
         public int Admissions;
 
@@ -434,21 +435,27 @@ public partial class Hnsw
         public int Rejected { get; private set; }
 
         /// <summary>
-        /// Starts a traversal of a snapshot whose node ids end at <paramref name="maxNodeId"/>: prepares the query and forgets the rejections of the
-        /// traversal before.
+        /// True while the descent screens. Its threshold is the distance of the current node, which is tighter than those of the base layer, so its rejections
+        /// are not remembered.
+        /// </summary>
+        public bool Descending;
+
+        /// <summary>
+        /// Starts a query over a snapshot whose node ids end at <paramref name="maxNodeId"/>: prepares it and forgets the rejections of the query before.
         /// </summary>
         public CodeScreen Begin(ReadOnlySpan<byte> tensor, int cap, long maxNodeId)
         {
-            // Let U be the traversal without the screen, on the same graph and query: a mathematical object of this proof, not a traversal that runs. U reads
-            // no code, so which neighbors it evaluates, in which order and against which thresholds is fixed before the dither is drawn. The screened
-            // traversal S evaluates the neighbors of U in the same order minus the rejected ones, so it follows U until the first neighbor that S rejects
-            // and U admits. Rejecting an admission event takes a bound above its distance by more than the margin, which has probability at most alpha.
-            // S screens an expansion only while the events so far plus its neighbors fit under the cap, and the events so far are those of U up to the first
-            // difference, so every event that S can reject is among the first cap events of U. Those are fixed, so by the union bound S differs from U with
-            // probability at most cap times alpha, which this alpha makes the budget. Once the cap is spent the rest of the traversal runs unscreened.
+            // Let U be the query without the screen, on the same graph: a mathematical object of this proof, not a query that runs. U reads no code, so which
+            // neighbors it evaluates, in which order and against which thresholds is fixed before the dither is drawn. The screened query S evaluates the
+            // neighbors of U in the same order minus the rejected ones, so it follows U until the first neighbor that S rejects and U admits. Rejecting an
+            // admission event takes a bound above its distance by more than the margin, which has probability at most alpha. S screens an expansion only while
+            // the events so far plus its neighbors fit under the cap, and the events so far are those of U up to the first difference, so every event that S
+            // can reject is among the first cap events of U. Those are fixed, so by the union bound S differs from U with probability at most cap times alpha,
+            // which this alpha makes the budget. Once the cap is spent the rest of the query runs unscreened.
             Cap = cap;
             Admissions = 0;
             Rejected = 0;
+            Descending = false;
             _query.Prepare(tensor, FailureBudget / cap);
 
             foreach (var word in _setWords.ToSpan())
@@ -470,13 +477,13 @@ public partial class Hnsw
         public bool IsRejected(long nodeId) => _rejected != null && (ulong)nodeId <= (ulong)_maxNodeId && (_rejected[nodeId >> 6] & (1UL << (int)(nodeId & 63))) != 0;
 
         /// <summary>
-        /// Remembers a rejected neighbor for the rest of the traversal: the threshold only tightens while the queues are full, so the rejection holds against
-        /// every later threshold, and the id is never checked or resolved again. An id outside the snapshot is never remembered: the resolution of the node
-        /// reports it.
+        /// Remembers a rejected neighbor of the base layer for the rest of the traversal: the threshold only tightens while the queues are full, so the
+        /// rejection holds against every later threshold, and the id is never checked or resolved again. An id outside the snapshot is never remembered: the
+        /// resolution of the node reports it.
         /// </summary>
         public void Reject(long nodeId)
         {
-            if ((ulong)nodeId > (ulong)_maxNodeId)
+            if (Descending || (ulong)nodeId > (ulong)_maxNodeId)
                 return;
 
             if (_rejected == null)
@@ -500,8 +507,8 @@ public partial class Hnsw
 
         /// <summary>
         /// True when the code <paramref name="row"/> proves that its node is not admitted at <paramref name="threshold"/>: the bound exceeds it by the margin,
-        /// strictly. The caller screens only while the working set is full, and so are the filter's nearest nodes of a filtered traversal, and the threshold
-        /// is the distance of the farthest entry of the two.
+        /// strictly. In the descent the threshold is the distance of the current node. In the base layer the caller screens only while the working set is full,
+        /// and so are the filter's nearest nodes of a filtered traversal, and the threshold is the distance of the farthest entry of the two.
         /// </summary>
         public bool Rejects(ReadOnlySpan<byte> row, double threshold) => Exceeds(_query.LowerBound(row), threshold, Margin);
 
@@ -611,7 +618,11 @@ public partial class Hnsw
                 return false;
 
             screen.Reject(id);
-            if (_forTestingPurposes is not null)
+            if (_forTestingPurposes is null)
+                return true;
+            if (screen.Descending)
+                _forTestingPurposes.DescentRejections++;
+            else
                 _forTestingPurposes.Rejections++;
             return true;
         }
@@ -630,6 +641,8 @@ public partial class Hnsw
 
             public long CodeRowsRead;
             public long Rejections;
+            // The rejections of the descent, which the screen does not remember.
+            public long DescentRejections;
 
             // The largest sum of the admission events so far and the neighbors checked, over the screened expansions.
             public int Commitment;
