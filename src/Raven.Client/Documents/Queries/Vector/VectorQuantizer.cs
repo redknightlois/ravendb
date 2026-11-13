@@ -12,24 +12,25 @@ public static class VectorQuantizer
     internal static bool TryToInt8(ReadOnlySpan<float> rawEmbedding, ReadOnlySpan<sbyte> destination, out int usedBytes)
     {
         usedBytes = 0;
-        if (destination.Length < rawEmbedding.Length)
+        if (destination.Length < rawEmbedding.Length + sizeof(float))
             return false;
         ref var sourceRef = ref MemoryMarshal.GetReference(rawEmbedding);
         var maxComponent = float.MinValue;
         for (int i = 0; i < rawEmbedding.Length; i++)
             maxComponent = Math.Max(maxComponent, Math.Abs(Unsafe.Add(ref sourceRef, i)));
         
+        // A vector without a finite, positive scale (all zero, a tiny largest component, a NaN or infinite component) converts to zeros with magnitude 0.
         var scaleFactor = 127f / maxComponent;
+        var hasScale = scaleFactor > 0 && float.IsInfinity(scaleFactor) == false;
         ref var destinationRef = ref MemoryMarshal.GetReference(destination);
         
         for (var i = 0; i < rawEmbedding.Length; i++)
         {
-            var scaledValue = Unsafe.Add(ref sourceRef, i) * scaleFactor;
-            Unsafe.Add(ref destinationRef, i) = Convert.ToSByte(scaledValue);
+            Unsafe.Add(ref destinationRef, i) = hasScale ? Convert.ToSByte(Unsafe.Add(ref sourceRef, i) * scaleFactor) : (sbyte)0;
         }
         
         // Store magnitude as four last sbytes
-        Unsafe.As<sbyte, float>(ref Unsafe.Add(ref destinationRef, rawEmbedding.Length)) = maxComponent;
+        Unsafe.As<sbyte, float>(ref Unsafe.Add(ref destinationRef, rawEmbedding.Length)) = hasScale ? maxComponent : 0;
         
         usedBytes = rawEmbedding.Length + sizeof(float);
         return true;
