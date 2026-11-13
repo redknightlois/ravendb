@@ -74,6 +74,13 @@ public unsafe partial class Hnsw
             NumberOfCandidates = numberOfCandidates,
             SimilarityMethod = similarityMethod
         };
+        var codeDimensions = CodeDimensions(similarityMethod, vectorSizeBytes);
+        if (codeDimensions > 0)
+        {
+            options.CodeRowsPerBlock = CodeRowsPerBlock(CodeParameters.RowBytesOf(codeDimensions));
+            tree.LookupFor<Int64LookupKey>(CodePagesSlice);
+        }
+
         using (tree.DirectAdd(OptionsSlice, sizeof(Options), out var output))
         {
             Unsafe.Write(output, options);
@@ -121,6 +128,12 @@ public unsafe partial class Hnsw
 
     // A Corax tree can hold a user-named key, but never a value of the size of the options.
     internal static bool IsGraph(Tree tree) => tree.GetDataSize(OptionsSlice) == sizeof(Options);
+
+    /// <summary>
+    /// A graph tree holds raw values beside its nested lookups, so a walker of the graph tree reads a root object header only under these keys.
+    /// </summary>
+    internal static bool IsNestedLookup(Slice key) =>
+        SliceComparer.AreEqual(key, NodeIdToLocationSlice) || SliceComparer.AreEqual(key, NodesByVectorIdSlice) || SliceComparer.AreEqual(key, CodePagesSlice);
 
     /// <summary>
     /// Translates a minimum similarity on the [0, 1] scale into the maximum distance the similarity method reports for
@@ -200,6 +213,10 @@ public unsafe partial class Hnsw
         private Memory<byte> _lastQueryVector;
         public readonly delegate*<ReadOnlySpan<byte>, ReadOnlySpan<byte>, float> SimilarityCalc;
         public readonly bool IsEmpty;
+        // Every cosine graph carries a code for each of its nodes; the other graphs carry none.
+        private readonly bool _carriesCodes;
+        private readonly int _codeRowBytes;
+        private readonly NodeRows _codeRows;
         private readonly HnswIndexCache _nodeCache;
         // Fixed at construction. Lookups gate the shared cache on this so a reader at
         // storage tx R never observes an entry stamped by a later commit.
@@ -303,6 +320,13 @@ public unsafe partial class Hnsw
             // with every commit, while the cache snapshot is frozen at warm-up time. Using the
             // cached value would route the search from a level the entry point never reached.
             Options = ReadOptions(_tree);
+            var codeDimensions = CodeDimensions(Options.SimilarityMethod, Options.VectorSizeBytes);
+            _carriesCodes = codeDimensions > 0;
+            if (_carriesCodes)
+            {
+                _codeRowBytes = CodeParameters.RowBytesOf(codeDimensions);
+                _codeRows = new NodeRows(_tree.LookupFor<Int64LookupKey>(CodePagesSlice), _codeRowBytes, Options.CodeRowsPerBlock, _nodeCache?.CodeBlocks);
+            }
             SimilarityCalc = _nodeCache != null ? _nodeCache.SimilarityCalc : GetDistanceKernel(Options);
 
             if (_nodeCache != null)
@@ -494,10 +518,11 @@ public unsafe partial class Hnsw
         /// Resolves edge indexes for a node at the specified level, caching the result in
         /// <see cref="Node.EdgesIndexesPerLevel"/>. On cache hit the expensive
         /// <see cref="LoadNodeIndexes"/> dictionary lookups are skipped entirely.
+        /// With a <paramref name="screen"/>, the neighbors that it rejects against <paramref name="threshold"/> are left out and stay unresolved.
         /// May grow the nodes array — callers must re-fetch any outstanding node refs afterward.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private void ResolveEdgeIndexes(int nodeIndex, int level, ref NativeList<long> nodeIds, ref NativeList<int> indexes)
+        internal void ResolveEdgeIndexes(int nodeIndex, int level, CodeScreen screen, double threshold, ref NativeList<long> nodeIds, ref NativeList<int> indexes)
         {
             ref var node = ref GetNodeByIndex(nodeIndex);
 
@@ -512,15 +537,20 @@ public unsafe partial class Hnsw
                 return;
             }
 
-            ResolveEdgeIndexesSlow(nodeIndex, level, ref nodeIds, ref indexes);
+            ResolveEdgeIndexesSlow(nodeIndex, level, screen, threshold, ref nodeIds, ref indexes);
         }
 
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private void ResolveEdgeIndexesSlow(int nodeIndex, int level, ref NativeList<long> nodeIds, ref NativeList<int> indexes)
+        private void ResolveEdgeIndexesSlow(int nodeIndex, int level, CodeScreen screen, double threshold, ref NativeList<long> nodeIds, ref NativeList<int> indexes)
         {
             ref var node = ref GetNodeByIndex(nodeIndex);
             nodeIds.ResetAndCopyFrom(Llt.Allocator, node.EdgesAtLevel(level));
-            LoadNodeIndexes(ref nodeIds, ref indexes);
+            var edgeCount = nodeIds.Count;
+            LoadNodeIndexes(ref nodeIds, ref indexes, screen, threshold);
+
+            // A list without the rejected neighbors is never the node's list.
+            if (indexes.Count != edgeCount)
+                return;
 
             node = ref GetNodeByIndex(nodeIndex);
             node.EdgesIndexesPerLevel.SetCapacity(Llt.Allocator, level + 1);
@@ -531,56 +561,80 @@ public unsafe partial class Hnsw
         /// This accepts a list of node ids (mutable, we do destructive updates to it) and translate
         /// that to a list of the indexes in the nodes array. If needed, it will load the nodes
         /// from the disk in a batch oriented manner.
+        /// The indexes are listed in the order of the given ids, whatever resolved each node before, so the order of an evaluation never depends
+        /// on the nodes that a screened traversal left unresolved.
+        /// With a <paramref name="screen"/>, the ids that it rejects against <paramref name="threshold"/>, now or earlier in the traversal, are dropped.
+        /// An id that this SearchState holds is resolved and is never checked: with the HnswIndexCache attached, an id that only the cache holds is checked.
         /// </summary>
-        private void LoadNodeIndexes(ref NativeList<long> nodeIds, ref NativeList<int> indexes)
+        private unsafe void LoadNodeIndexes(ref NativeList<long> nodeIds, ref NativeList<int> indexes, CodeScreen screen, double threshold)
         {
+            var screening = screen is not null && screen.Screens(nodeIds.Count);
+            if (screening && _forTestingPurposes is not null)
+                _forTestingPurposes.Commitment = Math.Max(_forTestingPurposes.Commitment, screen.Admissions + nodeIds.Count);
+
+            // PERF: One probe per id. The code rows of the ids to check start loading before the first one is read, so their cache misses overlap.
+            Buffers.Get(nodeIds.Count, out var rows, out _, out _, out _, out _);
             indexes.ResetAndEnsureCapacity(Llt.Allocator, nodeIds.Count);
             for (int i = 0; i < nodeIds.Count; i++)
             {
-                if (_nodeIdToIdx.TryGetValue(nodeIds[i], out var index))
-                {
-                    indexes.AddUnsafe(index);
-                    nodeIds[i] = -1;
-                    continue;
-                }
-
-                // Check the shared HnswIndexCache before going to disk
-                if (_nodeCache != null && _nodeCache.TryGetNode(nodeIds[i], _readerTxId, out var cached))
-                {
-                    var localIdx = AllocateNodeIndex(nodeIds[i]);
-                    CopyNodeFromCache(in cached, ref _nodes[localIdx]);
-                    _nodeIdToIdx[nodeIds[i]] = localIdx;
-                    indexes.AddUnsafe(localIdx);
-                    nodeIds[i] = -1;
-                    continue;
-                }
+                var resolved = _nodeIdToIdx.TryGetValue(nodeIds[i], out var index);
+                indexes.AddUnsafe(resolved ? index : -1);
+                rows[i] = resolved == false && screening && screen.IsRejected(nodeIds[i]) == false ? (long)PrefetchCode(nodeIds[i]) : 0;
             }
 
-            if (indexes.Count == nodeIds.Count)
+            var unresolved = 0;
+            var kept = 0;
+            for (int i = 0; i < nodeIds.Count; i++)
+            {
+                var id = nodeIds[i];
+                var index = indexes[i];
+                if (index < 0)
+                {
+                    if (screen is not null && ScreenRejects(screen, screening, id, (byte*)rows[i], threshold))
+                        continue;
+
+                    // Check the shared HnswIndexCache before going to disk
+                    if (_nodeCache != null && _nodeCache.TryGetNode(id, _readerTxId, out var cached))
+                    {
+                        index = AllocateNodeIndex(id);
+                        CopyNodeFromCache(in cached, ref _nodes[index]);
+                        _nodeIdToIdx[id] = index;
+                    }
+                }
+
+                // The slot of an unresolved id holds -1 until its record is read below.
+                indexes[kept] = index;
+                nodeIds[kept++] = id;
+                if (index < 0)
+                    unresolved++;
+            }
+
+            nodeIds.Shrink(kept);
+            indexes.Shrink(kept);
+            if (unresolved == 0)
                 return;
 
-            var matches = indexes.Count;
-            var keys = nodeIds.ToSpan();
-            keys.Sort();
-            keys = keys[matches..]; // discard all those we already found
-            for (int i = 0; i < keys.Length; i++)
+            Buffers.Get(unresolved, out var keys, out _, out var spans, out var targets, out _);
+            var loading = 0;
+            for (int i = 0; i < kept; i++)
             {
-                var nodeIdx = AllocateNodeIndex(keys[i]);
-                _nodes[nodeIdx].NodeId = keys[i];
-                _nodeIdToIdx[keys[i]] = nodeIdx;
-                indexes.AddUnsafe(nodeIdx);
+                if (indexes[i] >= 0)
+                    continue;
+
+                var nodeIdx = AllocateNodeIndex(nodeIds[i]);
+                _nodeIdToIdx[nodeIds[i]] = nodeIdx;
+                indexes[i] = nodeIdx;
+                keys[loading] = nodeIds[i];
+                targets[loading++] = nodeIdx;
             }
 
+            // Lookup.GetFor needs its keys sorted.
+            keys = keys[..loading];
+            keys.Sort(targets[..loading]);
             _nodeIdToLocations.GetFor(keys, keys, -1);
-
-            var spans = Buffers.GetSpans(keys.Length);
             Container.GetAllSortedByPage(Llt, keys, spans, Llt.PageLocator);
-            for (int i = 0; i < keys.Length; i++)
-            {
-                var buf = spans[i].ToSpan();
-                var reader = Node.Decode(Llt, buf);
-                reader.LoadInto(ref _nodes[indexes[matches + i]]);
-            }
+            for (int i = 0; i < loading; i++)
+                Node.Decode(Llt, spans[i].ToSpan()).LoadInto(ref _nodes[targets[i]]);
         }
 
         public int GetNodeIndexById(long nodeId)
@@ -773,19 +827,21 @@ public unsafe partial class Hnsw
             ContextBoundNativeList<int> candidates,
             NearestEdgesFlags flags)
         {
-            return new NearestSearcher(this, startingPointIndex, vector, level , numberOfCandidates, candidates, flags, null, null);
+            return new NearestSearcher(this, startingPointIndex, vector, level , numberOfCandidates, candidates, flags, null, null,
+                BeginScreen(vector.Span, numberOfCandidates));
         }
 
-        /// <summary>The descent from the entry point and the base-layer traversal from where it ends.</summary>
+        /// <summary>The descent from the entry point and the base-layer traversal from where it ends, with one screen for both.</summary>
         internal IHnswSearcher ApproximateSearch(Memory<byte> vector, int numberOfCandidates, RoaringBitmap? filter, Func<ContextBoundNativeList<long>> filterNodes = null)
         {
             var nearestNodesByLevel = new ContextBoundNativeList<int>(Llt.Allocator);
             nearestNodesByLevel.EnsureCapacityFor(Options.MaxLevel + 1);
-            SearchNearestAcrossLevels(vector.Span, -1, Options.MaxLevel, ref nearestNodesByLevel);
+            var screen = BeginScreen(vector.Span, filter is { } f ? FilteredBeam(numberOfCandidates, f.ComputeCount(), Options.CountOfVectors) : numberOfCandidates);
+            SearchNearestAcrossLevels(vector.Span, -1, Options.MaxLevel, ref nearestNodesByLevel, screen);
             var nearest = nearestNodesByLevel[0];
             nearestNodesByLevel.Clear();
             return new NearestSearcher(this, nearest, vector, 0, numberOfCandidates, nearestNodesByLevel,
-                NearestEdgesFlags.StartingPointAsEdge | NearestEdgesFlags.FilterNodesWithEmptyPostingLists, filter, filterNodes);
+                NearestEdgesFlags.StartingPointAsEdge | NearestEdgesFlags.FilterNodesWithEmptyPostingLists, filter, filterNodes, screen);
         }
 
         public IHnswSearcher EmptySearch() => new EmptySearcher();
@@ -793,8 +849,13 @@ public unsafe partial class Hnsw
         public IHnswSearcher ExactSearch(Memory<byte> vector, int numberOfCandidates, RoaringBitmap? filter, ContextBoundNativeList<long>? nodesToScan) => new ExactSearcher(this, vector, numberOfCandidates, filter, nodesToScan);
 
 
-        public void SearchNearestAcrossLevels(ReadOnlySpan<byte> vector, int dstIdx, int maxLevel, ref ContextBoundNativeList<int> nearestIndexes)
+        public void SearchNearestAcrossLevels(ReadOnlySpan<byte> vector, int dstIdx, int maxLevel, ref ContextBoundNativeList<int> nearestIndexes) =>
+            SearchNearestAcrossLevels(vector, dstIdx, maxLevel, ref nearestIndexes, null);
+
+        internal void SearchNearestAcrossLevels(ReadOnlySpan<byte> vector, int dstIdx, int maxLevel, ref ContextBoundNativeList<int> nearestIndexes, CodeScreen screen)
         {
+            if (screen is not null)
+                screen.Descending = true;
             var visitCounter = ++_visitsCounter;
             var currentNodeIndex = GetNodeIndexById(EntryPointId);
             var level = maxLevel;
@@ -811,7 +872,9 @@ public unsafe partial class Hnsw
                 {
                     moved = false;
                     Debug.Assert(GetNodeByIndex(currentNodeIndex).GetLevelCount() > level, "n.GetLevelCount() > level");
-                    ResolveEdgeIndexes(currentNodeIndex, level, ref nodeIds, ref indexes);
+                    // A node is evaluated once and the distance only falls, so a neighbor that the descent without the screen does not move to is never closer
+                    // than a later current node: the screened descent, which may check or evaluate it again, does not move to it either.
+                    ResolveEdgeIndexes(currentNodeIndex, level, screen, distance, ref nodeIds, ref indexes);
                     for (var i = 0; i < indexes.Count; i++)
                     {
                         var edgeIdx = indexes[i];
@@ -826,6 +889,8 @@ public unsafe partial class Hnsw
                         moved = true;
                         distance = curDist;
                         currentNodeIndex = edgeIdx;
+                        if (screen is not null)
+                            screen.Admissions++;
                     }
                 } while (moved);
 
@@ -836,6 +901,8 @@ public unsafe partial class Hnsw
             indexes.Dispose(Llt.Allocator);
             nodeIds.Dispose(Llt.Allocator);
             nearestIndexes.Inner.Reverse();
+            if (screen is not null)
+                screen.Descending = false;
         }
 
 
@@ -851,16 +918,6 @@ public unsafe partial class Hnsw
             private static UnmanagedSpan[] SpansToLoad;
             [ThreadStatic]
             private static int[] NodeIndexes;
-
-            public static Span<UnmanagedSpan> GetSpans(int count)
-            {
-                if (IdsToLoad is null || count > IdsToLoad.Length)
-                {
-                    Allocate(count);
-                }
-
-                return SpansToLoad;
-            }
 
             public static void Get(int count, out Span<long> idsToLoad, out Span<long> vectorIdsToLoad, out Span<UnmanagedSpan> spansToLoad, out Span<int> nodeIndexes, out Span<int> indexesOfIds)
             {
@@ -1002,6 +1059,8 @@ public unsafe partial class Hnsw
                _filterScratch.Dispose();
                _filterDecoder.Dispose();
            }
+
+           _screen?.Dispose();
        }
 
     }
@@ -1064,6 +1123,9 @@ public unsafe partial class Hnsw
 
             // LLT thread, once every placement is done.
             internal Action<SearchState> BeforeOlderInLinksRepaired;
+
+            // Draws the code parameters of the graph in place of Random.Shared.
+            internal Random CodeRandom;
 
             // Latched once the matching buffer was actually moved while the worker was parked, so a test
             // can fail loudly if the race window was never exercised.
@@ -1408,6 +1470,8 @@ public unsafe partial class Hnsw
                 DirtyNodeIds.Add(nodes[i].NodeId);
             }
 
+            WriteCodes();
+
             // flush the local modifications
             _searchState.FlushOptions();
 
@@ -1568,6 +1632,51 @@ public unsafe partial class Hnsw
             return (long)setId | Constants.Graphs.VectorId.PostingList;
         }
 
+
+        // The code of a node is written in the transaction that creates the node. The parameters are fixed by the first commit that creates a node.
+        private void WriteCodes()
+        {
+            var state = _searchState;
+            var dimensions = CodeDimensions(state.Options.SimilarityMethod, state.Options.VectorSizeBytes);
+            if (dimensions == 0 || state.CreatedNodes == 0)
+                return;
+
+            var parameters = state.ReadCodeParameters() ?? FixCodeParameters(dimensions);
+            var scratch = new double[dimensions];
+            for (var i = 0; i < state.CreatedNodes; i++)
+            {
+                ref var node = ref state.GetNodeByIndex(state.GetCreatedNodeIndex(i));
+                state.WriteCode(node.NodeId, parameters, node.GetVector(state), scratch);
+            }
+        }
+
+        // The center is the mean of the unit vectors that this commit creates that have a direction; it is zero when there is none.
+        private CodeParameters FixCodeParameters(int dimensions)
+        {
+            var state = _searchState;
+            var sum = new double[dimensions];
+            var unit = new double[dimensions];
+            var count = 0;
+            for (var i = 0; i < state.CreatedNodes; i++)
+            {
+                if (CodeParameters.UnitVector(state.GetNodeByIndex(state.GetCreatedNodeIndex(i)).GetVector(state), unit) == false)
+                    continue;
+
+                for (var k = 0; k < sum.Length; k++)
+                    sum[k] += unit[k];
+                count++;
+            }
+
+            var center = new float[sum.Length];
+            for (var k = 0; k < center.Length; k++)
+                center[k] = (float)(sum[k] / Math.Max(count, 1));
+
+            // Never the level Random: a draw from it would shift the level of every later node.
+            var parameters = CodeParameters.Draw(center, _forTestingPurposes?.CodeRandom ?? Random.Shared);
+            using (state.Tree.DirectAdd(CodeParametersSlice, parameters.StoredBytes, out var destination))
+                parameters.Write(new Span<byte>(destination, parameters.StoredBytes));
+            return parameters;
+        }
 
         void PersistNode(ref Node node, ref ContextBoundNativeList<byte> byteBuffer)
         {

@@ -37,6 +37,9 @@ public partial class Hnsw
         [FieldOffset(32)]
         public ContainerId LastUsedContainerId;
 
+        [FieldOffset(40)] // code rows in each block of a cosine graph, set once when the graph is created; 0 for a graph without codes
+        public int CodeRowsPerBlock;
+
         // Layer 0 holds every node and carries the fine-grained search, so it gets twice the
         // edges of the upper layers (Mmax0 = 2 * M in the HNSW paper).
         public int MaxEdgesAtLevel(int level) => level == 0 ? NumberOfEdges * 2 : NumberOfEdges;
