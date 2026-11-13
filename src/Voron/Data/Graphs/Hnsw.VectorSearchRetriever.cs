@@ -1,9 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Sparrow;
-using Sparrow.Server;
 using Voron.Data.Containers;
 using Voron.Data.PostingLists;
 using Voron.Data.RoaringBitmaps;
@@ -17,17 +17,18 @@ public partial class Hnsw
 {
     public struct VectorSearchRetriever : IDisposable
     {
-        private int _returnedCandidates;
         private readonly SearchState _searchState;
         private readonly bool _ownsSearchState;
         private int _currentNode, _currentMatchesIndex;
+        // The distance of the node whose entries Fill is returning; it carries over to the next Fill call.
+        private float _currentDistance;
         private ContextBoundNativeList<long> _postingListResults;
         private FastPForDecoder _pforDecoder;
         private PostingList.Iterator _postingListIterator;
         private PostingList _postingList;
         private readonly float _maximumDistance;
-        private bool _foundCandidateInCurrentSmallPostingList;
         private readonly IHnswSearcher _vectorsSearcher;
+        private readonly ContextBoundNativeList<int> _candidates;
         private readonly Memory<byte> _vector;
         private Sparrow.Server.ByteStringContext<Sparrow.Server.ByteStringMemoryCache>.InternalScope? _queryVectorScope;
         private RoaringBitmap _alreadySeen;
@@ -36,12 +37,6 @@ public partial class Hnsw
         
         public bool IsEmpty => _searchState.IsEmpty;
         
-        // Indicates whether the results are sorted by distance or not. If not, the caller should sort them after fetching the graph.
-        // We cannot do it internally since the flow is made in a streaming manner.
-        public bool IsSortedByDistance = true;
-        
-        public int NumberOfCandidates => _vectorsSearcher.NumberOfCandidates;
-
         public long CandidatesProcessed => _vectorsSearcher?.CandidatesProcessed ?? 0;
 
         public long VectorComparisons => _vectorsSearcher?.VectorComparisons ?? 0;
@@ -54,11 +49,11 @@ public partial class Hnsw
             _vectorsSearcher = vectorsSearcher;
             _vector = vector;
             _queryVectorScope = queryVectorScope;
-            _alreadySeen = new (searchState.Llt.Allocator);
+            _alreadySeen = new(searchState.Llt.Allocator);
             _postingListResults = new(_searchState.Llt.Allocator);
             _pforDecoder = new(searchState.Llt.Allocator);
             _maximumDistance = MinimumSimilarityToDistance(searchState.Options.SimilarityMethod, searchState.Options.VectorSizeBytes, minimumSimilarity);
-            _vectorsSearcher.MoveNextBatch(); // prime the first batch
+            _candidates = _vectorsSearcher.Search();
         }
         
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -67,265 +62,108 @@ public partial class Hnsw
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void DistancesToScores(Span<float> distances) => _searchState.DistancesToScores(distances);
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public int Fill(Span<long> matches, Span<float> distances) => Fill(matches, distances, ref Unsafe.NullRef<RoaringBitmap>());
+
+        // The searcher admits only nodes with an entry in the filter; the filter here drops the node's other entries.
         public int Fill(Span<long> matches, Span<float> distances, ref RoaringBitmap filter)
         {
-            return FillWithFilter(matches, distances, ref filter);
-        }
-        
-        public int Fill(Span<long> matches, Span<float> distances)
-        {
-            long newVectorCount = 0;
-            if (_vectorsSearcher.TryGetCurrentCandidates(out var indexes) == false)
-                return 0;
-
-            int index = 0;
-            float distance = float.NaN;
+            var index = 0;
             while (index < matches.Length)
             {
-                if (_currentNode >= indexes.Count)
-                    break;
-
                 if (_postingList != null)
                 {
                     if (_postingListIterator.Fill(matches[index..], out var total) is false && total is 0)
                     {
                         _postingListIterator = default;
                         _postingList = null;
-                        _currentNode++;
                         continue;
                     }
 
-                    total = _alreadySeen.DedupAddNew(matches.Slice(index, total), total);
-
-                    distances.Slice(index, total).Fill(distance);
-                    index += total;
+                    index += KeepAdmitted(matches.Slice(index, total), distances[index..], ref filter);
                     continue;
                 }
 
                 if (_currentMatchesIndex < _postingListResults.Count)
                 {
-                    var amountRead = Math.Min(_postingListResults.Count - _currentMatchesIndex, matches.Length - index);
-                    _postingListResults.CopyTo(matches[index..], _currentMatchesIndex, amountRead);
-                    var dedupedAmount = _alreadySeen.DedupAddNew(matches.Slice(index, amountRead), amountRead);
-                    distances.Slice(index, dedupedAmount).Fill(distance);
-                    index += dedupedAmount;
-                    _currentMatchesIndex += amountRead;
-                    if (_currentMatchesIndex == _postingListResults.Count)
-                    {
-                        _currentMatchesIndex = 0;
-                        _postingListResults.Clear();
-                        _currentNode++;
-                    }
-
+                    var copy = Math.Min(_postingListResults.Count - _currentMatchesIndex, matches.Length - index);
+                    _postingListResults.CopyTo(matches[index..], _currentMatchesIndex, copy);
+                    _currentMatchesIndex += copy;
+                    index += KeepAdmitted(matches.Slice(index, copy), distances[index..], ref filter);
                     continue;
                 }
 
-                var nodeIdx = indexes[_currentNode];
-                ref var node = ref _searchState.GetNodeByIndex(nodeIdx);
-                var rawPostingListId = node.PostingListId & Constants.Graphs.VectorId.ContainerType;
-                
-                distance = _searchState.QueryDistance(_vector.Span, nodeIdx, ref newVectorCount);
-                Debug.Assert(newVectorCount == 0, "newVectorCount == 0");
-                
-                if (distance > _maximumDistance)
-                {
-                    _currentNode++;
-                    continue;
-                }
+                _currentMatchesIndex = 0;
+                _postingListResults.Clear();
 
-                switch (node.PostingListId & Constants.Graphs.VectorId.EnsureIsSingleMask)
+                if (TryMoveToNextNode(out var postingListId) == false)
+                    break;
+
+                var rawPostingListId = postingListId & Constants.Graphs.VectorId.ContainerType;
+                switch (postingListId & Constants.Graphs.VectorId.EnsureIsSingleMask)
                 {
                     case Constants.Graphs.VectorId.Tombstone: // empty
-                        _currentNode++;
                         continue;
                     case Constants.Graphs.VectorId.Single: // single item posting list
-                        _currentNode++;
-                        if(_alreadySeen.Contains(rawPostingListId))
-                            continue;
-                        _alreadySeen.Add(rawPostingListId);
-                        distances[index] = distance;
-                        matches[index++] = rawPostingListId;
+                        matches[index] = rawPostingListId;
+                        index += KeepAdmitted(matches.Slice(index, 1), distances[index..], ref filter);
                         continue;
                     case Constants.Graphs.VectorId.SmallPostingList: // small posting list
-                        // _alreadySeen mixes entry ids (Single / FilterDuplicates) with posting-list CONTAINER ids
-                        // here, and both spaces are aligned (bits 0-1 cleared), so a container id can numerically
-                        // equal a real entry id and silently drop a result. Tag the container id with bit 0 (unused
-                        // by either space) so the two domains can't collide; the raw id is still used for the read.
-                        if (_alreadySeen.Contains(rawPostingListId | 1))
-                        {
-                            _currentNode++;
-                            continue;
-                        }
-                        _alreadySeen.Add(rawPostingListId | 1);
-                        Debug.Assert(_postingListResults.Count is 0 && _currentMatchesIndex is 0);
                         _searchState.ReadPostingList(new ContainerEntryId(rawPostingListId), ref _postingListResults, ref _pforDecoder, out _);
                         continue;
                     case Constants.Graphs.VectorId.PostingList: // large posting list
-                        if (_alreadySeen.Contains(rawPostingListId | 1)) // bit-0 tag: see SmallPostingList above
-                        {
-                            _currentNode++;
-                            continue;
-                        }
-                        _alreadySeen.Add(rawPostingListId | 1);
-                        var setStateSpan = Container.GetReadOnly(_searchState.Llt, new(rawPostingListId));
-                        ref readonly var setState = ref MemoryMarshal.AsRef<PostingListState>(setStateSpan);
-                        _postingList = new PostingList(_searchState.Llt, Slices.Empty, setState);
+                        _postingList = OpenPostingList(rawPostingListId);
                         _postingListIterator = _postingList.Iterate();
                         continue;
                     default:
-                        throw new ArgumentOutOfRangeException("Impossible scenario, we have only 4 options, but got: " + node.PostingListId);
+                        throw new ArgumentOutOfRangeException("Impossible scenario, we have only 4 options, but got: " + postingListId);
                 }
             }
 
-            Registration.InternalEntryIdToEntryId(matches.Slice(0, index));
             return index;
         }
 
-        private int FillWithFilter(Span<long> matches, Span<float> distances, ref RoaringBitmap filter)
+        private bool TryMoveToNextNode(out long postingListId)
         {
-            if (_vectorsSearcher.TryGetCurrentCandidates(out var indexes) == false)
-                return 0;
-
-            long newVectorCount = 0;
-            int index = 0;
-            float distance = float.NaN;
-            // The filter is not mutated during this Fill, so its count is invariant — compute it once
-            // (ComputeCount is O(container count) and may repair lazy popcounts) and reuse across batches.
-            long filterCount = filter.ComputeCount();
-            while (index < matches.Length && _returnedCandidates < _vectorsSearcher.NumberOfCandidates)
+            while (_currentNode < _candidates.Count)
             {
-                if (_currentNode >= indexes.Count)
-                {
-                    // Double the difference between accepted and searched number of candidates.
-                    _vectorsSearcher.IncreaseNumberOfCandidates(_vectorsSearcher.NumberOfCandidates - _returnedCandidates);
-
-                    if (_vectorsSearcher.ShouldContinueSearch(filterCount) == false)
-                    {
-                        break;
-                    }
-
-                    // Pull the next batch into _vectorsSearcher. An empty batch is valid — TryGetCurrentCandidates below handles it.
-                    _vectorsSearcher.MoveNextBatch();
-
-                    // If we fetch more than once, we've no guarantee that the whole set of results are sorted by distances.
-                    // We could explore not previously seen nodes that are closer to the query vector than the ones we've already seen.
-                    IsSortedByDistance = false;
-
-                    if (_vectorsSearcher.TryGetCurrentCandidates(out indexes) == false)
-                    {
-                        // We increased the number of candidates, but we didn't get any more results,
-                        // so we end the search right here.
-                        break;
-                    }
-
-                    // Reset the current node index
-                    _currentNode = 0;
-                }
-
-                if (_postingList != null)
-                {
-                    if (_postingListIterator.Fill(matches[index..], out var total) is false && total is 0)
-                    {
-                        _postingListIterator = default;
-                        _postingList = null;
-
-                        _returnedCandidates += _foundCandidateInCurrentSmallPostingList.ToInt32();
-                        _foundCandidateInCurrentSmallPostingList = false;
-
-                        _currentNode++;
-                        continue;
-                    }
-
-                    //decode in bulk
-                    Registration.InternalEntryIdToEntryId(matches.Slice(index, total));
-
-                    // first find only the items that are in the filter
-                    int survivors = filter.RetainPresentSorted(matches.Slice(index, total));
-                    // then add only items that we didn't previously already have
-                    int kept = _alreadySeen.DedupAddNew(matches.Slice(index, survivors), survivors);
-                    _foundCandidateInCurrentSmallPostingList |= kept > 0;
-                    distances.Slice(index, kept).Fill(distance);
-                    index += kept;
-
+                var nodeIndex = _candidates[_currentNode++];
+                _currentDistance = QueryDistance(nodeIndex);
+                if (_currentDistance > _maximumDistance)
                     continue;
-                }
 
-                if (_currentMatchesIndex < _postingListResults.Count)
-                {
-                    var amountRead = Math.Min(_postingListResults.Count - _currentMatchesIndex, matches.Length - index);
-                    _postingListResults.CopyTo(matches[index..], _currentMatchesIndex, amountRead);
-                    int survivors = filter.RetainPresentSorted(matches.Slice(index, amountRead));
-                    int kept = _alreadySeen.DedupAddNew(matches.Slice(index, survivors), survivors);
-                    _foundCandidateInCurrentSmallPostingList |= kept > 0;
-                    distances.Slice(index, kept).Fill(distance);
-                    index += kept;
-                    _currentMatchesIndex += amountRead;
-
-                    if (_currentMatchesIndex == _postingListResults.Count)
-                    {
-                        _returnedCandidates += _foundCandidateInCurrentSmallPostingList.ToInt32();
-                        _foundCandidateInCurrentSmallPostingList = false;
-                        _currentMatchesIndex = 0;
-                        _postingListResults.Clear();
-                        _currentNode++;
-                    }
-
-                    continue;
-                }
-
-                var nodeIdx = indexes[_currentNode];
-                ref var node = ref _searchState.GetNodeByIndex(nodeIdx);
-                var rawPostingListId = node.PostingListId & Constants.Graphs.VectorId.ContainerType;
-
-                distance = _searchState.QueryDistance(_vector.Span, nodeIdx, ref newVectorCount);
-                Debug.Assert(newVectorCount == 0, "newVectorCount == 0");
-
-                if (distance > _maximumDistance)
-                {
-                    _currentNode++;
-                    continue;
-                }
-
-                switch (node.PostingListId & Constants.Graphs.VectorId.EnsureIsSingleMask)
-                {
-                    case Constants.Graphs.VectorId.Tombstone: // empty
-                        _currentNode++;
-                        continue;
-                    case Constants.Graphs.VectorId.Single: // single item posting list
-                        _currentNode++;
-                        var rawEntry = Registration.InternalEntryIdToEntryId(rawPostingListId);
-                        if (filter.Contains(rawEntry) == false)
-                            continue;
-
-                        if (_alreadySeen.Contains(rawEntry))
-                            continue;
-                        _alreadySeen.Add(rawEntry);
-
-                        distances[index] = distance;
-                        matches[index++] = rawEntry;
-                        _returnedCandidates++;
-                        continue;
-                    case Constants.Graphs.VectorId.SmallPostingList: // small posting list
-                        Debug.Assert(_postingListResults.Count is 0 && _currentMatchesIndex is 0 && _foundCandidateInCurrentSmallPostingList is false);
-                        _searchState.ReadPostingList(new(rawPostingListId), ref _postingListResults, ref _pforDecoder, out _);
-                        Registration.InternalEntryIdToEntryId(_postingListResults.ToSpan());
-                        continue;
-                    case Constants.Graphs.VectorId.PostingList: // large posting list
-                        Debug.Assert(_foundCandidateInCurrentSmallPostingList is false);
-                        var setStateSpan = Container.GetReadOnly(_searchState.Llt, new(rawPostingListId));
-                        ref readonly var setState = ref MemoryMarshal.AsRef<PostingListState>(setStateSpan);
-                        _postingList = new PostingList(_searchState.Llt, Slices.Empty, setState);
-                        _postingListIterator = _postingList.Iterate();
-                        continue;
-                    default:
-                        throw new ArgumentOutOfRangeException("Impossible scenario, we have only 4 options, but got: " + node.PostingListId);
-                }
+                postingListId = _searchState.GetNodeByIndex(nodeIndex).PostingListId;
+                return true;
             }
 
-            return index;
+            postingListId = default;
+            return false;
         }
-        
+
+        // Converts sorted raw entries in place to entry ids, compacts them to the entries that the filter admits and that no nearer node returned,
+        // and gives those the current node's distance. A null filter admits every entry.
+        private int KeepAdmitted(Span<long> entries, Span<float> distances, ref RoaringBitmap filter)
+        {
+            Registration.InternalEntryIdToEntryId(entries);
+            var kept = Unsafe.IsNullRef(ref filter) ? entries.Length : filter.RetainPresentSorted(entries);
+            kept = _alreadySeen.DedupAddNew(entries, kept);
+            distances[..kept].Fill(_currentDistance);
+            return kept;
+        }
+
+        private PostingList OpenPostingList(long rawPostingListId)
+        {
+            var setStateSpan = Container.GetReadOnly(_searchState.Llt, new(rawPostingListId));
+            return new PostingList(_searchState.Llt, Slices.Empty, MemoryMarshal.AsRef<PostingListState>(setStateSpan));
+        }
+
+        private float QueryDistance(int nodeIndex)
+        {
+            long newVectorCount = 0;
+            var distance = _searchState.QueryDistance(_vector.Span, nodeIndex, ref newVectorCount);
+            Debug.Assert(newVectorCount == 0, "newVectorCount == 0");
+            return distance;
+        }
+
         public void Dispose()
         {
             _alreadySeen.Dispose();

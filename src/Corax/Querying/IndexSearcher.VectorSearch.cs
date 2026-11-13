@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using Corax.Indexing;
@@ -14,8 +13,6 @@ using Sparrow.Server.Utils;
 using Voron;
 using Voron.Data.CompactTrees;
 using Voron.Data.Graphs;
-using Voron.Data.Lookups;
-using Voron.Impl;
 using Voron.Util;
 
 namespace Corax.Querying;
@@ -56,138 +53,6 @@ public partial class IndexSearcher
 
             filter.PrepareForReading();
             return filter;
-        }
-
-        /// <summary>
-        /// Materializes all entry IDs from a RoaringBitmap filter, shuffles them for random access,
-        /// and converts each entry to its corresponding HNSW node ID(s) on demand.
-        /// Designed for probing random starting nodes during approximate filtered nearest neighbor search.
-        /// </summary>
-        [System.Runtime.CompilerServices.SkipLocalsInit]
-        public struct RandomNodesFromFilterEnumerator : IEnumerator<long>
-        {
-            private List<long> _results;
-            private long _current;
-            private readonly IndexSearcher _indexSearcher;
-            private readonly long[] _entryIds;
-            private int _entryIndex;
-            private bool _isDone;
-            private Page p = default;
-            private CompactKey _key;
-            private readonly CompactTree _vectorsByHash;
-            private readonly Lookup<Int64LookupKey> _nodesByVectorId;
-            private readonly long _vectorRootPage;
-
-            public RandomNodesFromFilterEnumerator(IndexSearcher indexSearcher, FieldMetadata metadata, RoaringBitmap filterResults, Random random = null)
-            {
-                _indexSearcher = indexSearcher;
-                _key = indexSearcher._transaction.LowLevelTransaction.AcquireCompactKey();
-                var searchState = new Hnsw.SearchState(indexSearcher.Transaction.LowLevelTransaction, metadata.FieldName);
-                indexSearcher._transaction.TryGetCompactTreeFor(Hnsw.VectorsIdByHashSlice, out _vectorsByHash);
-                _nodesByVectorId = searchState.NodeIdsByVectorId;
-                _current = -1L;
-
-                var filterCount = filterResults.ComputeCount();
-                _isDone = indexSearcher.TryGetRootPageByFieldName(metadata.FieldName, out _vectorRootPage) == false
-                          || filterCount == 0;
-
-                if (_isDone)
-                {
-                    _entryIds = Array.Empty<long>();
-                    return;
-                }
-
-                const int maxFilterSampleSize = 8192;
-                random ??= Random.Shared;
-                var sampleSize = (int)Math.Min(filterCount, maxFilterSampleSize);
-                _entryIds = new long[sampleSize];
-                var ranks = new long[sampleSize];
-                if (filterCount <= maxFilterSampleSize)
-                {
-                    // small enough that we can just take it all 
-                    for (int i = 0; i < sampleSize; i++)
-                        ranks[i] = i;
-                }
-                else
-                {
-                    // select random matches from the filter to fit the sample size
-                    for (int i = 0; i < sampleSize; i++)
-                        ranks[i] = random.NextInt64(filterCount);
-                }
-
-                filterResults.Select(_indexSearcher.Allocator, ranks, _entryIds);
-
-                // ensure we scan in random order
-                random.Shuffle(_entryIds.AsSpan());
-                _entryIndex = 0;
-            }
-
-            public RandomNodesFromFilterEnumerator() => throw new NotSupportedException($"Default constructor is not supported for {nameof(RandomNodesFromFilterEnumerator)}");
-
-            public void Dispose()
-            {
-                _current = -1;
-                _isDone = true;
-                _indexSearcher._transaction.LowLevelTransaction.ReleaseCompactKey(ref _key);
-            }
-
-            public bool MoveNext()
-            {
-                if (_isDone)
-                    return false;
-
-                if (_results is not null && _results.Count > 0)
-                {
-                    _current = _results[^1];
-                    _results.RemoveAt(_results.Count - 1);
-                    return true;
-                }
-
-                _current = -1L;
-                while (_entryIndex < _entryIds.Length)
-                {
-                    var entryId = _entryIds[_entryIndex++];
-
-                    var entryTermsReader = _indexSearcher.GetEntryTermsReader(entryId, ref p, _key);
-                    bool found = false;
-                    while (entryTermsReader.FindNextStored(_vectorRootPage))
-                    {
-                        var vectorHash = entryTermsReader.StoredField.Value;
-                        var vectorExists = _vectorsByHash.TryGetValue(vectorHash, out var vectorId);
-                        Debug.Assert(vectorExists, "Vector hash not found in vectors by hash tree");
-                        var nodeIdExists = _nodesByVectorId.TryGetValue(vectorId, out var nodeId);
-                        Debug.Assert(nodeIdExists, "Node ID not found in nodes by vector ID tree");
-                        found = true;
-                        if (_current == -1L)
-                        {
-                            _current = nodeId;
-                        }
-                        else
-                        {
-                            _results ??= new();
-                            _results.Add(nodeId);
-                        }
-                    }
-
-                    if (found)
-                        return true;
-                }
-
-                _isDone = true;
-                return false;
-            }
-
-            public void Reset()
-            {
-                throw new NotSupportedException($"Reset is not supported for {nameof(RandomNodesFromFilterEnumerator)}");
-            }
-
-            public long Current => _current;
-
-            object IEnumerator.Current
-            {
-                get => Current;
-            }
         }
 
         public static bool TryConvertDocumentsIdsToNodesIds(IndexSearcher indexSearcher, in FieldMetadata metadata, ref RoaringBitmap filterResults, out ContextBoundNativeList<long> nodesIdsToScan)
@@ -239,9 +104,9 @@ public partial class IndexSearcher
     }
 
 
-    public VectorSearchMatch VectorSearch(in FieldMetadata metadata, in VectorValue vectorValue, float minimumMatch, in int numberOfCandidates, bool isExact, bool sortByScore, IQueryMatch filterQuery = null, int scanningThreshold = 1024, Random random = null)
+    public VectorSearchMatch VectorSearch(in FieldMetadata metadata, in VectorValue vectorValue, float minimumMatch, in int numberOfCandidates, bool isExact, bool sortByScore, IQueryMatch filterQuery = null, int scanningThreshold = 1024)
     {
-        return new VectorSearchMatch(this, metadata, vectorValue, minimumMatch, numberOfCandidates, isExact, sortByScore, filterQuery, scanningThreshold, random);
+        return new VectorSearchMatch(this, metadata, vectorValue, minimumMatch, numberOfCandidates, isExact, sortByScore, filterQuery, scanningThreshold);
     }
 
     public IQueryMatch VectorSearch(in FieldMetadata metadata, in string documentId, float minimumMatch, in int numberOfCandidates, bool isExact, bool sortByScore, IQueryMatch filterQuery = null, int scanningThreshold = 1024)
@@ -262,32 +127,26 @@ public partial class IndexSearcher
 
         var searchState = new Hnsw.SearchState(_transaction.LowLevelTransaction, metadata.FieldName);
 
-        if (reader.FindNextStored(vectorRootPage) is false)
-            return EmptyMatch();
-
-        PortableExceptions.ThrowIf<InvalidOperationException>(reader.IsVectorHash is false, "Expected vector field, but got " + metadata.FieldName + ", which isn't a vector");
-
-        Span<byte> hash = reader.StoredField.Value.ToSpan();
-        if (vectorsByHash.TryGetValue(hash, out var vectorId) is false)
-            return EmptyMatch();
-
-        var vectorSpan = Hnsw.NodeReader.ReadVector(vectorId, searchState);
-
-        var vectorValue = new VectorValue(null, vectorSpan.AsMemory());
-        if (reader.FindNextStored(vectorRootPage) is false) // just a single vector
-            return new VectorSearchMatch(this, metadata, vectorValue, minimumMatch, numberOfCandidates, isExact, sortByScore, filterQuery, scanningThreshold);
-
-        List<VectorValue> vectors = [vectorValue];
-        do
+        List<VectorValue> vectors = [];
+        while (reader.FindNextStored(vectorRootPage))
         {
-            vectorSpan = Hnsw.NodeReader.ReadVector(vectorId, searchState);
-            vectorValue = new VectorValue(null, vectorSpan.AsMemory());
-            vectors.Add(vectorValue);
-        } while (reader.FindNextStored(vectorRootPage));
+            PortableExceptions.ThrowIf<InvalidOperationException>(reader.IsVectorHash is false, "Expected vector field, but got " + metadata.FieldName + ", which isn't a vector");
 
-        return new MultiVectorSearchMatch(this, metadata, vectors.ToArray(), minimumMatch, numberOfCandidates, isExact, sortByScore, filterQuery, scanningThreshold);
+            if (vectorsByHash.TryGetValue(reader.StoredField.Value.ToSpan(), out var vectorId) is false)
+                continue;
+
+            var vectorSpan = Hnsw.NodeReader.ReadVector(vectorId, searchState);
+            vectors.Add(new VectorValue(null, vectorSpan.AsMemory()));
+        }
+
+        return vectors.Count switch
+        {
+            0 => EmptyMatch(),
+            1 => new VectorSearchMatch(this, metadata, vectors[0], minimumMatch, numberOfCandidates, isExact, sortByScore, filterQuery, scanningThreshold),
+            _ => new MultiVectorSearchMatch(this, metadata, vectors.ToArray(), minimumMatch, numberOfCandidates, isExact, sortByScore, filterQuery, scanningThreshold)
+        };
     }
 
-    public MultiVectorSearchMatch MultiVectorSearch(in FieldMetadata metadata, in VectorValue[] vectorValues, float minimumMatch, in int numberOfCandidates, bool isExact, bool sortByScore, IQueryMatch filterQuery = null, int scanningThreshold = 1024, Random random = null)
-        => new(this, metadata, vectorValues, minimumMatch, numberOfCandidates, isExact, sortByScore, filterQuery, scanningThreshold, random);
+    public MultiVectorSearchMatch MultiVectorSearch(in FieldMetadata metadata, in VectorValue[] vectorValues, float minimumMatch, in int numberOfCandidates, bool isExact, bool sortByScore, IQueryMatch filterQuery = null, int scanningThreshold = 1024)
+        => new(this, metadata, vectorValues, minimumMatch, numberOfCandidates, isExact, sortByScore, filterQuery, scanningThreshold);
 }

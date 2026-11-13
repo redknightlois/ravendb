@@ -33,7 +33,6 @@ public struct VectorSearchMatch : IPostFilterMatch
     
     // Number of documents to be directly scanned instead of ANN / Exact on HNSW.
     private readonly int _scanningThreshold;
-    private readonly Random _random;
     private bool _scanningQuery;
 
     
@@ -87,8 +86,7 @@ public struct VectorSearchMatch : IPostFilterMatch
         in bool isExact,
         in bool sortByScore,
         IQueryMatch filterQuery,
-        int scanningThreshold = ScanningThreshold,
-        Random random = null)
+        int scanningThreshold = ScanningThreshold)
     {
         _sortByScore = sortByScore;
         _filterQuery = filterQuery;
@@ -102,7 +100,6 @@ public struct VectorSearchMatch : IPostFilterMatch
         _vectorToSearch = vectorToSearch;
         _filterQueryLoaded = filterQuery is null;
         _scanningThreshold = scanningThreshold;
-        _random = random;
         _isEmpty = false;
     }
 
@@ -156,12 +153,12 @@ public struct VectorSearchMatch : IPostFilterMatch
             }
             var searchState = _indexSearcher.GetOrCreateVectorSearchState(fieldName);
 
+            RoaringBitmap? filter = _filterQuery != null ? _filterResults : null;
             _vectorSearchRetriever = _isExact switch
             {
-                _ when _scanningQuery => Hnsw.ExactNearest(searchState, _numberOfCandidates, vector, _minimumMatch, hasFilterMatch: false, nodesIdsToScan),
-                true => Hnsw.ExactNearest(searchState, _numberOfCandidates, vector, _minimumMatch, _filterQuery != null),
-                false when _filterQuery != null => Hnsw.ApproximateFilteredNearest(searchState, _numberOfCandidates, vector, _minimumMatch, new IndexSearcher.VectorSearchUtils.RandomNodesFromFilterEnumerator(_indexSearcher, _metadata, _filterResults, _random)),
-                    _ => Hnsw.ApproximateNearest(searchState, _numberOfCandidates, vector, _minimumMatch, _filterQuery != null),
+                _ when _scanningQuery => Hnsw.ExactNearest(searchState, _numberOfCandidates, vector, _minimumMatch, nodesToScan: nodesIdsToScan),
+                true => Hnsw.ExactNearest(searchState, _numberOfCandidates, vector, _minimumMatch, filter),
+                _ => Hnsw.ApproximateNearest(searchState, _numberOfCandidates, vector, _minimumMatch, filter),
             };
 
             _isEmpty = _scanningQuery
@@ -284,13 +281,6 @@ public struct VectorSearchMatch : IPostFilterMatch
             var matchesCount = Sorting.SortAndMinOnDuplicates(matches.Results, distances.Results);
             distances.Truncate(matchesCount);
             matches.Truncate(matchesCount);
-        }
-        
-        // Score order requested and the retriever didn't already return distance-sorted: sort by distance
-        // (nearest-first). distances is the sort key; matches is permuted to follow.
-        if (_sortByScore && _vectorSearchRetriever.IsSortedByDistance == false)
-        {
-            distances.Results.Sort(matches.Results);
         }
 
         Count = _matches.Count;
