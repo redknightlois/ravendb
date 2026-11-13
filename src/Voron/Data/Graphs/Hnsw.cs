@@ -3,9 +3,9 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Hashing;
+using System.Numerics.Tensors;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Runtime.Intrinsics;
 using System.Threading;
 using Sparrow;
 using Sparrow.Binary;
@@ -1193,38 +1193,7 @@ public unsafe partial class Hnsw
         /// During indexing, we're shifting each ID 2 bits to the left to use the two lowest bits as a mask placeholder. This is for querying decoding.
         /// </summary>
         /// <param name="entries">Array of internal ids.</param>
-        internal static void InternalEntryIdToEntryId(Span<long> entries)
-        {
-            var entriesPos = 0;
-            ref var entriesRef = ref MemoryMarshal.GetReference(entries);
-
-            if (AdvInstructionSet.IsAcceleratedVector512)
-            {
-                var N = Vector512<long>.Count;
-
-                for (; entriesPos + N < entries.Length; entriesPos += N)
-                {
-                    ref var currentMemory = ref Unsafe.Add(ref entriesRef, entriesPos);
-                    var current = Vector512.LoadUnsafe(ref currentMemory);
-                    Vector512.ShiftRightLogical(current, 2).StoreUnsafe(ref currentMemory);
-                }
-            }
-
-            if (AdvInstructionSet.IsAcceleratedVector256)
-            {
-                var N = Vector256<long>.Count;
-
-                for (; entriesPos + N < entries.Length; entriesPos += N)
-                {
-                    ref var currentMemory = ref Unsafe.Add(ref entriesRef, entriesPos);
-                    var current = Vector256.LoadUnsafe(ref currentMemory);
-                    Vector256.ShiftRightLogical(current, 2).StoreUnsafe(ref currentMemory);
-                }
-            }
-
-            for (; entriesPos < entries.Length; entriesPos++)
-                Unsafe.Add(ref entriesRef, entriesPos) >>= 2;
-        }
+        internal static void InternalEntryIdToEntryId(Span<long> entries) => TensorPrimitives.ShiftRightLogical(entries, 2, entries);
 
         /// <summary>
         /// Adds a vector to the graph.
