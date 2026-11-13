@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Tests.Infrastructure;
@@ -117,6 +118,44 @@ public class VectorSearchRetrieverTests(ITestOutputHelper output) : StorageTest(
         Count(exactFirst ? Hnsw.ExactNearest(state, requested, query, 0f, filter) : Hnsw.ApproximateNearest(state, requested, query, 0f, filter), ref filter);
 
         Assert.Equal(requested, Count(Hnsw.ApproximateNearest(state, requested, query, 0f, filter), ref filter));
+    }
+
+    // A graph tree that does not exist has no stored options, so the query is not checked against a vector size, whatever its length.
+    [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
+    public void SearchOfAGraphThatDoesNotExistReturnsNoEntries()
+    {
+        using var tx = Env.ReadTransaction();
+        using var state = new Hnsw.SearchState(tx.LowLevelTransaction, "missing");
+        Assert.True(state.IsEmpty);
+        var filter = Filter([1]);
+
+        foreach (var length in new[] { 0, 3, 32 })
+        {
+            var query = new byte[length];
+            foreach (var hasFilter in new[] { false, true })
+            {
+                ref var admitted = ref hasFilter ? ref filter : ref Unsafe.NullRef<RoaringBitmap>();
+                Assert.Equal(0, Count(Hnsw.ApproximateNearest(state, 16, query, 0f, hasFilter ? filter : null), ref admitted));
+                Assert.Equal(0, Count(Hnsw.ExactNearest(state, 16, query, 0f, hasFilter ? filter : null), ref admitted));
+            }
+        }
+    }
+
+    // A graph that was created holds its options, so it keeps the size check of its vectors.
+    [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
+    public void SearchOfAnEmptyGraphThatWasCreatedChecksTheQuerySize()
+    {
+        using (var tx = Env.WriteTransaction())
+        {
+            Hnsw.Create(tx.LowLevelTransaction, TreeName, 4 * sizeof(float), 12, 16, VectorEmbeddingType.Single);
+            tx.Commit();
+        }
+
+        using var read = Env.ReadTransaction();
+        using var state = new Hnsw.SearchState(read.LowLevelTransaction, TreeName);
+        Assert.False(state.IsEmpty);
+        Assert.Throws<ArgumentException>(() => Hnsw.ApproximateNearest(state, 16, new byte[3], 0f));
+        Assert.Throws<ArgumentException>(() => Hnsw.ExactNearest(state, 16, new byte[3], 0f));
     }
 
     private static int Count(Hnsw.VectorSearchRetriever retriever, ref RoaringBitmap filter)

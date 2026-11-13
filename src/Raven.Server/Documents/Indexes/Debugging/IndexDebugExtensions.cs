@@ -199,6 +199,26 @@ namespace Raven.Server.Documents.Indexes.Debugging
             }
         }
         
+        public static void VectorGraphsOutput(this Index self, AsyncBlittableJsonTextWriter writer, CancellationToken token)
+        {
+            using var _ = self._contextPool.AllocateOperationContext(out TransactionOperationContext indexContext);
+            using var tx = indexContext.OpenReadTransaction();
+            var graphs = new DynamicJsonArray();
+            foreach (var (name, _) in Hnsw.GraphsOf(tx.InnerTransaction))
+            {
+                var report = Hnsw.Inspect(tx.InnerTransaction.LowLevelTransaction, name, token);
+                graphs.Add(new DynamicJsonValue
+                {
+                    ["Field"] = name.ToString(),
+                    [nameof(report.NodeCount)] = report.NodeCount,
+                    ["UnreachableNodes"] = report.Unreachable.Length,
+                    [nameof(report.LongestList)] = report.LongestList
+                });
+            }
+
+            indexContext.Write(writer, new DynamicJsonValue { ["Results"] = graphs });
+        }
+
         public static void HnswOutput(this Index self, string field, AsyncBlittableJsonTextWriter writer)
         {
             using var _ = self._contextPool.AllocateOperationContext(out TransactionOperationContext indexContext);

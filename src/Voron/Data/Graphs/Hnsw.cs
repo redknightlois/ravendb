@@ -37,6 +37,9 @@ public unsafe partial class Hnsw
 
     public static void Create(LowLevelTransaction llt, Slice name, int vectorSizeBytes, int numberOfEdges, int numberOfCandidates, VectorEmbeddingType embeddingType)
     {
+        // A node's level is drawn with a factor of 1 / ln(numberOfEdges), which is finite only from 2 edges up.
+        ArgumentOutOfRangeException.ThrowIfLessThan(numberOfEdges, 2);
+
         var tree = llt.Transaction.CreateTree(name);
         ref readonly var stateHeader = ref tree.ReadHeader();
         if (stateHeader.NumberOfEntries is not 0)
@@ -78,6 +81,48 @@ public unsafe partial class Hnsw
     }
 
     /// <summary>
+    /// Reads the options of a graph tree. Every open of a graph goes through here, so a graph at another
+    /// format version, older or newer, is refused before any of its node records is decoded.
+    /// </summary>
+    internal static Options ReadOptions(Tree tree)
+    {
+        var options = Unsafe.Read<Options>(tree.DirectRead(OptionsSlice));
+        if (options.Version != Constants.Graphs.HnswVersion.CurrentVersion)
+            throw new NotSupportedException($"The vector graph '{tree.Name}' has format version {options.Version}, but version {Constants.Graphs.HnswVersion.CurrentVersion} is required. Reset the index to rebuild the graph.");
+        return options;
+    }
+
+    public static bool HasGraphOfOtherVersion(Transaction tx) => GraphsOf(tx).Exists(g => g.Version != Constants.Graphs.HnswVersion.CurrentVersion);
+
+    /// <summary>
+    /// Lists every vector graph tree of the environment with its stored format version. Reads only the options of each tree,
+    /// so it works on a graph of any version.
+    /// </summary>
+    public static List<(Slice Name, ushort Version)> GraphsOf(Transaction tx)
+    {
+        var graphs = new List<(Slice, ushort)>();
+        using var it = tx.LowLevelTransaction.RootObjects.Iterate(false);
+        if (it.Seek(Slices.BeforeAllKeys) == false)
+            return graphs;
+
+        do
+        {
+            var name = it.CurrentKey.Clone(tx.Allocator);
+            if (tx.GetRootObjectType(name) != RootObjectType.VariableSizeTree)
+                continue;
+
+            var tree = tx.ReadTree(name);
+            if (IsGraph(tree))
+                graphs.Add((name, Unsafe.Read<Options>(tree.DirectRead(OptionsSlice)).Version));
+        } while (it.MoveNext());
+
+        return graphs;
+    }
+
+    // A Corax tree can hold a user-named key, but never a value of the size of the options.
+    internal static bool IsGraph(Tree tree) => tree.GetDataSize(OptionsSlice) == sizeof(Options);
+
+    /// <summary>
     /// Translates a minimum similarity on the [0, 1] scale into the maximum distance the similarity method reports for
     /// it. Cosine distance is <c>1 - cos</c> over [0, 2] and similarity is <c>(cos + 1) / 2</c>, so the bound is
     /// <c>2 * (1 - minimumSimilarity)</c>. Hamming distance counts differing bits and similarity is the fraction of
@@ -98,20 +143,15 @@ public unsafe partial class Hnsw
     }
 
     /// <summary>
-    /// Returns the distance kernel to use for a given HNSW <see cref="Options"/>. For
-    /// <see cref="SimilarityMethod.CosineSimilaritySingles"/> the kernel depends on the on-disk
-    /// version: at or above <see cref="Constants.Graphs.HnswVersion.SinglesWithL2Norm"/> the
-    /// operands are pre-normalized (NormalizedTensor layout) and the dot-only kernel applies;
-    /// below that version the operands are raw vectors and norms are recomputed per call.
+    /// Returns the distance kernel to use for a given HNSW <see cref="Options"/>. The operands of
+    /// <see cref="SimilarityMethod.CosineSimilaritySingles"/> are pre-normalized (NormalizedTensor layout),
+    /// so the dot-only kernel applies.
     /// </summary>
     internal static delegate*<ReadOnlySpan<byte>, ReadOnlySpan<byte>, float> GetDistanceKernel(in Options options)
     {
         return options.SimilarityMethod switch
         {
-            SimilarityMethod.CosineSimilaritySingles =>
-                options.Version >= Constants.Graphs.HnswVersion.SinglesWithL2Norm
-                    ? &CosineDistanceSinglesNormalized
-                    : &CosineDistanceSingles,
+            SimilarityMethod.CosineSimilaritySingles => &CosineDistanceSinglesNormalized,
             SimilarityMethod.CosineSimilarityI8 => &CosineDistanceI8,
             SimilarityMethod.HammingDistance => &HammingDistance,
             _ => throw new ArgumentOutOfRangeException(nameof(options.SimilarityMethod), options.SimilarityMethod, null)
@@ -264,8 +304,7 @@ public unsafe partial class Hnsw
             // Options must come from disk: CountOfVectors (and the derived MaxLevel) advances
             // with every commit, while the cache snapshot is frozen at warm-up time. Using the
             // cached value would route the search from a level the entry point never reached.
-            var optionsPtr = _tree.DirectRead(OptionsSlice);
-            Options = Unsafe.Read<Options>(optionsPtr);
+            Options = ReadOptions(_tree);
             SimilarityCalc = _nodeCache != null ? _nodeCache.SimilarityCalc : GetDistanceKernel(Options);
 
             if (_nodeCache != null)
@@ -1010,9 +1049,15 @@ public unsafe partial class Hnsw
         {
             internal bool SimulateConcurrentRealloc;
 
+            // LLT thread: level and top level of the inserted node, and the number of nodes its insertion beam starts from at that level.
+            internal Action<int, int, int> OnBeamStarted;
+
             // LLT thread, around the rewrite of an overfull list from its dispatch snapshot: state, node index and level.
             internal Action<SearchState, int, int> BeforeEdgesReplaced;
             internal Action<SearchState, int, int> AfterEdgesReplaced;
+
+            // LLT thread, once every placement is done.
+            internal Action<SearchState> BeforeOlderInLinksRepaired;
 
             // Latched once the matching buffer was actually moved while the worker was parked, so a test
             // can fail loudly if the race window was never exercised.
@@ -1574,6 +1619,9 @@ public unsafe partial class Hnsw
     /// </summary>
     public static VectorSearchRetriever ApproximateNearest(SearchState searchState, int numberOfCandidates, Memory<byte> vector, float minimumSimilarity, RoaringBitmap? filter = null)
     {
+        if (searchState.IsEmpty)
+            return EmptyRetriever(searchState, vector, minimumSimilarity);
+
         TryNormalizeQueryVector(searchState.Options, searchState.Llt.Allocator, ref vector, out var queryVectorScope);
         // Bind the per-node QueryDistance cache to this query vector before SearchNearestAcrossLevels
         // reads it. Without this, a shared SearchState reuses cached distances from a prior sub-query
@@ -1593,11 +1641,18 @@ public unsafe partial class Hnsw
     /// </summary>
     public static VectorSearchRetriever ExactNearest(SearchState searchState, int numberOfCandidates, Memory<byte> vector, float minimumSimilarity, RoaringBitmap? filter = null, ContextBoundNativeList<long>? nodesToScan = null)
     {
+        if (searchState.IsEmpty)
+            return EmptyRetriever(searchState, vector, minimumSimilarity);
+
         TryNormalizeQueryVector(searchState.Options, searchState.Llt.Allocator, ref vector, out var queryVectorScope);
         searchState.OnQueryVector(vector);
         var results = searchState.ExactSearch(vector, numberOfCandidates, filter, nodesToScan);
         return new VectorSearchRetriever(searchState, results, vector, minimumSimilarity, ownsSearchState: false, queryVectorScope);
     }
+
+    // A graph with no stored options has no vector size to check the query against.
+    private static VectorSearchRetriever EmptyRetriever(SearchState searchState, Memory<byte> vector, float minimumSimilarity)
+        => new(searchState, searchState.EmptySearch(), vector, minimumSimilarity, ownsSearchState: false);
 
     public static VectorSearchRetriever EmptySearch(LowLevelTransaction llt, Slice name, int numberOfCandidates, Memory<byte> vector, float minimumSimilarity)
     {
