@@ -204,8 +204,7 @@ public class HnswPrescreenSearch(ITestOutputHelper output) : StorageTest(output)
         }
     }
 
-    // A stored parameters value of another size, including one shorter than its header, fails the search that decodes it, with and without the cache;
-    // the warm-up of the cache does not decode them, so it still succeeds.
+    // A stored parameters value of another size, including one shorter than its header, fails the search that decodes it, with and without the cache.
     [RavenTheory(RavenTestCategory.Voron | RavenTestCategory.Vector)]
     [InlineData(false, 8)]
     [InlineData(true, 8)]
@@ -222,7 +221,7 @@ public class HnswPrescreenSearch(ITestOutputHelper output) : StorageTest(output)
 
         using var read = Env.ReadTransaction();
         using var name = Slice.From(Allocator, TreeName, out var slice);
-        using var cache = withCache ? HnswIndexCache.WarmFromScratch(read.LowLevelTransaction, slice, maxNodes: Count / 2) : null;
+        var cache = withCache ? new HnswIndexCache() : null;
         using var state = new Hnsw.SearchState(read.LowLevelTransaction, slice, cache);
         Assert.Throws<InvalidDataException>(() => Search(state, Gaussians(1, 21)[0], 64));
     }
@@ -240,7 +239,7 @@ public class HnswPrescreenSearch(ITestOutputHelper output) : StorageTest(output)
 
         using var emptyRead = Env.ReadTransaction();
         using var name = Slice.From(Allocator, TreeName, out var slice);
-        using var cache = HnswIndexCache.WarmFromScratch(emptyRead.LowLevelTransaction, slice, maxNodes: Count);
+        var cache = new HnswIndexCache();
         using (var empty = new Hnsw.SearchState(emptyRead.LowLevelTransaction, slice, cache))
             Assert.Null(empty.CodeParameters);
 
@@ -264,8 +263,8 @@ public class HnswPrescreenSearch(ITestOutputHelper output) : StorageTest(output)
         using var tx = Env.ReadTransaction();
         using var name = Slice.From(Allocator, TreeName, out var slice);
         using var wideName = Slice.From(Allocator, "wide", out var wideSlice);
-        using var cache = HnswIndexCache.WarmFromScratch(tx.LowLevelTransaction, slice, maxNodes: Count);
-        using var wideCache = HnswIndexCache.WarmFromScratch(tx.LowLevelTransaction, wideSlice, maxNodes: Count);
+        var cache = new HnswIndexCache();
+        var wideCache = new HnswIndexCache();
         using var state = new Hnsw.SearchState(tx.LowLevelTransaction, slice, cache);
         using var wide = new Hnsw.SearchState(tx.LowLevelTransaction, wideSlice, wideCache);
         Assert.Equal(Dimensions, state.CodeParameters.Dimensions);
@@ -279,14 +278,7 @@ public class HnswPrescreenSearch(ITestOutputHelper output) : StorageTest(output)
     public void ConcurrentReadersShareOneDecodedCopy()
     {
         Build(Count);
-        HnswIndexCache cache;
-        using (var warm = Env.ReadTransaction())
-        {
-            using var name = Slice.From(warm.Allocator, TreeName, out var slice);
-            cache = HnswIndexCache.WarmFromScratch(warm.LowLevelTransaction, slice, maxNodes: Count);
-        }
-
-        using var _ = cache;
+        var cache = new HnswIndexCache();
         var seen = new Hnsw.CodeParameters[8];
         Parallel.For(0, seen.Length, new ParallelOptions { MaxDegreeOfParallelism = seen.Length }, i =>
         {
@@ -343,7 +335,7 @@ public class HnswPrescreenSearch(ITestOutputHelper output) : StorageTest(output)
         var distances = new float[256];
         using var read = Env.ReadTransaction();
         using var name = Slice.From(Allocator, $"{TreeName}{dimensions}", out var slice);
-        using var cache = HnswIndexCache.WarmFromScratch(read.LowLevelTransaction, slice, maxNodes: nodes);
+        var cache = new HnswIndexCache();
 
         // The first query decodes the parameters into the cache.
         Query(queryBytes[0]);
@@ -515,7 +507,7 @@ public class HnswPrescreenSearch(ITestOutputHelper output) : StorageTest(output)
         using var tx = Env.ReadTransaction();
         using var fresh = new Hnsw.SearchState(tx.LowLevelTransaction, TreeName);
         using var partial = new Hnsw.SearchState(tx.LowLevelTransaction, TreeName);
-        var edges = fresh.GetNodeById(150).EdgesAtLevel(0).ToArray();
+        var edges = fresh.GetNodeById(150).Edges(0).ToArray();
         Assert.True(edges.Length > 4);
 
         for (var i = 1; i < edges.Length; i += 2)

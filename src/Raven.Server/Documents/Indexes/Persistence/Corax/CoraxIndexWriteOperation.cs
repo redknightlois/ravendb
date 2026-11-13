@@ -92,10 +92,8 @@ namespace Raven.Server.Documents.Indexes.Persistence.Corax
             {
                 _indexWriter.Commit(new CoraxIndexingStats(commitStats), token);
 
-                // RecreateSearcher fires later from the outer storage tx's commit hook,
-                // by which time the writer reference is gone. Snapshot the dirty sets now
-                // so the post-commit cache update has the data it needs.
-                _persistence?.PendingDirtyVectorSets = _indexWriter.DirtyVectorSets;
+                // The searcher is recreated by the commit hook of the outer storage transaction, after the writer is gone, so the fields are kept here.
+                _persistence?.PendingVectorFields = _indexWriter.CommittedVectorFields;
             }
         }
 

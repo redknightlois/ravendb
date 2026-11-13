@@ -81,13 +81,13 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
                     for (var i = 0; i < nodes.Length && appended.Count < state.Options.MaxEdgesAtLevel(0); i++)
                     {
                         ref var target = ref nodes[i];
-                        if (i == nodeIndex || target.EdgesPerLevel.Count == 0 || owner.EdgesPerLevel[0].ToSpan().Contains(target.NodeId))
+                        if (i == nodeIndex || target.CountOfLevels == 0 || owner.Edges(0).Contains(target.NodeId))
                             continue;
 
                         // Appends as a concurrent placement does: the index list follows the id list when it mirrors it.
-                        owner.EdgesPerLevel[0].Add(state.Llt.Allocator, target.NodeId);
+                        owner.UpdateEdges(0).Add(state.Llt.Allocator, target.NodeId);
                         target.CountOlderInLink(owner.NodeId, 1);
-                        if (owner.EdgesIndexesPerLevel.Count > 0 && owner.EdgesIndexesPerLevel[0].Count == owner.EdgesPerLevel[0].Count - 1)
+                        if (owner.EdgesIndexesPerLevel.Count > 0 && owner.EdgesIndexesPerLevel[0].Count == owner.Edges(0).Length - 1)
                             owner.EdgesIndexesPerLevel[0].Add(state.Llt.Allocator, i);
                         appended.Add(target.NodeId);
                     }
@@ -99,7 +99,7 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
                     if (level != 0 || injected.Remove(nodeIndex, out var ids) == false)
                         return;
                     checkedLists++;
-                    var edges = state.GetNodeByIndex(nodeIndex).EdgesPerLevel[0].ToSpan();
+                    var edges = state.GetNodeByIndex(nodeIndex).Edges(0);
                     foreach (var id in ids)
                     {
                         if (edges.Contains(id) == false)
@@ -121,7 +121,7 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
         {
             foreach (var id in done)
             {
-                var edges = state.GetNodeByIndex(state.GetNodeIndexById(id)).EdgesPerLevel[0].ToSpan().ToArray();
+                var edges = state.GetNodeByIndex(state.GetNodeIndexById(id)).Edges(0).ToArray();
                 var lastOlderInLinks = edges.Count(to => id < to && state.GetNodeByIndex(state.GetNodeIndexById(to)).OlderInLinks == 1);
                 Assert.True(edges.Length <= state.Options.MaxEdgesAtLevel(0) + lastOlderInLinks, "a list is over its cap");
             }
@@ -159,9 +159,9 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
             for (var i = 0; i < state.Nodes.Length && linked < HubInLinks; i++)
             {
                 ref var older = ref state.Nodes[i];
-                if (older.NodeId >= hub.NodeId || older.EdgesPerLevel.Count == 0 || older.EdgesPerLevel[0].ToSpan().Contains(hub.NodeId))
+                if (older.NodeId >= hub.NodeId || older.CountOfLevels == 0 || older.Edges(0).Contains(hub.NodeId))
                     continue;
-                older.EdgesPerLevel[0].Add(state.Llt.Allocator, hub.NodeId);
+                older.UpdateEdges(0).Add(state.Llt.Allocator, hub.NodeId);
                 hub.CountOlderInLink(older.NodeId, 1);
                 linked++;
             }
@@ -186,8 +186,8 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
                 ref var node = ref state.Nodes[i];
                 if (node.NodeId >= victim)
                     continue;
-                var kept = node.EdgesPerLevel[0].ToSpan().ToArray().Where(id => id != victim).ToArray();
-                node.EdgesPerLevel[0].ResetAndCopyFrom(state.Llt.Allocator, kept);
+                var kept = node.Edges(0).ToArray().Where(id => id != victim).ToArray();
+                node.UpdateEdges(0).ResetAndCopyFrom(state.Llt.Allocator, kept);
             }
             state.GetNodeById(victim).OlderInLinks = 0;
         });
@@ -203,9 +203,26 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
     [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
     public void GraphAboveTheCurrentVersionIsRefusedAndLeftUntouched() => AssertGraphIsRefused(global::Voron.Global.Constants.Graphs.HnswVersion.CurrentVersion + 1);
 
+    [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
+    public unsafe void GraphInTheLayoutOfTheOlderVersionIsRefused()
+    {
+        const ushort olderVersion = global::Voron.Global.Constants.Graphs.HnswVersion.SinglesWithL2Norm;
+        using (var tx = Env.WriteTransaction())
+        {
+            var tree = tx.CreateTree(TreeName);
+            using (Slice.From(Allocator, "NodeIdToLocation", out var locations))
+                tree.LookupFor<Int64LookupKey>(locations);
+            tree.LookupFor<Int64LookupKey>(Hnsw.NodesByVectorIdSlice);
+            using (tree.DirectAdd(Hnsw.OptionsSlice, sizeof(Hnsw.Options), out var output))
+                *(Hnsw.Options*)output = new Hnsw.Options { Version = olderVersion, VectorSizeBytes = 16 * sizeof(float) + sizeof(float), NumberOfEdges = Edges, CountOfVectors = 50 };
+            tx.Commit();
+        }
+
+        AssertRefused(olderVersion);
+    }
+
     private void AssertGraphIsRefused(int storedVersion)
     {
-        const ushort currentVersion = global::Voron.Global.Constants.Graphs.HnswVersion.CurrentVersion;
         var oldVersion = (ushort)storedVersion;
         Build(RandomVectors(50, seed: 13), commits: 1, tasks: 1, seed: 13, beam: 16);
         using (var tx = Env.WriteTransaction())
@@ -217,13 +234,20 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
         }
 
         var before = StoredBytes();
+        AssertRefused(oldVersion);
+        Assert.Equal(before, StoredBytes());
+    }
+
+    // Every open of the graph throws and names both versions.
+    private void AssertRefused(ushort storedVersion)
+    {
+        const ushort currentVersion = global::Voron.Global.Constants.Graphs.HnswVersion.CurrentVersion;
         var query = MemoryMarshal.AsBytes(RandomVectors(1, seed: 14)[0].AsSpan()).ToArray();
         using var _ = Slice.From(Allocator, TreeName, out var treeName);
 
-        AssertRefused(llt => Hnsw.RegistrationFor(llt, treeName), write: true);
-        AssertRefused(llt => Hnsw.ApproximateNearest(llt, treeName, 8, query, 0f));
-        AssertRefused(llt => Hnsw.ExactNearest(llt, treeName, 8, query, 0f));
-        AssertRefused(llt => HnswIndexCache.WarmFromScratch(llt, treeName, maxNodes: 100));
+        AssertOpenIsRefused(llt => Hnsw.RegistrationFor(llt, treeName), write: true);
+        AssertOpenIsRefused(llt => Hnsw.ApproximateNearest(llt, treeName, 8, query, 0f));
+        AssertOpenIsRefused(llt => Hnsw.ExactNearest(llt, treeName, 8, query, 0f));
 
         // A Corax searcher reports the refusal on every lookup and disposes cleanly, so the refusal is what a query sees.
         using (var tx = Env.ReadTransaction())
@@ -234,13 +258,11 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
             searcher.Dispose();
         }
 
-        Assert.Equal(before, StoredBytes());
-
-        void AssertRefused(Action<LowLevelTransaction> open, bool write = false)
+        void AssertOpenIsRefused(Action<LowLevelTransaction> open, bool write = false)
         {
             using var tx = write ? Env.WriteTransaction() : Env.ReadTransaction();
             var e = Assert.Throws<NotSupportedException>(() => open(tx.LowLevelTransaction));
-            Assert.Contains(oldVersion.ToString(), e.Message);
+            Assert.Contains(storedVersion.ToString(), e.Message);
             Assert.Contains(currentVersion.ToString(), e.Message);
         }
     }
@@ -350,19 +372,66 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
     public void ListsPastTheCapEncodeAndDecodeOnBothReadPaths()
     {
         Build(RandomVectors(2000, seed: 6), commits: 1, tasks: 1, seed: 6, beam: 16);
-        var stored = ReadBaseLayer().ToDictionary(n => n.Id);
-        Assert.True(stored.Values.Max(n => n.Edges.Length) > Cap);
+        var stored = ReadBaseLayer();
+        Assert.True(stored.Max(n => n.Edges.Length) > Cap);
 
         using var tx = Env.ReadTransaction();
-        using var treeName = Slice.From(Allocator, TreeName, out var slice);
-        using var cache = HnswIndexCache.WarmFromScratch(tx.LowLevelTransaction, slice, maxNodes: 10_000);
-        var cached = 0;
-        cache.ForEachNode(tx.LowLevelTransaction.Id, (id, view) =>
+        using var state = new Hnsw.SearchState(tx.LowLevelTransaction, TreeName);
+        var edges = new List<long>();
+        foreach (var node in stored)
         {
-            cached++;
-            Assert.Equal(stored[id].Edges, view.EdgesAtLevel(0).ToArray());
-        });
-        Assert.True(cached > 0);
+            state.ReadNode(node.Id, out var reader);
+            reader.ReadEdges(edges);
+            Assert.Equal(node.Edges, edges);
+        }
+    }
+
+    [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
+    public void CommitLeavesThePagesOfUnchangedRecordsUnmodified()
+    {
+        Build(RandomVectors(5000, seed: 11), commits: 1, tasks: 1, seed: 11, beam: 16);
+
+        using var tx = Env.WriteTransaction();
+        var before = Records(tx);
+        using (var registration = Hnsw.RegistrationFor(tx.LowLevelTransaction, TreeName, new Random(12)))
+        {
+            registration.Register(5001, MemoryMarshal.Cast<float, byte>(RandomVectors(1, seed: 12)[0]));
+            registration.Commit(CancellationToken.None);
+        }
+
+        var touched = new HashSet<long>();
+        foreach (var (id, record) in Records(tx))
+        {
+            if (before.TryGetValue(id, out var old) && old.Location == record.Location && old.Bytes.SequenceEqual(record.Bytes))
+                continue;
+            touched.Add(record.Location / global::Voron.Global.Constants.Storage.PageSize);
+            if (old.Bytes != null)
+                touched.Add(old.Location / global::Voron.Global.Constants.Storage.PageSize);
+        }
+
+        var untouched = before.Values.Select(r => r.Location / global::Voron.Global.Constants.Storage.PageSize).Where(page => touched.Contains(page) == false).ToHashSet();
+        Assert.NotEmpty(touched);
+        Assert.NotEmpty(untouched);
+        Assert.All(untouched, page => Assert.False(tx.LowLevelTransaction.IsDirty(page)));
+    }
+
+    // RavenDB-26809: under parallel placement a worker dereferences a pointer into the node array while the LLT thread may grow it.
+    // Growth must retain the grown-from buffer instead of freeing it, so the worker never reads freed memory.
+    [RavenFact(RavenTestCategory.Voron | RavenTestCategory.Vector)]
+    public void GrowingNodeArrayRetainsGrownFromBuffer()
+    {
+        using var _ = Slice.From(Allocator, TreeName, out var treeName);
+        using (var tx = Env.WriteTransaction())
+        {
+            Hnsw.Create(tx.LowLevelTransaction, treeName, 16 * sizeof(float), Edges, numberOfCandidates: 16, VectorEmbeddingType.Single);
+            tx.Commit();
+        }
+
+        using var rtx = Env.ReadTransaction();
+        using var state = new Hnsw.SearchState(rtx.LowLevelTransaction, treeName);
+        Assert.True(state.ForceGrowNodesForTesting(), "node array did not move");
+        Assert.True(state.ForceGrowNodesForTesting(), "node array did not move");
+        Assert.Equal(2, state.RetiredNodeStorageCountForTesting);
     }
 
     private IReadOnlyList<byte[]> Build(float[][] vectors, int commits, int tasks, int seed, int beam, Action<Hnsw.Registration.TestingStuff> testing = null, int edges = Edges, string treeName = TreeName)
@@ -411,9 +480,9 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
     private static Dictionary<long, (long Location, byte[] Bytes)> Records(Transaction tx)
     {
         var llt = tx.LowLevelTransaction;
-        var locations = tx.ReadTree(TreeName).LookupFor<Int64LookupKey>(Hnsw.NodeIdToLocationSlice);
+        var locations = Hnsw.RecordLocations(tx.ReadTree(TreeName).LookupFor<Int64LookupKey>(Hnsw.LocationPagesSlice), null);
         var records = new Dictionary<long, (long, byte[])>();
-        for (var id = 1L; locations.TryGetValue(id, out var location); id++)
+        for (var id = 1L; locations.ReadInt64(llt, id) is var location and not 0; id++)
             records[id] = (location, Container.GetReadOnly(llt, new ContainerEntryId(location)).ToArray());
         return records;
     }
@@ -426,11 +495,11 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
         for (var id = 1L; id <= state.Options.CountOfVectors; id++)
         {
             ref var node = ref state.GetNodeById(id);
-            var kept = node.EdgesPerLevel[0].ToSpan().ToArray().Where(to => to != target).ToArray();
-            if (kept.Length == node.EdgesPerLevel[0].Count)
+            var kept = node.Edges(0).ToArray().Where(to => to != target).ToArray();
+            if (kept.Length == node.Edges(0).Length)
                 continue;
 
-            node.EdgesPerLevel[0].ResetAndCopyFrom(tx.LowLevelTransaction.Allocator, kept);
+            node.UpdateEdges(0).ResetAndCopyFrom(tx.LowLevelTransaction.Allocator, kept);
             var encoded = node.Encode(ref buffer);
             Assert.True(state.TryGetLocationForNode(id, out var location));
             Container.Delete(tx.LowLevelTransaction, state.Options.Container, new ContainerEntryId(location));
@@ -450,7 +519,7 @@ public class HnswGraphConstruction(ITestOutputHelper output) : StorageTest(outpu
         return Enumerable.Range(1, (int)state.Options.CountOfVectors).Select(id =>
         {
             ref var node = ref state.GetNodeById(id);
-            return new StoredNode(id, node.EdgesPerLevel[0].ToSpan().ToArray(), node.OlderInLinks);
+            return new StoredNode(id, node.Edges(0).ToArray(), node.OlderInLinks);
         }).ToArray();
     }
 
