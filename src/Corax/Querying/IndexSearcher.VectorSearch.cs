@@ -21,9 +21,10 @@ public partial class IndexSearcher
 {
     internal static class VectorSearchUtils
     {
-        public static bool ShouldScan(IndexSearcher indexSearcher, long filterMatchesCount, bool isExact, IQueryMatch filterQuery, int scanningThreshold, int numberOfCandidates)
+        // PERF: A slot of the graph search's working set costs about as much as scanning five of the filter's nodes, so the scan wins when the filter holds no more than five times that working set.
+        public static bool ShouldScan(IndexSearcher indexSearcher, long filterMatchesCount, bool isExact, IQueryMatch filterQuery, int scanningThreshold, int numberOfCandidates, long countOfVectors)
         {
-            var shouldScan = filterQuery != null && (filterMatchesCount < scanningThreshold || isExact || filterMatchesCount * 0.5 < numberOfCandidates);
+            var shouldScan = filterQuery != null && (filterMatchesCount < scanningThreshold || isExact || filterMatchesCount <= 5L * Hnsw.FilteredBeam(numberOfCandidates, filterMatchesCount, countOfVectors));
             if (indexSearcher._testingConfiguration is {DisableVectorSearchScanning: true})
                 return false;
              
@@ -57,9 +58,6 @@ public partial class IndexSearcher
 
         public static bool TryConvertDocumentsIdsToNodesIds(IndexSearcher indexSearcher, in FieldMetadata metadata, ref RoaringBitmap filterResults, out ContextBoundNativeList<long> nodesIdsToScan)
         {
-            var searchState = new Hnsw.SearchState(indexSearcher.Transaction.LowLevelTransaction, metadata.FieldName);
-            indexSearcher._transaction.TryGetCompactTreeFor(Hnsw.VectorsIdByHashSlice, out var vectorsByHash);
-            var nodesByVectorId = searchState.NodeIdsByVectorId;
             if (indexSearcher.TryGetRootPageByFieldName(metadata.FieldName, out var vectorRootPage) is false)
             {
                 nodesIdsToScan = default;
@@ -79,12 +77,8 @@ public partial class IndexSearcher
                     var entryTermsReader = indexSearcher.GetEntryTermsReader(batch[i], ref p);
                     while (entryTermsReader.FindNextStored(vectorRootPage))
                     {
-                        var vectorHash = entryTermsReader.StoredField.Value;
-                        if (vectorsByHash.TryGetValue(vectorHash, out var vectorId))
-                        {
-                            if (nodesByVectorId.TryGetValue(vectorId, out var nodeId))
-                                nodesIdsToScan.Add(nodeId);
-                        }
+                        if (entryTermsReader.StoredField is { Length: Hnsw.VectorReferenceSize } vectorReference)
+                            nodesIdsToScan.Add(Hnsw.NodeIdOf(vectorReference.ToSpan()));
                     }
                 }
             }
@@ -101,6 +95,9 @@ public partial class IndexSearcher
 
             return nodesIdsToScan.Count > 0;
         }
+
+        public static Func<ContextBoundNativeList<long>> FilterNodes(IndexSearcher indexSearcher, FieldMetadata metadata, RoaringBitmap filterResults) =>
+            () => TryConvertDocumentsIdsToNodesIds(indexSearcher, metadata, ref filterResults, out var nodes) ? nodes : default;
     }
 
 
@@ -115,8 +112,7 @@ public partial class IndexSearcher
         string loweredDocumentId = documentId.ToLowerInvariant();
         if (idField == null ||
             idField.TryGetValue(loweredDocumentId, out var rawId) is false ||
-            TryGetRootPageByFieldName(metadata.FieldName, out var vectorRootPage) is false ||
-            _transaction.TryGetCompactTreeFor(Hnsw.VectorsIdByHashSlice, out var vectorsByHash) is false)
+            TryGetRootPageByFieldName(metadata.FieldName, out var vectorRootPage) is false)
             return EmptyMatch();
         PortableExceptions.ThrowIf<InvalidOperationException>((rawId & (long)TermIdMask.EnsureIsSingleMask) != (long)TermIdMask.Single,
             "The provided id must be a document id mapped to a single value, but got: " + documentId + ", which maps to: " + rawId);
@@ -132,10 +128,11 @@ public partial class IndexSearcher
         {
             PortableExceptions.ThrowIf<InvalidOperationException>(reader.IsVectorHash is false, "Expected vector field, but got " + metadata.FieldName + ", which isn't a vector");
 
-            if (vectorsByHash.TryGetValue(reader.StoredField.Value.ToSpan(), out var vectorId) is false)
+            if (reader.StoredField is not { Length: Hnsw.VectorReferenceSize } vectorReference)
                 continue;
 
-            var vectorSpan = Hnsw.NodeReader.ReadVector(vectorId, searchState);
+            searchState.ReadNode(Hnsw.NodeIdOf(vectorReference.ToSpan()), out var node);
+            var vectorSpan = node.ReadVector(searchState);
             vectors.Add(new VectorValue(null, vectorSpan.AsMemory()));
         }
 
