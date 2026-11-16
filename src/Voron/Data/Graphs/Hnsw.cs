@@ -521,6 +521,16 @@ public unsafe partial class Hnsw
             ResolveEdgeIndexesSlow(nodeIndex, level, ref nodeIds, ref indexes);
         }
 
+        // The index list of a level is used when its count equals the count of the id list, so then it must hold the same edges.
+        [Conditional("DEBUG")]
+        internal void AssertEdgeIndexesMatchEdges(int nodeIndex, int level)
+        {
+            ref var node = ref GetNodeByIndex(nodeIndex);
+            var ids = node.EdgesPerLevel[level].ToSpan();
+            foreach (var index in node.EdgesIndexesPerLevel[level].ToSpan())
+                Debug.Assert(ids.Contains(_nodes[index].NodeId), "The index list of a level has the count of the id list, but not the same edges.");
+        }
+
         [MethodImpl(MethodImplOptions.NoInlining)]
         private void ResolveEdgeIndexesSlow(int nodeIndex, int level, ref NativeList<long> nodeIds, ref NativeList<int> indexes)
         {
