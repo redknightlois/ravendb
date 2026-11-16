@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Sparrow;
 using Sparrow.Compression;
 using Sparrow.Server;
@@ -20,10 +22,29 @@ public partial class Hnsw
         private int _offset;
         private readonly Span<byte> _buffer = buffer;
 
+        /// <summary>
+        /// Reads the header of the node and keeps where its levels are, so their edges are decoded only if they are needed.
+        /// </summary>
+        public void LoadHeaderInto(ref Node node)
+        {
+            node.VectorId = VectorId;
+            node.PostingListId = PostingListId;
+            if (CountOfLevels == 0)
+                return;
+            node.EncodedLevels = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(_buffer));
+            node.EncodedLevelsLength = _buffer.Length;
+            node.EncodedLevelCount = CountOfLevels;
+        }
+
         public void LoadInto(ref Node node)
         {
             node.VectorId = VectorId;
             node.PostingListId = PostingListId;
+            LoadEdgesInto(ref node);
+        }
+
+        public void LoadEdgesInto(ref Node node)
+        {
             node.EdgesPerLevel.EnsureCapacityFor(allocator, CountOfLevels);
             while (NextReadEdges(out var list))
             {

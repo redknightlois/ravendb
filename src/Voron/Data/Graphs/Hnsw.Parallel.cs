@@ -371,15 +371,15 @@ public partial class Hnsw
                         ref var edgeList = ref edge.EdgesPerLevel[level];
                         edgeList.Add(_searchState.Llt.Allocator, node.NodeId);
 
-                        // Mirror the append into EdgesIndexesPerLevel so RegisterForPreloading
-                        // can skip its O(M) NodeId -> index rebuild. We only update when the
-                        // cache is already populated for this level and was in sync before this
-                        // append; otherwise we leave the lazy rebuild to fix it.
+                        // PERF: The append keeps an index list that was in sync, so RegisterForPreloading and PrepareEdgesOnLLT do not rebuild it.
+                        // A stale one is cleared, so that equal counts cannot make it look in sync.
                         if (edge.EdgesIndexesPerLevel.Count > level)
                         {
                             ref var edgeIndexes = ref edge.EdgesIndexesPerLevel[level];
                             if (edgeIndexes.Count == edgeList.Count - 1)
                                 edgeIndexes.Add(_searchState.Llt.Allocator, currentNodeIndex);
+                            else
+                                edgeIndexes.Clear();
                         }
 
                         if (edgeList.Count <= _searchState.Options.MaxEdgesAtLevel(level))
