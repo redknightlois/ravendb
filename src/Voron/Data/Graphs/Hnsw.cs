@@ -140,6 +140,45 @@ public unsafe partial class Hnsw
 
     public partial class SearchState : IDisposable
     {
+        // A search reads the edges of a node only when it expands it, which is a few of the nodes whose distance it computes, so
+        // in a read transaction it loads the header of a node and decodes its edges on demand.
+        private readonly bool _decodesEdgesOnDemand;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void Load(NodeReader reader, ref Node node)
+        {
+            if (_decodesEdgesOnDemand)
+            {
+                reader.LoadHeaderInto(ref node);
+                return;
+            }
+
+            reader.LoadInto(ref node);
+        }
+
+        // For code that reads the edges of a node directly rather than through the search.
+        internal ref Node GetDecodedNode(int index)
+        {
+            ref var node = ref GetNodeByIndex(index);
+            EnsureEdgesDecoded(ref node);
+            return ref node;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void EnsureEdgesDecoded(ref Node node)
+        {
+            if (node.EncodedLevels != null)
+                DecodeEdges(ref node);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void DecodeEdges(ref Node node)
+        {
+            var reader = new NodeReader(Llt.Allocator, new Span<byte>(node.EncodedLevels, node.EncodedLevelsLength)) { CountOfLevels = node.EncodedLevelCount };
+            reader.LoadEdgesInto(ref node);
+            node.EncodedLevels = null;
+        }
+
         private readonly PriorityQueue<int, float> _candidatesQ = new();
         private readonly PriorityQueue<int, float> _nearestEdgesQ = new();
         // The nearest nodes of a filtered traversal that the filter admits, created by the first filtered traversal.
@@ -251,6 +290,8 @@ public unsafe partial class Hnsw
         public SearchState(LowLevelTransaction llt, Slice name, HnswIndexCache nodeCache)
         {
             Llt = llt;
+            // The pages of a read transaction do not change, so a node can keep where its encoded levels are.
+            _decodesEdgesOnDemand = llt.Flags == TransactionFlags.Read;
             _nodeCache = nodeCache;
             _readerTxId = llt.Id;
             _tree = llt.Transaction.ReadTree(name);
@@ -384,6 +425,7 @@ public unsafe partial class Hnsw
             for (int i = 0; i < _nodes.Count; i++)
             {
                 ref var node = ref _nodes[i];
+                EnsureEdgesDecoded(ref node);
                 int levels = node.GetLevelCount();
                 node.EdgesIndexesPerLevel.SetCapacity(Llt.Allocator, levels);
                 for (int lvl = 0; lvl < levels; lvl++)
@@ -463,6 +505,7 @@ public unsafe partial class Hnsw
         private void ResolveEdgeIndexes(int nodeIndex, int level, ref NativeList<long> nodeIds, ref NativeList<int> indexes)
         {
             ref var node = ref GetNodeByIndex(nodeIndex);
+            EnsureEdgesDecoded(ref node);
 
             // Fast path: the resolved indexes for this level are already cached on the node.
             // The slow path (miss) is in a NoInlining helper so only this copy is inlined into
@@ -541,8 +584,7 @@ public unsafe partial class Hnsw
             for (int i = 0; i < keys.Length; i++)
             {
                 var buf = spans[i].ToSpan();
-                var reader = Node.Decode(Llt, buf);
-                reader.LoadInto(ref _nodes[indexes[matches + i]]);
+                Load(Node.Decode(Llt, buf), ref _nodes[indexes[matches + i]]);
             }
         }
 
@@ -569,8 +611,7 @@ public unsafe partial class Hnsw
 
             nodeIdx = AllocateNodeIndex(nodeId);
             var reader = Node.Decode(Llt, nodeLocation);
-            ref var n = ref GetNodeByIndex(nodeIdx);
-            reader.LoadInto(ref n);
+            Load(reader, ref GetNodeByIndex(nodeIdx));
             return nodeIdx;
         }
 
@@ -770,6 +811,7 @@ public unsafe partial class Hnsw
             var currentNodeIndex = GetNodeIndexById(EntryPointId);
             var level = maxLevel;
             ref var entry = ref GetNodeByIndex(currentNodeIndex);
+            EnsureEdgesDecoded(ref entry);
             entry.EdgesPerLevel.SetCapacity(Llt.Allocator, maxLevel + 1);
             var distance = Distance(vector, dstIdx, currentNodeIndex);
             var indexes = new NativeList<int>();
@@ -906,7 +948,7 @@ public unsafe partial class Hnsw
                    var reader = Node.Decode(Llt, buf);
                    var nodeIndex = indexesOfIds[i];
                    ref var n = ref _nodes[nodeIndex];
-                   reader.LoadInto(ref n);
+                   Load(reader, ref n);
                    nodeIndexes[vectorsToLoadIdx] = nodeIndex;
                    vectorIdsToLoad[vectorsToLoadIdx++] = n.GetVectorContainerId();
                }
@@ -1359,8 +1401,8 @@ public unsafe partial class Hnsw
             nodes = _searchState.Nodes;
             for (int i = 0; i < nodes.Length; i++)
             {
-                PersistNode(ref nodes[i], ref byteBuffer);
-                DirtyNodeIds.Add(nodes[i].NodeId);
+                if (PersistNode(ref nodes[i], ref byteBuffer))
+                    DirtyNodeIds.Add(nodes[i].NodeId);
             }
 
             // flush the local modifications
@@ -1524,16 +1566,20 @@ public unsafe partial class Hnsw
         }
 
 
-        void PersistNode(ref Node node, ref ContextBoundNativeList<byte> byteBuffer)
+        // Returns false when the stored node is unchanged.
+        bool PersistNode(ref Node node, ref ContextBoundNativeList<byte> byteBuffer)
         {
             var encoded = node.Encode(ref byteBuffer);
             if (_searchState.TryGetLocationForNode(node.NodeId, out var locationId))
             {
+                if (Container.GetReadOnly(_searchState.Llt, new ContainerEntryId(locationId)).SequenceEqual(encoded))
+                    return false;
+
                 var existing = Container.GetMutable(_searchState.Llt, new ContainerEntryId(locationId));
                 if (existing.Length == encoded.Length)
                 {
                     encoded.CopyTo(existing);
-                    return;
+                    return true;
                 }
 
                 Container.Delete(_searchState.Llt, _searchState.Options.Container, new ContainerEntryId(locationId));
@@ -1543,6 +1589,7 @@ public unsafe partial class Hnsw
             locationId = (long)allocatedId;
             _searchState.RegisterNodeLocation(node.NodeId, locationId);
             encoded.CopyTo(storage);
+            return true;
         }
     }
 
