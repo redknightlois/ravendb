@@ -35,6 +35,7 @@ public unsafe partial class Hnsw
             private readonly NearestEdgesFlags _flags;
             private NativeList<int> _indexes;
             private NativeList<long> _nodeIds;
+            private NativeList<nint> _rows;
             private long _vectorReadCounter = 0;
             private readonly int _startingPointIndex;
             // Owned by the SearchState; null when the graph carries no codes.
@@ -82,6 +83,7 @@ public unsafe partial class Hnsw
                 _flags = flags;
                 _indexes = new NativeList<int>();
                 _nodeIds = new NativeList<long>();
+                _rows = new NativeList<nint>();
                 _screen = screen;
             }
 
@@ -141,6 +143,9 @@ public unsafe partial class Hnsw
 
             public ContextBoundNativeList<int> Search()
             {
+                if (_screen is not null && _level == 0 && _filter is null)
+                    return SearchSteered();
+
                 var candidatesQ = _searchState._candidatesQ;
                 var visitedCounter = InitState();
                 var threshold = Threshold();
@@ -209,6 +214,90 @@ public unsafe partial class Hnsw
                 return _scan.Search();
             }
 
+            /// <summary>
+            /// Orders the candidates and the working set by the estimates of the codes, so a neighbor is checked from its code row alone and only the nodes that
+            /// the traversal expands, and the neighbors whose code gives no estimate, are resolved. The working set holds expanded nodes only: when the flags drop nodes with empty posting lists, such a node is
+            /// expanded and never takes a place in it. The final working set is ranked by exact distances.
+            /// </summary>
+            private ContextBoundNativeList<int> SearchSteered()
+            {
+                var candidatesQ = _searchState._steeredCandidatesQ;
+                var workingQ = _searchState._steeredWorkingQ;
+                var allocator = _searchState.Llt.Allocator;
+                bool dropsEmpty = _flags.HasFlag(NearestEdgesFlags.FilterNodesWithEmptyPostingLists);
+
+                _searchState.OnQueryVector(_vector);
+
+                // The starting point is measured exactly; a node queued during the walk carries the estimate of its code.
+                long startId = _searchState.GetNodeByIndex(_startingPointIndex).NodeId;
+                var startDistance = _searchState.QueryDistance(_vector.Span, _startingPointIndex, ref _vectorReadCounter);
+                bool keepsStart = _flags.HasFlag(NearestEdgesFlags.StartingPointAsEdge);
+                _screen.Mark(startId);
+                candidatesQ.Enqueue(startId, startDistance);
+
+                // Best first: the nearest queued node is expanded next. Once it is farther than the farthest node of a full working set, no queued node can enter it.
+                while (candidatesQ.TryDequeue(out var id, out var distance))
+                {
+                    if (distance > Farthest(workingQ))
+                        break;
+
+                    // An expanded node takes a place in the working set at the distance it was queued with, unless it is the starting point and the flags leave it out,
+                    // or it has no entries and the flags drop such nodes. Either way its edges are followed.
+                    ref var node = ref _searchState.GetDecodedNode(_searchState.GetNodeIndexById(id));
+                    if ((id != startId || keepsStart) &&
+                        (dropsEmpty == false || (node.PostingListId & Constants.Graphs.VectorId.EnsureIsSingleMask) != Constants.Graphs.VectorId.Tombstone))
+                    {
+                        if (workingQ.Count < _internalNumberOfCandidates)
+                            workingQ.Enqueue(id, -distance);
+                        else
+                            workingQ.EnqueueDequeue(id, -distance);
+                    }
+
+                    _nodeIds.ResetAndCopyFrom(allocator, node.Edges(_level));
+
+                    int count = _nodeIds.Count;
+                    // PERF: The code rows of the neighbors start loading before the first estimate, so their cache misses overlap.
+                    _rows.ResetAndEnsureCapacity(allocator, count);
+                    for (int i = 0; i < count; i++)
+                        _rows.AddUnsafe(_screen.IsMarked(_nodeIds[i]) ? 0 : (nint)_searchState.GetCodeRowAndPrefetchIfSupported(_nodeIds[i]));
+
+                    for (int i = 0; i < count; i++)
+                    {
+                        long next = _nodeIds[i];
+                        // A node is queued or passed over once per query.
+                        if (_screen.Mark(next) == false)
+                            continue;
+
+                        // The estimate stands in for the distance, so a neighbor costs its code row and no vector. A neighbor without a row, or whose code or query has no
+                        // direction, is measured exactly.
+                        var row = (byte*)_rows[i];
+                        double estimate = row != null ? _screen.Estimate(new ReadOnlySpan<byte>(row, _searchState._codeRowBytes)) : double.NaN;
+                        float nextDistance = double.IsNaN(estimate)
+                            ? _searchState.QueryDistance(_vector.Span, _searchState.GetNodeIndexById(next), ref _vectorReadCounter)
+                            : (float)estimate;
+                        // A neighbor farther than the farthest node of a full working set could never be expanded.
+                        if (nextDistance < Farthest(workingQ))
+                            candidatesQ.Enqueue(next, nextDistance);
+                    }
+                }
+
+                // The estimates only choose which nodes are expanded: the working set is measured exactly, and the results are ranked by those distances.
+                candidatesQ.Clear();
+                var nearestEdgesQ = _searchState._nearestEdgesQ;
+                while (workingQ.TryDequeue(out var id, out _))
+                {
+                    int index = _searchState.GetNodeIndexById(id);
+                    nearestEdgesQ.Enqueue(index, -_searchState.QueryDistance(_vector.Span, index, ref _vectorReadCounter));
+                }
+
+                ProcessResults();
+                return _candidates;
+            }
+
+            // The distance of the farthest node of a full working set; infinity while it has room.
+            private float Farthest(PriorityQueue<long, float> workingQ) =>
+                workingQ.Count == _internalNumberOfCandidates && workingQ.TryPeek(out _, out var negatedDistance) ? -negatedDistance : float.PositiveInfinity;
+
             private void ProcessResults()
             {
                 var resultsQ = _filter is null ? _searchState._nearestEdgesQ : _searchState._admittedQ;
@@ -256,7 +345,10 @@ public unsafe partial class Hnsw
                 _candidates.Dispose();
                 _nodeIds.Dispose(_searchState.Llt.Allocator);
                 _indexes.Dispose(_searchState.Llt.Allocator);
+                _rows.Dispose(_searchState.Llt.Allocator);
                 _searchState._candidatesQ.Clear();
+                _searchState._steeredCandidatesQ.Clear();
+                _searchState._steeredWorkingQ.Clear();
             }
         }
     }

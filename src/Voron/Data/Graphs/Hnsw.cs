@@ -233,6 +233,9 @@ public unsafe partial class Hnsw
         }
 
         private readonly PriorityQueue<int, float> _candidatesQ = new();
+        // The queues of a steered traversal, keyed by node id.
+        private readonly PriorityQueue<long, float> _steeredCandidatesQ = new();
+        private readonly PriorityQueue<long, float> _steeredWorkingQ = new();
         private readonly PriorityQueue<int, float> _nearestEdgesQ = new();
         // The nearest nodes of a filtered traversal that the filter admits, created by the first filtered traversal.
         private PriorityQueue<int, float> _admittedQ;
@@ -534,7 +537,7 @@ public unsafe partial class Hnsw
             {
                 bool resolved = _nodeIdToIdx.TryGetValue(nodeIds[i], out var index);
                 indexes.AddUnsafe(resolved ? index : -1);
-                rows[i] = resolved == false && screening && screen.IsRejected(nodeIds[i]) == false ? (long)GetCodeRowAndPrefetchIfSupported(nodeIds[i]) : 0;
+                rows[i] = resolved == false && screening && screen.IsMarked(nodeIds[i]) == false ? (long)GetCodeRowAndPrefetchIfSupported(nodeIds[i]) : 0;
             }
 
             int unresolved = 0;
@@ -765,14 +768,14 @@ public unsafe partial class Hnsw
             return new NearestSearcher(this, startingPointIndex, vector, level , numberOfCandidates, candidates, flags, null, 0, null, null);
         }
 
-        /// <summary>The descent from the entry point and the base-layer traversal from where it ends, with one screen for both.</summary>
+        /// <summary>The descent from the entry point and the base-layer traversal from where it ends, with one screen for both. Both are steered without a filter.</summary>
         internal IHnswSearcher ApproximateSearch(Memory<byte> vector, int numberOfCandidates, RoaringBitmap? filter, Func<ContextBoundNativeList<long>> filterNodes = null)
         {
             var nearestNodesByLevel = new ContextBoundNativeList<int>(Llt.Allocator);
             nearestNodesByLevel.EnsureCapacityFor(Options.MaxLevel + 1);
             long filterCount = filter?.ComputeCount() ?? 0;
             var screen = BeginScreen(vector.Span, filter is null ? numberOfCandidates : FilteredBeam(numberOfCandidates, filterCount, Options.CountOfVectors));
-            SearchNearestAcrossLevels(vector.Span, -1, Options.MaxLevel, ref nearestNodesByLevel, screen);
+            SearchNearestAcrossLevels(vector.Span, -1, Options.MaxLevel, ref nearestNodesByLevel, screen, steer: filter is null);
             var nearest = nearestNodesByLevel[0];
             nearestNodesByLevel.Clear();
             return new NearestSearcher(this, nearest, vector, 0, numberOfCandidates, nearestNodesByLevel,
@@ -787,8 +790,14 @@ public unsafe partial class Hnsw
         public void SearchNearestAcrossLevels(ReadOnlySpan<byte> vector, int dstIdx, int maxLevel, ref ContextBoundNativeList<int> nearestIndexes) =>
             SearchNearestAcrossLevels(vector, dstIdx, maxLevel, ref nearestIndexes, null);
 
-        internal void SearchNearestAcrossLevels(ReadOnlySpan<byte> vector, int dstIdx, int maxLevel, ref ContextBoundNativeList<int> nearestIndexes, CodeScreen screen)
+        /// <summary>
+        /// The greedy descent. A screen rejects the neighbors whose codes prove them farther than the current node. A steered descent moves by the distances
+        /// that the codes estimate instead, so only the nodes it moves to, and the neighbors whose code gives no estimate, are resolved.
+        /// </summary>
+        internal unsafe void SearchNearestAcrossLevels(ReadOnlySpan<byte> vector, int dstIdx, int maxLevel, ref ContextBoundNativeList<int> nearestIndexes, CodeScreen screen,
+            bool steer = false)
         {
+            bool steered = steer && screen is not null;
             if (screen is not null)
                 screen.Descending = true;
             var visitCounter = ++_visitsCounter;
@@ -797,9 +806,10 @@ public unsafe partial class Hnsw
             ref var entry = ref GetNodeByIndex(currentNodeIndex);
             EnsureEdgesDecoded(ref entry);
             entry.EnsureLevels(Llt.Allocator, maxLevel + 1);
-            var distance = Distance(vector, dstIdx, currentNodeIndex);
+            float distance = steered ? SteeredDistance(vector, dstIdx, EntryPointId, CodeRow(EntryPointId), screen) : Distance(vector, dstIdx, currentNodeIndex);
             var indexes = new NativeList<int>();
             var nodeIds = new NativeList<long>();
+            var rows = new NativeList<nint>();
 
             while (level >= 0)
             {
@@ -808,6 +818,12 @@ public unsafe partial class Hnsw
                 {
                     moved = false;
                     Debug.Assert(GetNodeByIndex(currentNodeIndex).CountOfLevels > level, "n.CountOfLevels > level");
+                    if (steered)
+                    {
+                        moved = SteerStep(vector, dstIdx, level, screen, ref currentNodeIndex, ref distance, ref nodeIds, ref rows);
+                        continue;
+                    }
+
                     // A node is evaluated once and the distance only falls, so a neighbor that the descent without the screen does not move to is never closer
                     // than a later current node: the screened descent, which may check or evaluate it again, does not move to it either.
                     ResolveEdgeIndexes(currentNodeIndex, level, screen, distance, ref nodeIds, ref indexes);
@@ -836,9 +852,45 @@ public unsafe partial class Hnsw
 
             indexes.Dispose(Llt.Allocator);
             nodeIds.Dispose(Llt.Allocator);
+            rows.Dispose(Llt.Allocator);
             nearestIndexes.Inner.Reverse();
             if (screen is not null)
                 screen.Descending = false;
+        }
+
+        // Moves to the neighbor at the level with the lowest steered distance below the current one; false when no neighbor is lower. The distances only fall,
+        // so the descent never returns to a node.
+        private unsafe bool SteerStep(ReadOnlySpan<byte> vector, int dstIdx, int level, CodeScreen screen, ref int currentNodeIndex, ref float distance,
+            ref NativeList<long> nodeIds, ref NativeList<nint> rows)
+        {
+            nodeIds.ResetAndCopyFrom(Llt.Allocator, GetDecodedNode(currentNodeIndex).Edges(level));
+            // PERF: The code rows of the neighbors start loading before the first estimate, so their cache misses overlap.
+            rows.ResetAndEnsureCapacity(Llt.Allocator, nodeIds.Count);
+            for (int i = 0; i < nodeIds.Count; i++)
+                rows.AddUnsafe((nint)GetCodeRowAndPrefetchIfSupported(nodeIds[i]));
+
+            long best = -1;
+            for (int i = 0; i < nodeIds.Count; i++)
+            {
+                float next = SteeredDistance(vector, dstIdx, nodeIds[i], (byte*)rows[i], screen);
+                if (next < distance)
+                {
+                    distance = next;
+                    best = nodeIds[i];
+                }
+            }
+
+            if (best < 0)
+                return false;
+            currentNodeIndex = GetNodeIndexById(best);
+            return true;
+        }
+
+        // The distance that the code row estimates; the exact distance when there is no estimate: the node has no row, or the query or the node has no direction.
+        private unsafe float SteeredDistance(ReadOnlySpan<byte> vector, int dstIdx, long nodeId, byte* row, CodeScreen screen)
+        {
+            double estimate = row != null ? screen.Estimate(new ReadOnlySpan<byte>(row, _codeRowBytes)) : double.NaN;
+            return double.IsNaN(estimate) ? Distance(vector, dstIdx, GetNodeIndexById(nodeId)) : (float)estimate;
         }
 
 
