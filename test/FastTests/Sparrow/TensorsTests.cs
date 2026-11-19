@@ -629,5 +629,61 @@ namespace FastTests.Sparrow
                 Assert.Equal(expected, values);
             }
         }
+
+        // Every int8 cosine path that the processor runs, the narrower ones included, matches the scalar one.
+        [RavenFact(RavenTestCategory.Core)]
+        public void EveryIntegerCosinePathMatchesScalar()
+        {
+            var paths = new List<Func<ReadOnlySpan<sbyte>, float, ReadOnlySpan<sbyte>, float, float>> { Functions.CosineSimilarity<sbyte, float> };
+            if (Avx512BW.IsSupported && Avx512F.IsSupported)
+                paths.Add(Functions.Vectorized512.CosineSimilarityIntegersAvx512);
+            if (AdvInstructionSet.X86.IsSupportedAvx256)
+                paths.Add(Functions.Vectorized256.CosineSimilarityIntegersAvx2);
+            if (AdvInstructionSet.Arm.IsSupported && Dp.IsSupported)
+                paths.Add(Functions.Vectorized128.CosineSimilarityIntegersNeon);
+            if (AdvInstructionSet.X86.IsSupportedSse || AdvInstructionSet.Arm.IsSupported)
+                paths.Add(Functions.Vectorized128.CosineSimilarityIntegers);
+
+            var random = new Random(3);
+            foreach (var length in new[] { 32, 33, 47, 48, 63, 64, 65, 384, 1031, 4096 })
+            {
+                var a = Enumerable.Range(0, length).Select(_ => (sbyte)random.Next(sbyte.MinValue, sbyte.MaxValue + 1)).ToArray();
+                var b = Enumerable.Range(0, length).Select(_ => (sbyte)random.Next(sbyte.MinValue, sbyte.MaxValue + 1)).ToArray();
+                var low = Enumerable.Repeat(sbyte.MinValue, length).ToArray();
+                var high = Enumerable.Repeat(sbyte.MaxValue, length).ToArray();
+                foreach (var (x, y) in new[] { (a, b), (low, low), (low, high), (high, a) })
+                {
+                    var expected = Functions.Serial.CosineSimilarity<sbyte, float>(x, 0.5f, y, 2f);
+                    Assert.All(paths, path => Assert.InRange(path(x, 0.5f, y, 2f), expected - Eps, expected + Eps));
+                }
+            }
+        }
+
+        // Every Hamming path that the processor runs matches the scalar one.
+        [RavenFact(RavenTestCategory.Core)]
+        public void EveryHammingPathMatchesScalar()
+        {
+            var paths = new List<Func<ReadOnlySpan<byte>, ReadOnlySpan<byte>, long>> { Functions.HammingBitDistance<byte>, Functions.Serial.HammingBitDistance };
+            if (AdvInstructionSet.Arm.IsSupported)
+                paths.Add(Functions.Vectorized128.HammingBitDistanceAdvSimd);
+            if (Sve.IsSupported)
+                paths.Add(Functions.Vectorized128.HammingBitDistanceSve);
+            if (Avx2.IsSupported)
+                paths.Add(Functions.Vectorized256.HammingBitDistanceAvx2);
+
+            var random = new Random(7);
+            foreach (var length in new[] { 1, 7, 8, 15, 16, 17, 24, 31, 32, 33, 40, 47, 48, 63, 192, 1031 })
+            {
+                var x = new byte[length];
+                var y = new byte[length];
+                random.NextBytes(x);
+                random.NextBytes(y);
+                foreach (var (a, b) in new[] { (x, y), (Enumerable.Repeat(byte.MaxValue, length).ToArray(), new byte[length]) })
+                {
+                    var expected = TensorPrimitives.HammingBitDistance<byte>(a, b);
+                    Assert.All(paths, path => Assert.Equal(expected, path(a, b)));
+                }
+            }
+        }
     }
 }

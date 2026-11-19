@@ -1,4 +1,5 @@
 using System;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
 using Sparrow;
@@ -8,189 +9,190 @@ namespace Corax.Querying.Matches.Meta
     internal static unsafe class MergeHelper
     {
         /// <summary>
-        /// dst and left *may* be the same thing; we can assume that dst is at least as large as the smallest of those
+        /// Writes the ids found in both sorted lists to dst and returns their count.
+        /// dst may be left; it holds at least as many ids as the shorter list.
         /// </summary>
         public static int And(Span<long> dst, Span<long> left, Span<long> right)
         {
             fixed (long* dstPtr = dst, leftPtr = left, rightPtr = right)
             {
-                return And(dstPtr, leftPtr, left.Length, rightPtr, right.Length);
+                if (left.Length <= right.Length)
+                    return And(dstPtr, leftPtr, left.Length, rightPtr, right.Length);
+
+                return And(dstPtr, rightPtr, right.Length, leftPtr, left.Length);
             }
         }
 
-        /// <summary>
-        ///  dst and left *may* be the same thing; we can assume that dst is at least as large as the smallest of those
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static int And(long* dst, long* left, int leftLength, long* right, int rightLength)
+        private static int And(long* dst, long* shorter, int shorterLength, long* longer, int longerLength)
         {
-            if (AdvInstructionSet.IsAcceleratedVector256)
-                return AndVectorized(dst, left, leftLength, right, rightLength);
+            if (AdvInstructionSet.IsAcceleratedVector128 == false || shorterLength == 0)
+                return AndScalar(dst, shorter, shorterLength, longer, longerLength);
 
-            return AndScalar(dst, left, leftLength, right, rightLength);
+            if (longerLength >= 2 * shorterLength)
+            {
+                // PERF: Storing every id costs less than mispredicting whether it was found, unless nearly all or nearly none are found.
+                double density = Density(longer, longerLength);
+                return dst != longer && density > 1.0 / 16 && density < 15.0 / 16
+                    ? AndWindows<StoreEvery>(dst, shorter, shorterLength, longer, longerLength)
+                    : AndWindows<StoreFound>(dst, shorter, shorterLength, longer, longerLength);
+            }
+
+            // PERF: The plain merge mispredicts about once per id without a match, so it wins when those are few against the matches.
+            double matches = shorterLength * Density(longer, longerLength);
+            if (shorterLength + longerLength - 2 * matches < matches / 4)
+                return AndScalar(dst, shorter, shorterLength, longer, longerLength);
+
+            return dst == longer
+                ? AndBlocks(dst, longer, longerLength, shorter, shorterLength)
+                : AndBlocks(dst, shorter, shorterLength, longer, longerLength);
         }
 
-        /// <summary>
-        /// Vector256 implementation of vectorized AND that works on both Intel/AMD and ARM.
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static int AndVectorized(long* dst, long* left, int leftLength, long* right, int rightLength)
+        private static double Density(long* ids, int length) => length / ((double)(ulong)(ids[length - 1] - ids[0]) + 1);
+
+        private static int AndBlocks(long* dst, long* x, int xLength, long* y, int yLength)
         {
-            long* smallerPtr, largerPtr;
-            long* smallerEndPtr, largerEndPtr;
+            long* d = dst;
+            long* xEnd = x + xLength, yEnd = y + yLength;
+            bool inPlace = dst == x;
 
-            bool applyVectorization;
-            if (leftLength < rightLength)
+            if (xLength >= 4 && yLength >= 4)
             {
-                smallerPtr = left;
-                smallerEndPtr = left + leftLength;
-                largerPtr = right;
-                largerEndPtr = right + rightLength;
-                applyVectorization = rightLength > Vector256<ulong>.Count && leftLength > 0;
-            }
-            else
-            {
-                smallerPtr = right;
-                smallerEndPtr = right + rightLength;
-                largerPtr = left;
-                largerEndPtr = left + leftLength;
-                applyVectorization = leftLength > Vector256<ulong>.Count && rightLength > 0;
-            }
+                // PERF: The block of x stays in registers until x moves on.
+                var xLow = Vector128.Load((ulong*)x);
+                var xHigh = Vector128.Load((ulong*)x + 2);
 
-            return AndVectorizedBlock(dst, applyVectorization, ref smallerPtr, smallerEndPtr, ref largerPtr, largerEndPtr);
-        }
-
-        /// <summary>
-        /// Intersect left[0..leftLength) with right[*rightPtr..*rightEndPtr), writing matches
-        /// to dst. Advances *rightPtr to its final position so the caller can track how far
-        /// the right array was consumed (used by TermMatch's block-by-block AND loop).
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static int And(long* dst, long* left, int leftLength, ref long* right, long* rightEnd)
-        {
-            int rightLength = (int)(rightEnd - right);
-
-            long* smallerPtr, largerPtr;
-            long* smallerEndPtr, largerEndPtr;
-            bool leftIsSmaller;
-            bool applyVectorization;
-
-            if (leftLength < rightLength)
-            {
-                smallerPtr = left;
-                smallerEndPtr = left + leftLength;
-                largerPtr = right;
-                largerEndPtr = rightEnd;
-                leftIsSmaller = true;
-                applyVectorization = rightLength > Vector256<ulong>.Count && leftLength > 0;
-            }
-            else
-            {
-                smallerPtr = right;
-                smallerEndPtr = rightEnd;
-                largerPtr = left;
-                largerEndPtr = left + leftLength;
-                leftIsSmaller = false;
-                applyVectorization = leftLength > Vector256<ulong>.Count && rightLength > 0;
-            }
-
-            int count = AndVectorizedBlock(dst, applyVectorization, ref smallerPtr, smallerEndPtr, ref largerPtr, largerEndPtr);
-
-            // Update right to its final position so the caller knows how far the
-            // input was consumed.
-            right = leftIsSmaller ? largerPtr : smallerPtr;
-            return count;
-        }
-
-        /// <summary>
-        /// Merges [smallerPtr, smallerEndPtr) with [largerPtr, largerEndPtr) into dst.
-        /// Advances smallerPtr and largerPtr to their final positions.
-        /// Returns the number of matches written.
-        /// Caller must ensure (smallerEndPtr - smallerPtr) &lt;= (largerEndPtr - largerPtr).
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static int AndVectorizedBlock(
-            long* dstPtr, bool applyVectorization,
-            ref long* smallerPtr, long* smallerEndPtr,
-            ref long* largerPtr, long* largerEndPtr)
-        {
-            long* dstStart = dstPtr;
-
-            if (applyVectorization)
-            {
                 while (true)
                 {
-                    // If the value to compare is bigger than the biggest element in the block, we advance the block.
-                    if ((ulong)*smallerPtr > (ulong)*(largerPtr + Vector256<ulong>.Count - 1))
+                    ulong x0 = xLow.GetElement(0), x1 = xLow.GetElement(1), x2 = xHigh.GetElement(0), x3 = xHigh.GetElement(1);
+                    ulong yMax = (ulong)y[3];
+
+                    // Every id of the block of x against every id of the block of y.
+                    var yLow = Vector128.Load((ulong*)y);
+                    var yHigh = Vector128.Load((ulong*)y + 2);
+                    var yLowSwapped = Vector128.Shuffle(yLow, Vector128.Create(1UL, 0));
+                    var yHighSwapped = Vector128.Shuffle(yHigh, Vector128.Create(1UL, 0));
+                    var lowFound = Vector128.Equals(xLow, yLow) | Vector128.Equals(xLow, yLowSwapped) | Vector128.Equals(xLow, yHigh) | Vector128.Equals(xLow, yHighSwapped);
+                    var highFound = Vector128.Equals(xHigh, yLow) | Vector128.Equals(xHigh, yLowSwapped) | Vector128.Equals(xHigh, yHigh) | Vector128.Equals(xHigh, yHighSwapped);
+
+                    // PERF: Every id is stored and the count advances only on a match, which costs less than branching on it.
+                    // dst is x or holds as many ids as x, so each write lands at or before the id it came from.
+                    *d = (long)x0;
+                    d += (long)(lowFound.GetElement(0) & 1);
+                    *d = (long)x1;
+                    d += (long)(lowFound.GetElement(1) & 1);
+                    *d = (long)x2;
+                    d += (long)(highFound.GetElement(0) & 1);
+                    *d = (long)x3;
+                    d += (long)(highFound.GetElement(1) & 1);
+
+                    // Moves past the block with the smaller last id, or past both when their last ids are equal.
+                    if (yMax <= x3)
+                        y += 4;
+                    if (x3 <= yMax)
                     {
-                        if (largerPtr + Vector256<ulong>.Count >= largerEndPtr)
+                        x += 4;
+                        if (xEnd - x < 4)
                             break;
 
-                        largerPtr += Vector256<ulong>.Count;
-                        continue;
+                        xLow = Vector128.Load((ulong*)x);
+                        xHigh = Vector128.Load((ulong*)x + 2);
                     }
-
-                    // If the value to compare is smaller than the smallest element in the block, we advance the scalar value.
-                    if ((ulong)*smallerPtr < (ulong)*largerPtr)
+                    else if (yEnd - y < 4)
                     {
-                        smallerPtr++;
-                        if (smallerPtr >= smallerEndPtr)
-                            break;
+                        // In place, the stores may have overwritten this block from d on, and the tail merge reads it again.
+                        if (inPlace)
+                        {
+                            if (d <= x)
+                                x[0] = (long)x0;
+                            if (d <= x + 1)
+                                x[1] = (long)x1;
+                            if (d <= x + 2)
+                                x[2] = (long)x2;
+                            if (d <= x + 3)
+                                x[3] = (long)x3;
+                        }
 
-                        continue;
+                        break;
                     }
 
-                    if (largerEndPtr - largerPtr < Vector256<ulong>.Count)
-                        break; // boundary guardian for vector load.
-
-                    Vector256<ulong> value = Vector256.Create((ulong)*smallerPtr);
-                    Vector256<ulong> blockValues = Vector256.Load((ulong*)largerPtr);
-
-                    // We are going to select which direction we are going to be moving forward.
-                    if (Vector256.EqualsAny(value, blockValues))
-                    {
-                        // We found the value, therefore, we need to store this value in the destination.
-                        *dstPtr = *smallerPtr;
-                        dstPtr++;
-                    }
-
-                    smallerPtr++;
-                    if (smallerPtr >= smallerEndPtr)
+                    if (yEnd - y < 4)
                         break;
                 }
             }
 
-            // The scalar version. This shouldn't cost much either way.
-            while (smallerPtr < smallerEndPtr && largerPtr < largerEndPtr)
-            {
-                ulong leftValue = (ulong)*smallerPtr;
-                ulong rightValue = (ulong)*largerPtr;
+            return (int)(d - dst) + AndScalar(d, x, (int)(xEnd - x), y, (int)(yEnd - y));
+        }
 
-                if (leftValue > rightValue)
+        private static int AndWindows<TStore>(long* dst, long* a, int aLength, long* b, int bLength) where TStore : struct
+        {
+            const int window = 16;
+            long* d = dst;
+            long* aEnd = a + aLength, bEnd = b + bLength;
+
+            if (aLength > 0 && bLength >= window)
+            {
+                // PERF: A stride of about sqrt(2 * window * bLength / aLength) balances the stride checks against the windows walked after the last stride.
+                int stride = Math.Max(window, (int)BitOperations.RoundUpToPowerOf2((uint)Math.Sqrt(2.0 * window * bLength / aLength)));
+                long* bLast = bEnd - window;
+
+                while (true)
                 {
-                    largerPtr++;
-                }
-                else if (leftValue < rightValue)
-                {
-                    smallerPtr++;
-                }
-                else
-                {
-                    *dstPtr = (long)leftValue;
-                    dstPtr++;
-                    smallerPtr++;
-                    largerPtr++;
+                    // Passes the windows of b below the id a stride at a time while a stride fits, then a window at a time.
+                    ulong id = (ulong)*a;
+                    if (id > (ulong)b[window - 1])
+                    {
+                        if (bLast - b >= stride && id > (ulong)b[stride - 1])
+                            b += stride;
+                        else if (bLast - b >= window)
+                            b += window;
+                        else if (b != bLast)
+                            b = bLast;
+                        else
+                            break;
+
+                        continue;
+                    }
+
+                    if (typeof(TStore) == typeof(StoreEvery))
+                    {
+                        // dst must not be b: storing every id would put ids into the windows that b does not hold.
+                        *d = (long)id;
+                        d += Contains16(b, id) ? 1 : 0;
+                    }
+                    else if (Contains16(b, id))
+                    {
+                        *d++ = (long)id;
+                    }
+
+                    a++;
+                    if (a == aEnd)
+                        break;
                 }
             }
 
-            return (int)(dstPtr - dstStart);
+            return (int)(d - dst) + AndScalar(d, a, (int)(aEnd - a), b, (int)(bEnd - b));
         }
 
-        /// <summary>
-        /// Scalar CPU fallback for And when Vector256 is not available.
-        /// dst and left *may* be the same thing, we can assume that dst is at least as large as the smallest of those
-        /// </summary>
+        private struct StoreEvery { }
+
+        private struct StoreFound { }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool Contains16(long* window, ulong id)
+        {
+            var value = Vector128.Create(id);
+            var ids = (ulong*)window;
+
+            // PERF: The compares are combined as a tree so they do not wait on each other.
+            var found = (Vector128.Equals(value, Vector128.Load(ids)) | Vector128.Equals(value, Vector128.Load(ids + 2)))
+                        | (Vector128.Equals(value, Vector128.Load(ids + 4)) | Vector128.Equals(value, Vector128.Load(ids + 6)))
+                        | (Vector128.Equals(value, Vector128.Load(ids + 8)) | Vector128.Equals(value, Vector128.Load(ids + 10)))
+                        | (Vector128.Equals(value, Vector128.Load(ids + 12)) | Vector128.Equals(value, Vector128.Load(ids + 14)));
+            return found != Vector128<ulong>.Zero;
+        }
+
+        // PERF: Skips tiered PGO: a profile gathered from the tails of the other kernels lays this merge out badly for dense lists.
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         private static int AndScalar(long* dst, long* left, int leftLength, long* right, int rightLength)
         {
             long* dstPtr = dst;
