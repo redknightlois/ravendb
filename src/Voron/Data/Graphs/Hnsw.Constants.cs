@@ -13,6 +13,8 @@ public partial class Hnsw
     public static readonly Slice VectorsIdByHashSlice;
     internal static readonly Slice HnswGlobalConfigSlice;
     internal static readonly Slice OptionsSlice;
+    internal static readonly Slice CodeParametersSlice;
+    internal static readonly Slice CodePagesSlice;
     
     static Hnsw()
     {
@@ -26,6 +28,8 @@ public partial class Hnsw
             Slice.From(ctx, "NodeIdToLocation", ByteStringType.Immutable, out NodeIdToLocationSlice);
             Slice.From(ctx, "NodesByVectorId", ByteStringType.Immutable, out NodesByVectorIdSlice);
             Slice.From(ctx, "Options", ByteStringType.Immutable, out OptionsSlice);
+            Slice.From(ctx, "CodeParameters", ByteStringType.Immutable, out CodeParametersSlice);
+            Slice.From(ctx, "CodePages", ByteStringType.Immutable, out CodePagesSlice);
             Slice.From(ctx, "Vector storage", ByteStringType.Immutable, out VectorContainerStorageSlice);
         }
     }
