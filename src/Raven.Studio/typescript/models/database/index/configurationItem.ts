@@ -51,7 +51,6 @@ class configurationItem {
         "Indexing.Corax.UnmanagedAllocationsBatchSizeLimitInMb",
         "Indexing.Corax.QueryPlanCache.MaxPlansPerQuery",
         "Indexing.Corax.QueryPlanCache.MaxDistinctQueries",
-        "Indexing.Corax.VectorSearch.CacheSizeInMb",
         "Indexing.Corax.VectorSearch.DefaultMinimumSimilarity",
         "Indexing.Corax.VectorSearch.DefaultNumberOfEdges",
         "Indexing.Corax.VectorSearch.DefaultNumberOfCandidatesForIndexing",
@@ -75,6 +74,7 @@ class configurationItem {
                 "Indexing.MergeFactor",
                 "Indexing.NumberOfLargeSegmentsToMergeInSingleBatch",
                 "Indexing.Querying.Corax.NullFirst",
+                "Indexing.Corax.VectorSearch.CacheSizeInMb",
          */
     ];
 

@@ -564,9 +564,9 @@ public partial class Hnsw
                 if (_codeParameters is not null || _carriesCodes == false)
                     return _codeParameters;
 
-                _codeParameters = _nodeCache?.CodeParameters;
+                _codeParameters = _cache?.CodeParameters;
                 if (_codeParameters is null && ReadCodeParameters() is { } read)
-                    _codeParameters = _nodeCache?.PublishCodeParameters(read) ?? read;
+                    _codeParameters = _cache?.PublishCodeParameters(read) ?? read;
 
                 return _codeParameters;
             }

@@ -10,10 +10,6 @@ using Xunit;
 
 namespace SlowTests.Corax.Vectors;
 
-// The HNSW node cache is rebuilt from the post-commit hook, which reads through the committed
-// write tx; on encrypted storage those pages were already encrypted in place for the journal.
-// Encrypted databases therefore run vector indexes cache-less: indexing must complete without
-// errors and queries must resolve from disk.
 public class VectorIndexOnEncryptedDatabase(ITestOutputHelper output) : RavenTestBase(output)
 {
     [RavenMultiplatformFact(RavenTestCategory.Corax | RavenTestCategory.Vector | RavenTestCategory.Encryption, RavenArchitecture.AllX64, LicenseRequired = true)]
