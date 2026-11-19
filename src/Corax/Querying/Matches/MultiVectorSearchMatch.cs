@@ -97,7 +97,9 @@ public struct MultiVectorSearchMatch : IPostFilterMatch
             }
         }
 
-        _scanningQuery = IndexSearcher.VectorSearchUtils.ShouldScan(_indexSearcher, _filterResults.ComputeCount(), _isExact, _filterQuery, _scanningThreshold, _numberOfCandidates);
+        // The searcher's SearchState of the field: the sub-queries below share it and the nodes it resolved.
+        var sharedSearchState = _indexSearcher.GetOrCreateVectorSearchState(_metadata.FieldName);
+        _scanningQuery = IndexSearcher.VectorSearchUtils.ShouldScan(_indexSearcher, _filterResults.ComputeCount(), _isExact, _filterQuery, _scanningThreshold, _numberOfCandidates, sharedSearchState.Options.CountOfVectors);
         if (_scanningQuery)
         {
             var hasNodes = IndexSearcher.VectorSearchUtils.TryConvertDocumentsIdsToNodesIds(_indexSearcher, _metadata, ref _filterResults, out _nodesIdsToScan);
@@ -112,10 +114,6 @@ public struct MultiVectorSearchMatch : IPostFilterMatch
                 return;
             }
         }
-
-        // Obtain the IndexSearcher-scoped SearchState for this field; sub-queries below reuse it
-        // so loaded node data (edges, vectors) is shared across them.
-        var sharedSearchState = _indexSearcher.GetOrCreateVectorSearchState(_metadata.FieldName);
 
         _isEmpty = sharedSearchState.IsEmpty || (_hasFilterResults && _filterResults.ComputeCount() == 0);
     }
@@ -169,7 +167,8 @@ public struct MultiVectorSearchMatch : IPostFilterMatch
             {
                 _ when _scanningQuery => Hnsw.ExactNearest(sharedSearchState, _numberOfCandidates, vector, _minimumMatch, nodesToScan: _nodesIdsToScan),
                 true => Hnsw.ExactNearest(sharedSearchState, _numberOfCandidates, vector, _minimumMatch, filter),
-                false => Hnsw.ApproximateNearest(sharedSearchState, _numberOfCandidates, vector, _minimumMatch, filter),
+                false => Hnsw.ApproximateNearest(sharedSearchState, _numberOfCandidates, vector, _minimumMatch, filter,
+                    filter is { } f ? IndexSearcher.VectorSearchUtils.FilterNodes(_indexSearcher, _metadata, f) : null),
             };
 
             if (i == 0)
@@ -242,12 +241,6 @@ public struct MultiVectorSearchMatch : IPostFilterMatch
 
         if (_sortByScore == false)
         {
-            if (_filterQuery != null)
-            {
-                ref var filterQuery = ref _filterQuery;
-                filterQuery.Score(matches, scores, boostFactor);
-            }
-
             for (int i = 0; i < matches.Length; ++i)
             {
                 var match = matches[i];
