@@ -53,15 +53,13 @@ public partial class Hnsw
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static bool VectorNormalizationRequired(in Options options) =>
-        options.SimilarityMethod == SimilarityMethod.CosineSimilaritySingles
-        && options.Version >= Global.Constants.Graphs.HnswVersion.SinglesWithL2Norm;
+        options.SimilarityMethod == SimilarityMethod.CosineSimilaritySingles;
 
     /// <summary>
     /// Allocates a scope-owned buffer, normalizes <paramref name="vector"/> into it, and
     /// rebinds <paramref name="vector"/> to the new buffer. Returns <c>false</c> without
     /// allocating when no normalization is needed (similarity method that does not consume
-    /// the normalized layout, on-disk version that predates it, or input already in storage
-    /// form). Throws when the input is not a raw
+    /// the normalized layout, or input already in storage form). Throws when the input is not a raw
     /// float[dims] payload of the expected dimensionality.
     /// </summary>
     internal static bool TryNormalizeQueryVector(in Options options, ByteStringContext allocator, ref Memory<byte> vector,

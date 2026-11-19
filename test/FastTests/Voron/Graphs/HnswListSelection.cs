@@ -83,11 +83,13 @@ public class HnswListSelection(ITestOutputHelper output) : StorageTest(output)
         {
             for (long nodeId = 1; nodeId <= state.Options.CountOfVectors; nodeId++)
             {
-                ref var node = ref state.GetDecodedNode(state.GetNodeIndexById(nodeId));
-                for (int level = 0; level < node.EdgesPerLevel.Count; level++)
+                var index = state.GetNodeIndexById(nodeId);
+                for (int level = 0; level < state.GetDecodedNode(index).EdgesPerLevel.Count; level++)
                 {
-                    int edges = node.EdgesPerLevel[level].Count;
-                    Assert.True(edges <= state.Options.MaxEdgesAtLevel(level), $"the list of {nodeId} at level {level} holds {edges} edges");
+                    var edges = state.GetDecodedNode(index).EdgesPerLevel[level].ToSpan().ToArray();
+                    // A base-layer list also keeps the edges that are the last in-link of their target from an older node.
+                    var lastOlderInLinks = level == 0 ? edges.Count(to => nodeId < to && state.GetNodeByIndex(state.GetNodeIndexById(to)).OlderInLinks == 1) : 0;
+                    Assert.True(edges.Length <= state.Options.MaxEdgesAtLevel(level) + lastOlderInLinks, $"the list of {nodeId} at level {level} holds {edges.Length} edges");
                 }
             }
         }
