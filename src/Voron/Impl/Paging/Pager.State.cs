@@ -4,6 +4,8 @@ using System;
 using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Numerics;
 using System.Threading;
 using System.Runtime.CompilerServices;
 using Sparrow;
@@ -29,7 +31,8 @@ public unsafe partial class Pager
             WriteAddress = writeMemory;
             TotalAllocatedSize = totalAllocatedSize;
             Handle = handle;
-            _pageSize = pageSize;
+            Debug.Assert(BitOperations.IsPow2(pageSize), "BitOperations.IsPow2(pageSize)");
+            _pageSizeShift = BitOperations.Log2((uint)pageSize);
 
             Pager = pager;
             WeakSelf = new WeakReference<State>(this, trackResurrection: true);
@@ -39,14 +42,15 @@ public unsafe partial class Pager
 
         public readonly byte* ReadAddress;
         public readonly byte* WriteAddress;
-        public long NumberOfAllocatedPages => TotalAllocatedSize / _pageSize;
+        // PERF: Read on every page access; the page size is a power of two, so a shift replaces the division.
+        public long NumberOfAllocatedPages => TotalAllocatedSize >> _pageSizeShift;
         public long TotalAllocatedSize;
         public long TotalPhysicalSpace;
 
         public bool Disposed;
 
         public void* Handle;
-        private readonly int _pageSize;
+        private readonly int _pageSizeShift;
 
         public void Dispose()
         {
